@@ -1,0 +1,156 @@
+.graph-task-view {
+  padding: 8px;
+  font-size: var(--font-ui-small);
+}
+
+.graph-task-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.graph-task-btn {
+  font-size: var(--font-ui-small);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.graph-task-warn {
+  background: var(--background-modifier-error-hover, rgba(255, 200, 80, 0.15));
+  border-left: 3px solid var(--color-orange, #e0a030);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.graph-task-empty {
+  padding: 12px;
+  color: var(--text-muted);
+}
+
+.graph-task-issues {
+  margin-bottom: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.graph-task-issues summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--color-orange, #d08a20);
+}
+
+.graph-task-issues ul {
+  margin: 6px 0 6px 14px;
+  padding: 0;
+  font-size: 11px;
+}
+
+.graph-task-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.graph-task-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: default;
+  user-select: none;
+}
+
+.graph-task-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.graph-task-caret {
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.graph-task-caret-empty {
+  cursor: default;
+}
+
+.graph-task-type-icon {
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.graph-task-label {
+  flex: 1;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-task-label:hover {
+  text-decoration: underline;
+}
+
+.graph-task-badges {
+  display: inline-flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.graph-task-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.graph-task-badge.status-active {
+  background: var(--color-blue, #3b82f6);
+  color: white;
+}
+.graph-task-badge.status-done {
+  background: var(--color-green, #22a060);
+  color: white;
+}
+.graph-task-badge.status-blocked {
+  background: var(--color-red, #e03030);
+  color: white;
+}
+.graph-task-badge.status-pending {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.graph-task-badge.status-cancelled {
+  background: var(--background-modifier-border);
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+.graph-task-badge.phase-type {
+  background: var(--color-purple, #8a4fd0);
+  color: white;
+}
+.graph-task-badge.results {
+  background: var(--color-cyan, #0ca7b0);
+  color: white;
+}
+.graph-task-badge.issues {
+  background: var(--color-orange, #d08a20);
+  color: white;
+}
+
+.graph-task-btn-icon {
+  display: none;
+}

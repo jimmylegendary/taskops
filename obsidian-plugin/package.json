@@ -1,0 +1,27 @@
+{
+  "name": "taskops-obsidian",
+  "version": "0.1.0",
+  "description": "Obsidian plugin MVP for the md-first TaskOps protocol.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke-parse.mjs",
+    "smoke:canvas": "node scripts/export-fs-canvas.mjs /home/jimmy/.openclaw/workspace/taskops/examples/taskops-canonical-minimal-v1",
+    "test": "npm run smoke && npm run smoke:canvas"
+  },
+  "keywords": [
+    "obsidian",
+    "taskops",
+    "md-first"
+  ],
+  "author": "TaskOps",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "0.20.0",
+    "obsidian": "^1.4.11",
+    "typescript": "^5.3.3"
+  }
+}
