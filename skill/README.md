@@ -15,8 +15,8 @@ Derived canvas/views are not.
 
 ## Current surfaces
 
-- `../cli/` — installable `taskops` CLI for `init / validate / summary / show / decompose / refactor`
-- `../obsidian-plugin/` — Obsidian explorer + derived canvas export for TaskOps v1 projects
+- `../cli/` — installable `taskops` CLI for `init / validate / summary / show / decompose / refactor` plus git-backed vault setup/sync
+- `../obsidian-plugin/` — Obsidian explorer + derived canvas export for TaskOps v1 projects, with desktop git auto-sync support when configured
 - `scripts/graph_task.py` — legacy graph-task prototype kept only as migration/source material
 
 ## Main working references
@@ -33,6 +33,13 @@ Prefer the CLI for current validation and summaries:
 ```bash
 taskops validate <project-dir>
 taskops summary <project-dir>
+```
+
+For a git-backed Obsidian vault workflow:
+
+```bash
+taskops vault-init <vault-dir> --repo-url <github-repo-url> --branch main --auto-sync true
+taskops git-sync <vault-dir> --message "Sync vault changes"
 ```
 
 Only use the legacy Python script when the work is explicitly about old graph-task compatibility or migration.

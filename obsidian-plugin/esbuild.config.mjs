@@ -5,14 +5,14 @@ const prod = process.argv[2] === 'production';
 const ctx = await esbuild.context({
   entryPoints: ['src/main.ts'],
   bundle: true,
-  external: ['obsidian', 'electron'],
+  external: ['obsidian', 'electron', 'node:child_process', 'node:fs', 'node:path'],
   format: 'cjs',
   target: 'es2020',
   logLevel: 'info',
   outfile: 'main.js',
   sourcemap: prod ? false : 'inline',
   minify: prod,
-  platform: 'browser',
+  platform: 'node',
   treeShaking: true,
 });
 

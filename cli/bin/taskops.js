@@ -3,9 +3,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   discoverProjects,
+  gitStatus,
   initProject,
+  initVaultRepo,
   parseProject,
   summarizeProject,
+  syncVaultRepo,
+  watchAndSyncVault,
   writeSummary,
   writeVersionFromSpec,
 } from '../lib-taskops.js';
@@ -14,12 +18,16 @@ function usage() {
   console.log(`TaskOps CLI
 
 Usage:
-  taskops init <dir> --id <project-id> --title <title> --objective <objective>
+  taskops init <dir> --id <project-id> --title <title> --objective <objective> [--language <code>]
+  taskops vault-init <vault-dir> [--repo-url <url>] [--branch <branch>] [--auto-sync true|false] [--language <code>] [--debounce-ms <ms>] [--commit-message <msg>]
   taskops validate <path>
   taskops summary <path> [--write]
   taskops show <path> [--json]
   taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
+  taskops git-status <vault-dir>
+  taskops git-sync <vault-dir> [--message <msg>] [--branch <branch>]
+  taskops watch-sync <vault-dir> [--message <msg>] [--debounce-ms <ms>] [--branch <branch>]
 `);
 }
 
@@ -57,6 +65,13 @@ function parseOne(pathArg) {
   return parseProject(projects[0]);
 }
 
+function parseBool(value, fallback = true) {
+  if (value == null || value === true) return fallback;
+  if (String(value) === 'true') return true;
+  if (String(value) === 'false') return false;
+  fail(`Expected boolean value, got: ${value}`);
+}
+
 const { positional, flags } = parseArgs(process.argv.slice(2));
 const cmd = positional[0];
 
@@ -73,8 +88,24 @@ try {
       id: requireFlag(flags, 'id'),
       title: requireFlag(flags, 'title'),
       objective: requireFlag(flags, 'objective'),
+      language: flags.language && flags.language !== true ? String(flags.language) : null,
     });
     console.log(root);
+    process.exit(0);
+  }
+
+  if (cmd === 'vault-init') {
+    const dir = positional[1];
+    if (!dir) fail('Missing vault-init target directory');
+    const result = initVaultRepo(dir, {
+      repoUrl: flags['repo-url'] && flags['repo-url'] !== true ? String(flags['repo-url']) : null,
+      branch: flags.branch && flags.branch !== true ? String(flags.branch) : 'main',
+      autoSync: parseBool(flags['auto-sync'], true),
+      language: flags.language && flags.language !== true ? String(flags.language) : 'en',
+      debounceMs: flags['debounce-ms'] ? Number(flags['debounce-ms']) : 5000,
+      commitMessage: flags['commit-message'] && flags['commit-message'] !== true ? String(flags['commit-message']) : 'TaskOps auto-sync',
+    });
+    console.log(JSON.stringify(result, null, 2));
     process.exit(0);
   }
 
@@ -145,6 +176,37 @@ try {
     const out = writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedesVersionId: supersedes });
     console.log(out);
     process.exit(0);
+  }
+
+  if (cmd === 'git-status') {
+    const dir = positional[1];
+    if (!dir) fail('Missing git-status vault dir');
+    console.log(JSON.stringify(gitStatus(dir, { branch: flags.branch ? String(flags.branch) : null }), null, 2));
+    process.exit(0);
+  }
+
+  if (cmd === 'git-sync') {
+    const dir = positional[1];
+    if (!dir) fail('Missing git-sync vault dir');
+    const result = syncVaultRepo(dir, {
+      message: flags.message && flags.message !== true ? String(flags.message) : 'TaskOps sync',
+      branch: flags.branch ? String(flags.branch) : null,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(0);
+  }
+
+  if (cmd === 'watch-sync') {
+    const dir = positional[1];
+    if (!dir) fail('Missing watch-sync vault dir');
+    watchAndSyncVault(dir, {
+      message: flags.message && flags.message !== true ? String(flags.message) : 'TaskOps watch-sync',
+      debounceMs: flags['debounce-ms'] ? Number(flags['debounce-ms']) : 5000,
+      branch: flags.branch ? String(flags.branch) : null,
+    });
+    console.log(`Watching ${resolve(dir)} for TaskOps git auto-sync changes...`);
+    process.stdin.resume();
+    await new Promise(() => {});
   }
 
   fail(`Unknown command: ${cmd}`);

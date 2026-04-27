@@ -58,6 +58,13 @@ npm test
 # examples
 taskops validate ../examples/taskops-canonical-minimal-v1
 taskops summary ../examples/taskops-canonical-minimal-v1
+
+# scaffold with language-aware default values (field names stay English)
+taskops init ../tmp/demo-taskops \
+  --id demo-taskops \
+  --title "Demo TaskOps" \
+  --objective "Ship the MVP" \
+  --language ko
 ```
 
 ## Release model

@@ -4,3 +4,5 @@ dist/
 .obsidian/
 .DS_Store
 *.log
+projects/
+examples/taskops-canonical-minimal-v1/canvases/

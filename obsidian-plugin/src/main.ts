@@ -2,8 +2,11 @@ import { Plugin, WorkspaceLeaf, Notice } from 'obsidian';
 import { GraphTaskView, VIEW_TYPE_GRAPH_TASK } from './view';
 import { exportActiveProjectCanvases, exportAllProjectCanvases } from './canvas-export';
 import { scanProjects } from './parser';
+import { VaultGitSyncManager } from './git-sync';
 
 export default class GraphTaskPlugin extends Plugin {
+  private gitSyncManager: VaultGitSyncManager | null = null;
+
   async onload(): Promise<void> {
     this.registerView(
       VIEW_TYPE_GRAPH_TASK,
@@ -46,12 +49,27 @@ export default class GraphTaskPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: 'sync-vault-git-now',
+      name: 'Sync vault git now',
+      callback: async () => {
+        if (!this.gitSyncManager) {
+          new Notice('TaskOps: vault git sync is unavailable in this environment');
+          return;
+        }
+        await this.gitSyncManager.syncManual();
+      },
+    });
+
     // Refresh when frontmatter changes so the tree stays in sync.
     this.registerEvent(
       this.app.metadataCache.on('changed', () => {
         this.refreshAllViews(false);
       }),
     );
+
+    this.gitSyncManager = new VaultGitSyncManager(this.app);
+    for (const ref of this.gitSyncManager.attach()) this.registerEvent(ref);
 
     // Auto-open on first load so first-time users see the tree.
     this.app.workspace.onLayoutReady(() => {

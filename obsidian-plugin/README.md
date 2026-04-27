@@ -19,6 +19,7 @@ Tree-first Obsidian client for the canonical md-first TaskOps v1 model.
 - includes a refresh command / button
 - exports derived canvas views for task-groups, snapshots, and run graph
 - shows a validation issue panel instead of failing silently when structure is broken
+- can debounce-sync a git-backed vault when `.taskops/taskops-sync.json` is present
 
 ## Current scope
 This MVP is intentionally read-only.
@@ -30,6 +31,7 @@ Included:
 - refresh the parsed state
 - export deterministic `task-groups / snapshots / run` canvas views
 - surface validation issues
+- desktop-only git auto-sync command + background debounce sync for repo-backed vaults
 
 Not included yet:
 - create or edit entities from the plugin
@@ -61,6 +63,24 @@ Expected output includes:
 - `runNode: run-node-verify`
 - canvas file paths under `taskops/examples/taskops-canonical-minimal-v1/canvases/`
 - final parse line: `OK: projects=1 taskGroups=2 versions=2 tasks=5 snapshots=1 runNodes=2 runEdges=1`
+
+## Git-backed vault auto-sync
+If your vault is also your GitHub-backed work repo, initialize it first with the CLI:
+
+```bash
+taskops vault-init <vault-dir> --repo-url <github-repo-url> --branch main --auto-sync true
+```
+
+That creates `.taskops/taskops-sync.json` in the vault root. You can also include a `language` field there (for example `"language": "ko"`). When the desktop plugin is enabled:
+- vault file create/modify/delete/rename events are debounced
+- changed files are committed automatically
+- the plugin rebases/pulls then pushes to `origin/<branch>`
+- you can also run `TaskOps Explorer: Sync vault git now`
+
+Notes:
+- desktop only
+- local git `user.name` and `user.email` must already be configured
+- by default workspace-layout churn files like `.obsidian/workspace*` are ignored
 
 ## Load into Obsidian
 ### Option A — use the canonical example directly

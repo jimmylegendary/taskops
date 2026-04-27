@@ -42,9 +42,21 @@ taskops validate <path>
 taskops summary <path>
 taskops show <path> --json
 taskops init <dir> --id <id> --title <title> --objective <objective>
+taskops vault-init <vault-dir> --repo-url <url> --branch <branch> --auto-sync true
+taskops git-status <vault-dir>
+taskops git-sync <vault-dir> --message <message>
+taskops watch-sync <vault-dir> --debounce-ms 5000
 taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
 ```
+
+## Git-backed vault rule
+
+If the user is working in an Obsidian vault that should stay aligned with a GitHub repo, prefer:
+
+1. `taskops vault-init ... --repo-url ... --auto-sync true`
+2. keep `.taskops/taskops-sync.json` in the vault root
+3. use the desktop Obsidian plugin or `taskops watch-sync`/`taskops git-sync` so local vault edits are pushed back to GitHub instead of drifting
 
 ## Legacy note
 
