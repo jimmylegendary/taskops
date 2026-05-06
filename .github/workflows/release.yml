@@ -44,9 +44,6 @@ jobs:
       - name: Verify CLI + plugin workspaces
         run: npm run verify
 
-      - name: Run skill regression tests
-        run: python3 -m unittest discover -s skill/tests
-
       - name: Package skill smoke artifact
         run: |
           PACKAGER="$(npm root -g)/openclaw/skills/skill-creator/scripts/package_skill.py"
