@@ -9,6 +9,7 @@ npm-distributed CLI for canonical md-first TaskOps projects.
 - `taskops validate <path>`
 - `taskops summary <path> [--write]`
 - `taskops show <path> [--json]`
+- `taskops classify-runnable <project-dir> <task-id> [--json]`
 - `taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>`
 - `taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>`
 - `taskops git-status <vault-dir>`
@@ -26,7 +27,7 @@ Or from this monorepo during development:
 ```bash
 cd cli
 npm pack
-npm install -g ./taskops-0.2.0.tgz
+npm install -g ./taskops-0.3.0.tgz
 ```
 
 ## Smoke test
@@ -85,6 +86,23 @@ taskops git-status ~/vaults/my-taskops-vault
 taskops git-sync ~/vaults/my-taskops-vault --message "Sync vault changes"
 taskops watch-sync ~/vaults/my-taskops-vault --debounce-ms 5000
 ```
+
+## Run readiness
+
+Use `classify-runnable` before moving a task into execution:
+
+```bash
+taskops classify-runnable ./my-project task-design --json
+```
+
+Readiness values:
+
+- `runnable` → send to run graph
+- `needs_decomposition` → split into a child task group/version
+- `needs_exploration` → create an exploratory run to learn enough for the next honest decomposition
+- `blocked` → resolve the blocker first
+
+`needs_exploration` is for unknown-unknowns: search, trial, debug, prototype, or retrospective work whose output is understanding rather than direct completion.
 
 If the Obsidian plugin is installed on desktop, it will also look for `.taskops/taskops-sync.json` and debounce-push vault changes automatically.
 

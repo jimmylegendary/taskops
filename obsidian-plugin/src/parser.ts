@@ -30,6 +30,8 @@ export interface ScanResult {
 
 const REQUIRED_COMMON = ['taskOpsVersion', 'entityType', 'id'] as const;
 const STATUS_VALUES = new Set(['pending', 'active', 'done', 'blocked', 'cancelled']);
+const RUN_READINESS_VALUES = new Set(['runnable', 'needs_decomposition', 'needs_exploration', 'blocked']);
+const UNDERSTANDING_LEVEL_VALUES = new Set(['known', 'partial', 'unknown']);
 
 function getFrontmatter(app: App, file: TFile): Record<string, unknown> | null {
   const cache = app.metadataCache.getFileCache(file);
@@ -87,6 +89,14 @@ function commonIssues(fm: Record<string, unknown>, expectedType: EntityType, exp
   const status = fm.status;
   if (status !== undefined && status !== null && status !== '' && !STATUS_VALUES.has(String(status))) {
     issues.push(`invalid status '${String(status)}'`);
+  }
+  const runReadiness = fm.runReadiness;
+  if (runReadiness !== undefined && runReadiness !== null && runReadiness !== '' && !RUN_READINESS_VALUES.has(String(runReadiness))) {
+    issues.push(`invalid runReadiness '${String(runReadiness)}'`);
+  }
+  const understandingLevel = fm.understandingLevel;
+  if (understandingLevel !== undefined && understandingLevel !== null && understandingLevel !== '' && !UNDERSTANDING_LEVEL_VALUES.has(String(understandingLevel))) {
+    issues.push(`invalid understandingLevel '${String(understandingLevel)}'`);
   }
   return issues;
 }
@@ -167,6 +177,8 @@ function buildTaskGroupVersion(app: App, versionFolder: TFolder, projectId: stri
     task.extras = {
       order: typeof task.frontmatter.order === 'number' ? Number(task.frontmatter.order) : Number.MAX_SAFE_INTEGER,
       childTaskGroupId: typeof task.frontmatter.childTaskGroupId === 'string' ? task.frontmatter.childTaskGroupId : null,
+      runReadiness: typeof task.frontmatter.runReadiness === 'string' ? task.frontmatter.runReadiness : null,
+      understandingLevel: typeof task.frontmatter.understandingLevel === 'string' ? task.frontmatter.understandingLevel : null,
     };
     version.children.push(task);
   }

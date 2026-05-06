@@ -20,8 +20,10 @@ That older path is legacy source material only.
 
 ## Read these first
 
-- `../docs/CORE_MODEL.md`
-- `../docs/MD_FIRST_FORMAT.md`
+- `references/core-model.md`
+- `references/md-first-format.md`
+- `references/decomposition-protocol.md`
+- `references/run-readiness.md`
 - `../examples/taskops-canonical-minimal-v1/`
 
 ## Current operating model
@@ -32,6 +34,15 @@ That older path is legacy source material only.
 - Snapshots materialize selected version paths
 - Markdown is canonical; canvas/views are derived
 - Shared status vocabulary: `pending | active | done | blocked | cancelled`
+- Before execution, classify task run readiness as `runnable | needs_decomposition | needs_exploration | blocked`
+- Use `needs_exploration` when the objective is meaningful but the system does not yet know enough to decompose honestly; exploratory runs may search, try, debug, prototype, and reflect to learn constraints for the next graph update
+
+## Decomposition discipline
+
+- Start with a one-line objective.
+- Decompose depth 1 by default.
+- Do not turn decomposition into an activity checklist.
+- A task can be large but not decomposable yet; if the missing knowledge blocks honest decomposition, create an exploratory run and feed the result back into the task graph.
 
 ## Preferred CLI
 
@@ -41,6 +52,7 @@ Use the npm CLI first:
 taskops validate <path>
 taskops summary <path>
 taskops show <path> --json
+taskops classify-runnable <project-dir> <task-id> --json
 taskops init <dir> --id <id> --title <title> --objective <objective>
 taskops vault-init <vault-dir> --repo-url <url> --branch <branch> --auto-sync true
 taskops git-status <vault-dir>

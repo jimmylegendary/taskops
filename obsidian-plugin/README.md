@@ -14,7 +14,7 @@ Tree-first Obsidian client for the canonical md-first TaskOps v1 model.
   - Run
     - RunNode
     - RunEdge
-- shows compact badges for status, selection, child task-group links, and validation issues
+- shows compact badges for status, run readiness, understanding level, selection, child task-group links, and validation issues
 - lets you click an item to open the canonical markdown file
 - includes a refresh command / button
 - exports derived canvas views for task-groups, snapshots, and run graph
@@ -30,7 +30,7 @@ Included:
 - open canonical markdown files
 - refresh the parsed state
 - export deterministic `task-groups / snapshots / run` canvas views
-- surface validation issues
+- surface validation issues, including invalid `runReadiness` / `understandingLevel` values
 - desktop-only git auto-sync command + background debounce sync for repo-backed vaults
 
 Not included yet:

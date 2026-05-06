@@ -11,6 +11,7 @@ completionCriteria: At least one intentional acquisition path exists and can be 
 order: 2
 childTaskGroupId: tg-acquire-users
 createdAt: 2026-04-27T00:00:00Z
+status: active
 ---
 
 # Acquire users

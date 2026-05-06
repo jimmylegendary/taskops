@@ -43,6 +43,20 @@ Initial recommendation:
 5. build/publish CLI to npm
 6. build plugin bundle and attach release assets
 
+Current repo wiring: `.github/workflows/release.yml` now provides the first transparent release skeleton for verify + artifact build + GitHub Release asset upload, with npm/ClawHub publish hooks intentionally kept explicit and lightly gated.
+The npm publish job now downloads and publishes the already-built CLI tarball artifact, so npm publication follows the same assembled release payload instead of taking a separate source-path shortcut.
+The repo-level `npm run verify` path now also checks shared version sync across the root package, CLI package, Obsidian plugin package, and plugin manifest so the single-version release assumption fails early if those surfaces drift.
+For local preflight, `npm run release:preflight` now wraps the full release rehearsal (`build:release` plus the artifact-based npm dry-run), while `npm run build:release` still assembles the same three release artifacts under `dist/release/v<version>/` after running the full verify gate.
+The GitHub Actions release workflow now delegates artifact assembly to that same script, reducing drift between local preflight and tagged-release behavior.
+That script also accepts `TASKOPS_RELEASE_VERSION`; when CI passes the tag-derived version through, the script checks it against `package.json` and fails early on tag/package mismatch instead of silently building inconsistent release artifacts.
+The same script now also asserts that the final release directory contains exactly the expected three versioned files (CLI tarball, plugin zip, skill package), so partial/extra artifact output fails before upload.
+It now checks for required local commands up front as well (`node`, `npm`, `python3`, `zip`) so preflight failures are immediate and readable instead of surfacing later as half-built releases.
+The artifact-based npm publish path also has a local smoke confirmation now: `npm run smoke:publish-artifact` dry-runs `npm publish` against `dist/release/v<version>/taskops-<version>.tgz`, which gives a low-risk sanity check before relying on the workflow job to publish that same artifact.
+The GitHub Actions release workflow now calls the same `npm run release:preflight` wrapper used locally, so the CI path performs the full release rehearsal (artifact build plus tarball publish dry-run) before the real publish job is allowed to use the downloaded artifact.
+When `CLAWHUB_TOKEN` is configured, the workflow also installs the ClawHub CLI, logs in non-interactively, and publishes the repo's `skill/` folder as the matching TaskOps skill version with `--no-input`, replacing the earlier placeholder job.
+Automated publishing expects two repository secrets: `NPM_TOKEN` for the npm tarball publish job and `CLAWHUB_TOKEN` for the ClawHub skill publish job.
+A manual `workflow_dispatch` run still executes verify/build/release-asset assembly, but the actual publish jobs remain gated to `v*` tag refs so ad-hoc rehearsals cannot publish by accident.
+
 ## Important implementation note
 
 The first release pipeline should optimize for explicitness over cleverness.

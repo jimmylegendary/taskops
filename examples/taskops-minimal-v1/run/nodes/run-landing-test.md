@@ -1,8 +1,8 @@
 ---
-taskOpsVersion: 1
+taskOpsVersion: v1
 entityType: runNode
 id: run-landing-test
-runId: run-main
+runId: run-alpha-v1
 type: experiment
 title: Run a landing-page conversion test
 status: active

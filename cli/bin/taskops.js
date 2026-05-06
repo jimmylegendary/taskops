@@ -2,7 +2,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  classifyTaskReadiness,
   discoverProjects,
+  findTaskById,
   gitStatus,
   initProject,
   initVaultRepo,
@@ -23,6 +25,7 @@ Usage:
   taskops validate <path>
   taskops summary <path> [--write]
   taskops show <path> [--json]
+  taskops classify-runnable <project-dir> <task-id> [--json]
   taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
   taskops git-status <vault-dir>
@@ -163,6 +166,24 @@ try {
     };
     if (flags.json) console.log(JSON.stringify(plain, null, 2));
     else process.stdout.write(summarizeProject(parsed));
+    process.exit(parsed.errors.length === 0 ? 0 : 1);
+  }
+
+  if (cmd === 'classify-runnable') {
+    const pathArg = positional[1];
+    const taskId = positional[2];
+    if (!pathArg) fail('Missing classify-runnable project dir');
+    if (!taskId) fail('Missing classify-runnable task id');
+    const parsed = parseOne(pathArg);
+    const task = findTaskById(parsed, taskId);
+    const classification = classifyTaskReadiness(task);
+    const payload = { projectId: parsed.project.id, task, classification };
+    if (flags.json) console.log(JSON.stringify(payload, null, 2));
+    else {
+      console.log(`${task.id}: ${classification.runReadiness}`);
+      console.log(`reason: ${classification.reason}`);
+      console.log(`next_action: ${classification.nextAction}`);
+    }
     process.exit(parsed.errors.length === 0 ? 0 : 1);
   }
 

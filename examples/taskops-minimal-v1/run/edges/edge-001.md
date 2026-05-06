@@ -1,8 +1,8 @@
 ---
-taskOpsVersion: 1
+taskOpsVersion: v1
 entityType: runEdge
 id: edge-001
-runId: run-main
+runId: run-alpha-v1
 fromRunNodeId: run-design-research
 toRunNodeId: run-landing-test
 edgeType: informs

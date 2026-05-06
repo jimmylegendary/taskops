@@ -1,8 +1,8 @@
 ---
-taskOpsVersion: 1
+taskOpsVersion: v1
 entityType: runNode
 id: run-design-research
-runId: run-main
+runId: run-alpha-v1
 type: research
 title: Research UX and market positioning together
 status: done

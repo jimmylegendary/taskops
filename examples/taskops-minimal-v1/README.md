@@ -1,13 +1,13 @@
-# TaskOps minimal v1 example
+# TaskOps richer v1 fixture
 
-This is the first concrete `TaskOps` v1-shaped canonical example.
+This folder is a richer, non-canonical companion fixture for TaskOps v1.
+
+Use `../taskops-canonical-minimal-v1/` as the main docs reference.
+Use this folder when you want a slightly denser example with more task groups, snapshots, and run nodes.
 
 It demonstrates:
-- one project root
-- one root task group with a selected version
-- one child task group with its own selected version
-- one explicit snapshot that materializes the chosen version path
-- one separate run graph that records execution reality
-- one clearly non-canonical `derived/` area
-
-Use this folder as the reference fixture for the `docs/MD_FIRST_FORMAT.md` layout.
+- a broader root decomposition than the canonical minimal fixture
+- multiple child task groups under the same project
+- more than one snapshot note
+- a denser run graph with extra nodes/edges
+- the same canonical vs derived split as the main v1 layout

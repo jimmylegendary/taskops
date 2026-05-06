@@ -11,7 +11,7 @@ This monorepo contains:
 - `cli/` — installable `taskops` npm CLI
 - `obsidian-plugin/` — Obsidian explorer + derived canvas export
 - `docs/` — canonical design docs
-- `examples/` — shared fixtures and dogfood projects, including `examples/taskops-canonical-minimal-v1/` for the v1 model
+- `examples/` — shared fixtures and dogfood projects, including `examples/taskops-canonical-minimal-v1/` as the docs-reference v1 fixture and `examples/taskops-minimal-v1/` as a richer companion fixture
 
 ## Current status
 
@@ -27,6 +27,8 @@ The v1 working contract is now:
 
 - **Task graph** exists to guarantee good decomposition.
 - **Run graph** exists to represent execution reality.
+- **Run readiness** classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, or `blocked` before execution.
+- **Exploratory runs** are first-class feedback loops for unknown-unknowns: run/search/try/error to learn enough to decompose honestly.
 - **Task groups** are versioned decomposition units.
 - **Refactor** creates a new task-group version rather than mutating decomposition history away.
 - **Snapshots** represent selected version paths, not every possible combinatorial version state.
@@ -46,7 +48,11 @@ The v1 working contract is now:
 See:
 - `docs/CORE_MODEL.md`
 - `docs/MD_FIRST_FORMAT.md`
+- `docs/DECOMPOSITION_PROTOCOL.md`
+- `docs/RUN_READINESS.md`
 - `examples/taskops-canonical-minimal-v1/`
+
+For a slightly denser non-canonical companion fixture, see `examples/taskops-minimal-v1/`.
 
 ## CLI quick start
 
@@ -58,6 +64,7 @@ npm test
 # examples
 taskops validate ../examples/taskops-canonical-minimal-v1
 taskops summary ../examples/taskops-canonical-minimal-v1
+taskops classify-runnable ../examples/taskops-canonical-minimal-v1 task-run
 
 # scaffold with language-aware default values (field names stay English)
 taskops init ../tmp/demo-taskops \
@@ -76,6 +83,24 @@ One GitHub repo, one shared release source of truth, three distribution channels
 - Obsidian plugin → GitHub Release assets
 
 All three should still participate in GitHub Releases so the repo remains the canonical release timeline.
+
+Local preflight:
+
+```bash
+npm run verify
+npm run release:preflight
+```
+
+If you want the individual steps, use:
+
+```bash
+npm run build:release
+npm run smoke:publish-artifact
+```
+
+That emits the versioned CLI tarball, plugin zip, and skill package under `dist/release/v<version>/`, then dry-runs npm publication against the built CLI tarball artifact. The GitHub Actions release workflow now uses that same `release:preflight` path before its npm publish job consumes the tarball, and the ClawHub publish job logs in with `CLAWHUB_TOKEN` to publish the checked-out `skill/` folder at the matching version in non-interactive mode.
+
+For automated publishes, configure `NPM_TOKEN` for the CLI job and `CLAWHUB_TOKEN` for the skill job. A manual `workflow_dispatch` run still exercises verify/build/release-asset assembly, but the actual npm/ClawHub publish jobs remain tag-gated on `v*` refs.
 
 ## Migration note
 

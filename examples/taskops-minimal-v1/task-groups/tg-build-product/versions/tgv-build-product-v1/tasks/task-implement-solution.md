@@ -10,6 +10,7 @@ responsibility: Engineering implementation ownership
 completionCriteria: The designed product can actually be used end to end
 order: 2
 createdAt: 2026-04-27T00:00:00Z
+status: active
 ---
 
 # Implement the solution

@@ -10,6 +10,7 @@ responsibility: Channel selection ownership
 completionCriteria: At least one viable channel and audience hypothesis is defined
 order: 1
 createdAt: 2026-04-27T00:00:00Z
+status: active
 ---
 
 # Find an acquisition channel

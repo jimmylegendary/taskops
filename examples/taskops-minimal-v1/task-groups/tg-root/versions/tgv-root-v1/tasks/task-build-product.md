@@ -11,6 +11,7 @@ completionCriteria: A usable product exists with the intended core value loop im
 order: 1
 childTaskGroupId: tg-build-product
 createdAt: 2026-04-27T00:00:00Z
+status: active
 ---
 
 # Build the product

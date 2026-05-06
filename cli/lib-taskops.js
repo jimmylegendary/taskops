@@ -3,6 +3,8 @@ import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'cancelled'];
+export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
+export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
 export const ENTITY_TYPES = ['project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge'];
 export const TASKOPS_SYNC_DIR = '.taskops';
 export const TASKOPS_SYNC_CONFIG = 'taskops-sync.json';
@@ -51,6 +53,8 @@ const LOCALIZED_TEXT = {
       missingRequiredField: (field) => `missing required field '${field}'`,
       entityTypeMustBe: (type) => `entityType must be '${type}'`,
       invalidStatus: (status) => `invalid status '${status}'`,
+      invalidRunReadiness: (value) => `invalid runReadiness '${value}'`,
+      invalidUnderstandingLevel: (value) => `invalid understandingLevel '${value}'`,
       missingIndexMd: 'missing index.md',
       idMustMatchFolderName: (name) => `id must match folder name '${name}'`,
       idMustMatchFileName: (name) => `id must match file name '${name}'`,
@@ -103,6 +107,8 @@ const LOCALIZED_TEXT = {
       missingRequiredField: (field) => `필수 frontmatter field '${field}'가 없음`,
       entityTypeMustBe: (type) => `entityType은 '${type}'여야 함`,
       invalidStatus: (status) => `유효하지 않은 status '${status}'`,
+      invalidRunReadiness: (value) => `유효하지 않은 runReadiness '${value}'`,
+      invalidUnderstandingLevel: (value) => `유효하지 않은 understandingLevel '${value}'`,
       missingIndexMd: 'index.md가 없음',
       idMustMatchFolderName: (name) => `id는 folder name '${name}'와 일치해야 함`,
       idMustMatchFileName: (name) => `id는 file name '${name}'와 일치해야 함`,
@@ -363,6 +369,8 @@ export function parseProject(projectDir) {
         if (task.taskGroupId !== tg.id) errors.push(withPath(taskPath, t.taskGroupIdMustBe(tg.id)));
         if (task.taskGroupVersionId !== v.id) errors.push(withPath(taskPath, t.taskGroupVersionIdMustBe(v.id)));
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
+        if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
+        if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
         const key = `${v.id}:${task.id}`;
         if (tasks.has(key)) errors.push(withPath(taskPath, t.duplicateTaskKey(key)));
         const taskRecord = { ...task, path: taskPath };
@@ -439,6 +447,66 @@ export function parseProject(projectDir) {
   return { projectDir, project, taskGroups, versions, tasks, snapshots, runNodes, runEdges, errors, warnings, language };
 }
 
+export function classifyTaskReadiness(task) {
+  if (!task || typeof task !== 'object') throw new Error('Task is required');
+  if (task.runReadiness && RUN_READINESS_VALUES.includes(task.runReadiness)) {
+    return {
+      taskId: task.id,
+      runReadiness: task.runReadiness,
+      source: 'explicit',
+      reason: task.runReadinessReason || 'Task declares runReadiness explicitly.',
+      nextAction: nextActionForRunReadiness(task.runReadiness),
+    };
+  }
+
+  const unknowns = Array.isArray(task.unknowns) ? task.unknowns : (task.unknowns ? [task.unknowns] : []);
+  const understanding = task.understandingLevel ? String(task.understandingLevel) : '';
+  const explorationNeeded = task.explorationNeeded === true || task.needsExploration === true;
+  if (task.status === 'blocked') {
+    return { taskId: task.id, runReadiness: 'blocked', source: 'heuristic', reason: 'Task status is blocked.', nextAction: nextActionForRunReadiness('blocked') };
+  }
+  if (explorationNeeded || understanding === 'unknown' || unknowns.length > 0) {
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_exploration',
+      source: 'heuristic',
+      reason: task.nextLearningGoal || 'The task has unknowns or insufficient understanding; run an exploratory/discovery pass before decomposing.',
+      nextAction: nextActionForRunReadiness('needs_exploration'),
+    };
+  }
+  if (task.childTaskGroupId) {
+    return { taskId: task.id, runReadiness: 'needs_decomposition', source: 'heuristic', reason: `Task points at child task group '${task.childTaskGroupId}'.`, nextAction: nextActionForRunReadiness('needs_decomposition') };
+  }
+  const hasObjective = typeof task.objective === 'string' && task.objective.trim().length > 0;
+  const hasResponsibility = typeof task.responsibility === 'string' && task.responsibility.trim().length > 0;
+  const hasCompletion = typeof task.completionCriteria === 'string' && task.completionCriteria.trim().length > 0;
+  if (hasObjective && hasResponsibility && hasCompletion && understanding !== 'partial') {
+    return { taskId: task.id, runReadiness: 'runnable', source: 'heuristic', reason: 'Objective, responsibility, and completionCriteria are present with no declared unknowns.', nextAction: nextActionForRunReadiness('runnable') };
+  }
+  return {
+    taskId: task.id,
+    runReadiness: 'needs_decomposition',
+    source: 'heuristic',
+    reason: 'The task is not blocked or unknown, but it lacks enough single-responsibility run criteria.',
+    nextAction: nextActionForRunReadiness('needs_decomposition'),
+  };
+}
+
+function nextActionForRunReadiness(runReadiness) {
+  if (runReadiness === 'runnable') return 'send_to_run_graph';
+  if (runReadiness === 'needs_decomposition') return 'decompose_task_group';
+  if (runReadiness === 'needs_exploration') return 'create_exploratory_run';
+  if (runReadiness === 'blocked') return 'resolve_blocker';
+  return 'review_task';
+}
+
+export function findTaskById(parsed, taskId) {
+  const matches = [...parsed.tasks.values()].filter((task) => task.id === taskId);
+  if (matches.length === 0) throw new Error(`Task not found: ${taskId}`);
+  if (matches.length > 1) throw new Error(`Task id '${taskId}' is ambiguous across selected versions; use unique task ids or inspect with taskops show --json`);
+  return matches[0];
+}
+
 export function summarizeProject(parsed) {
   const language = parsed.language || resolveLanguage(parsed.projectDir);
   const t = localeBundle(language).summary;
@@ -450,6 +518,7 @@ export function summarizeProject(parsed) {
   const runNodes = [...parsed.runNodes.values()];
   const runEdges = [...parsed.runEdges.values()];
   const countsByStatus = STATUS_VALUES.map((status) => [status, tasks.filter((t) => t.status === status).length]);
+  const countsByReadiness = RUN_READINESS_VALUES.map((value) => [value, tasks.filter((task) => classifyTaskReadiness(task).runReadiness === value).length]);
   const activeSnapshot = project.activeSnapshotId ? parsed.snapshots.get(project.activeSnapshotId) : null;
   const lines = [
     `# ${project.title || project.id}`,
@@ -469,6 +538,9 @@ export function summarizeProject(parsed) {
     `## ${SUMMARY_LABELS.taskStatusCounts}`,
     ...countsByStatus.map(([status, count]) => `- ${status}: ${count}`),
     '',
+    '## Run readiness counts',
+    ...countsByReadiness.map(([value, count]) => `- ${value}: ${count}`),
+    '',
     `## ${SUMMARY_LABELS.taskGroups}`,
   ];
   for (const tg of taskGroups.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
@@ -476,7 +548,8 @@ export function summarizeProject(parsed) {
     for (const version of tg.versions.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
       lines.push(`  - ${t.version} ${version.id}${version.selected === true ? ` [${t.selectedTag}]` : ''}: ${version.summary}`);
       for (const task of version.tasks.sort((a,b)=>(a.order??0)-(b.order??0))) {
-        lines.push(`    - ${t.task} ${task.id} [${task.status}]${task.childTaskGroupId ? ` -> ${task.childTaskGroupId}` : ''}: ${task.title}`);
+        const readiness = classifyTaskReadiness(task).runReadiness;
+        lines.push(`    - ${t.task} ${task.id} [${task.status}; ${readiness}]${task.childTaskGroupId ? ` -> ${task.childTaskGroupId}` : ''}: ${task.title}`);
       }
     }
   }
@@ -781,7 +854,10 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    if (task.childTaskGroupId) fm.childTaskGroupId = task.childTaskGroupId;
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId']) {
+      if (task[key] !== undefined && task[key] !== null) fm[key] = task[key];
+    }
+    if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');
   });
   return versionDir;

@@ -1,10 +1,15 @@
 #!/usr/bin/env node
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const cli = join(new URL('..', import.meta.url).pathname, 'bin', 'taskops.js');
+const here = dirname(fileURLToPath(import.meta.url));
+const cli = join(here, '..', 'bin', 'taskops.js');
+const repoRoot = join(here, '..', '..');
+const canonicalExampleDir = join(repoRoot, 'examples', 'taskops-canonical-minimal-v1');
+const richerExampleDir = join(repoRoot, 'examples', 'taskops-minimal-v1');
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-smoke-'));
 const projectDir = join(tempRoot, 'demo-project');
 const vaultDir = join(tempRoot, 'vault');
@@ -42,16 +47,39 @@ writeFileSync(specPath, JSON.stringify({
       objective: 'Do alpha',
       responsibility: 'Own alpha',
       completionCriteria: 'Alpha done',
-      status: 'active'
+      status: 'active',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Smoke fixture has objective, responsibility, and completion criteria.',
+      understandingLevel: 'known'
+    },
+    {
+      id: 'task-discovery',
+      title: 'Discovery task',
+      objective: 'Understand an unknown API before decomposing implementation',
+      responsibility: 'Learn enough constraints to make the next decomposition honest',
+      completionCriteria: 'Exploratory notes list learned facts, failed approaches, remaining unknowns, and next task candidates',
+      status: 'pending',
+      runReadiness: 'needs_exploration',
+      runReadinessReason: 'The task contains unknown unknowns that cannot be decomposed yet.',
+      understandingLevel: 'partial',
+      unknowns: ['API retry behavior'],
+      nextLearningGoal: 'Run a minimal API trial and record constraints.',
+      order: 2
     }
   ]
 }, null, 2));
 run(['decompose', projectDir, '--task-group-id', 'tg-root', '--spec', specPath]);
 run(['validate', projectDir]);
 const summary = run(['summary', projectDir]).stdout;
-if (!summary.includes('Demo Project') || !summary.includes('task-alpha') || !summary.includes('- Project objective: Smoke test the TaskOps CLI') || !summary.includes('## Selected version') || !summary.includes('초기 루트 분해')) {
+if (!summary.includes('Demo Project') || !summary.includes('task-alpha') || !summary.includes('task-discovery [pending; needs_exploration]') || !summary.includes('- Project objective: Smoke test the TaskOps CLI') || !summary.includes('## Selected version') || !summary.includes('초기 루트 분해')) {
   console.error('Unexpected summary output');
   console.error(summary);
+  process.exit(1);
+}
+const classification = JSON.parse(run(['classify-runnable', projectDir, 'task-discovery', '--json']).stdout);
+if (classification.classification.runReadiness !== 'needs_exploration' || classification.classification.nextAction !== 'create_exploratory_run') {
+  console.error('classify-runnable did not preserve explicit exploratory readiness');
+  console.error(classification);
   process.exit(1);
 }
 run(['show', projectDir, '--json']);
@@ -60,6 +88,19 @@ const summaryFile = readFileSync(join(projectDir, 'summary.md'), 'utf8');
 if (!summaryFile.includes('## Task groups')) {
   console.error('summary.md missing expected content');
   process.exit(1);
+}
+
+for (const [label, exampleDir, expectedSnippet] of [
+  ['canonical example', canonicalExampleDir, '# TaskOps canonical minimal v1 example'],
+  ['richer example', richerExampleDir, '# TaskOps richer v1 fixture']
+]) {
+  run(['validate', exampleDir]);
+  const exampleSummary = run(['summary', exampleDir]).stdout;
+  if (!exampleSummary.includes(expectedSnippet)) {
+    console.error(`Unexpected summary output for ${label}`);
+    console.error(exampleSummary);
+    process.exit(1);
+  }
 }
 
 run(['vault-init', vaultDir, '--branch', 'main', '--language', 'ko']);

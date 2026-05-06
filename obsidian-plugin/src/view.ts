@@ -20,6 +20,8 @@ function badgeText(entity: Entity): string[] {
   const badges = [entity.status];
   if (entity.type === 'taskGroupVersion' && entity.frontmatter.selected === true) badges.push('selected');
   if (entity.type === 'versionSnapshot' && typeof entity.extras?.selectedCount === 'number') badges.push(`${entity.extras.selectedCount} selections`);
+  if (entity.type === 'task' && typeof entity.frontmatter.runReadiness === 'string') badges.push(String(entity.frontmatter.runReadiness));
+  if (entity.type === 'task' && typeof entity.frontmatter.understandingLevel === 'string') badges.push(`understanding ${entity.frontmatter.understandingLevel}`);
   if (entity.type === 'task' && typeof entity.frontmatter.childTaskGroupId === 'string') badges.push(`child ${entity.frontmatter.childTaskGroupId}`);
   if (entity.type === 'runNode' && typeof entity.frontmatter.type === 'string') badges.push(String(entity.frontmatter.type));
   if (entity.type === 'runEdge' && typeof entity.frontmatter.edgeType === 'string') badges.push(String(entity.frontmatter.edgeType));

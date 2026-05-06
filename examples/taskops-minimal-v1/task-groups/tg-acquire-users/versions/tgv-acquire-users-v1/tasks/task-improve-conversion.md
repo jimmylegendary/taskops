@@ -10,6 +10,7 @@ responsibility: Conversion path ownership
 completionCriteria: A concrete activation path exists with identifiable improvement points
 order: 2
 createdAt: 2026-04-27T00:00:00Z
+status: pending
 ---
 
 # Improve conversion
