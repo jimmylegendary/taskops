@@ -119,7 +119,7 @@ jobs:
   publish-cli-to-npm:
     runs-on: ubuntu-latest
     needs: build-release-assets
-    if: startsWith(github.ref, 'refs/tags/v') && secrets.NPM_TOKEN != ''
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -142,14 +142,19 @@ jobs:
           path: dist/release/v${{ steps.version.outputs.version }}
 
       - name: Publish CLI package tarball
-        run: npm publish dist/release/v${{ steps.version.outputs.version }}/taskops-${{ steps.version.outputs.version }}.tgz --access public
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "NPM_TOKEN is not configured; skipping npm publish."
+            exit 0
+          fi
+          npm publish dist/release/v${{ steps.version.outputs.version }}/taskops-${{ steps.version.outputs.version }}.tgz --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-skill-to-clawhub:
     runs-on: ubuntu-latest
     needs: build-release-assets
-    if: startsWith(github.ref, 'refs/tags/v') && secrets.CLAWHUB_TOKEN != ''
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -171,14 +176,22 @@ jobs:
           echo "Using version: ${VERSION}"
 
       - name: Log in to ClawHub
-        run: clawhub login --token "$CLAWHUB_TOKEN" --no-browser
+        run: |
+          if [ -z "${CLAWHUB_TOKEN}" ]; then
+            echo "CLAWHUB_TOKEN is not configured; skipping ClawHub publish."
+            echo "skip_clawhub=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          clawhub login --token "$CLAWHUB_TOKEN" --no-browser
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
 
       - name: Validate ClawHub auth
+        if: env.skip_clawhub != 'true'
         run: clawhub whoami
 
       - name: Publish TaskOps skill
+        if: env.skip_clawhub != 'true'
         run: |
           clawhub publish skill \
             --slug taskops \
