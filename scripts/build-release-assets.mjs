@@ -57,9 +57,9 @@ for (const cmd of ['node', 'npm', 'python3', 'zip']) {
 
 const npmRoot = spawn('npm', ['root', '-g'], { capture: true }).stdout.trim();
 const packager = join(npmRoot, 'openclaw', 'skills', 'skill-creator', 'scripts', 'package_skill.py');
-if (!existsSync(packager)) {
-  console.error(`Missing skill packager at ${packager}`);
-  process.exit(1);
+const hasOpenClawPackager = existsSync(packager);
+if (!hasOpenClawPackager) {
+  console.warn(`OpenClaw skill packager not found at ${packager}; falling back to a plain .skill zip archive.`);
 }
 
 rmSync(distDir, { recursive: true, force: true });
@@ -71,7 +71,11 @@ spawn('npm', ['run', 'build'], { cwd: join(repoRoot, 'obsidian-plugin') });
 spawn('zip', ['-j', outputPath(`taskops-obsidian-v${version}.zip`), 'main.js', 'manifest.json', 'styles.css'], {
   cwd: join(repoRoot, 'obsidian-plugin')
 });
-spawn('python3', [packager, 'skill', distDir]);
+if (hasOpenClawPackager) {
+  spawn('python3', [packager, 'skill', distDir]);
+} else {
+  spawn('zip', ['-r', outputPath(`taskops-skill-v${version}.skill`), 'skill']);
+}
 const skillAsset = readdirSync(distDir).find((name) => name.endsWith('.skill'));
 if (!skillAsset) {
   console.error('Skill packager did not produce a .skill artifact');
