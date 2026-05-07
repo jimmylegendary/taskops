@@ -6,6 +6,7 @@ import { exportAllProjectCanvases, exportActiveProjectCanvases } from './canvas-
 export const VIEW_TYPE_GRAPH_TASK = 'graph-task-explorer';
 
 const TYPE_ICONS: Record<Entity['type'], string> = {
+  work: 'briefcase',
   project: 'folder-tree',
   taskGroup: 'list-tree',
   taskGroupVersion: 'git-branch-plus',
@@ -14,6 +15,7 @@ const TYPE_ICONS: Record<Entity['type'], string> = {
   run: 'workflow',
   runNode: 'circle-dot',
   runEdge: 'waypoints',
+  eow: 'flag',
 };
 
 function badgeText(entity: Entity): string[] {
@@ -24,6 +26,9 @@ function badgeText(entity: Entity): string[] {
   if (entity.type === 'task' && typeof entity.frontmatter.understandingLevel === 'string') badges.push(`understanding ${entity.frontmatter.understandingLevel}`);
   if (entity.type === 'task' && typeof entity.frontmatter.childTaskGroupId === 'string') badges.push(`child ${entity.frontmatter.childTaskGroupId}`);
   if (entity.type === 'runNode' && typeof entity.frontmatter.type === 'string') badges.push(String(entity.frontmatter.type));
+  if (entity.type === 'runNode' && entity.status === 'waiting' && typeof entity.frontmatter.delegateeRef === 'string') badges.push(`waiting ${entity.frontmatter.delegateeRef}`);
+  if (entity.type === 'eow' && typeof entity.frontmatter.graphType === 'string') badges.push(`EoW ${entity.frontmatter.graphType}`);
+  if (entity.type === 'eow' && typeof entity.frontmatter.attachedToId === 'string') badges.push(`→ ${entity.frontmatter.attachedToId}`);
   if (entity.type === 'runEdge' && typeof entity.frontmatter.edgeType === 'string') badges.push(String(entity.frontmatter.edgeType));
   return badges;
 }
@@ -66,8 +71,8 @@ export class GraphTaskView extends ItemView {
 
     if (projects.length === 0) {
       const empty = container.createEl('div', { cls: 'graph-task-empty' });
-      empty.createEl('p', { text: 'No TaskOps projects found in this vault.' });
-      empty.createEl('p', { text: 'A project is any folder containing an index.md with frontmatter entityType: project.' });
+      empty.createEl('p', { text: 'No TaskOps work found in this vault.' });
+      empty.createEl('p', { text: 'A work is any folder containing an index.md with frontmatter entityType: work. Legacy entityType: project is still readable.' });
       return;
     }
 

@@ -12,8 +12,12 @@ runReadiness: runnable
 runReadinessReason: Objective, responsibility, and completion criteria define one checkable run.
 understandingLevel: known
 order: 2
+runRefs:
+  - runId: run-alpha-v1
+    runNodeId: run-node-verify
+    role: verification
 createdAt: 2026-04-27T03:20:00+09:00
-status: active
+status: done
 ---
 
 # Verify example reachability

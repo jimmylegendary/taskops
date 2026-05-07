@@ -1,0 +1,56 @@
+{
+  "nodes": [
+    {
+      "id": "work-project-alpha-v1-index-md",
+      "type": "file",
+      "file": "index.md",
+      "x": 0,
+      "y": 0,
+      "width": 320,
+      "height": 100,
+      "color": "#94A3B8"
+    },
+    {
+      "id": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "type": "file",
+      "file": "task-groups/tg-design/versions/tgv-design-v1/index.md",
+      "x": 420,
+      "y": 320,
+      "width": 260,
+      "height": 84,
+      "color": "#60A5FA"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/index.md",
+      "x": 780,
+      "y": 320,
+      "width": 260,
+      "height": 84,
+      "color": "#60A5FA"
+    },
+    {
+      "id": "versionSnapshot-snapshot-alpha-v1-snapshots-snapshot-alpha-v1-md",
+      "type": "file",
+      "file": "snapshots/snapshot-alpha-v1.md",
+      "x": 0,
+      "y": 140,
+      "width": 260,
+      "height": 84,
+      "color": "#8B5CF6"
+    }
+  ],
+  "edges": [
+    {
+      "id": "work-project-alpha-v1-index-md--versionSnapshot-snapshot-alpha-v1-snapshots-snapshot-alpha-v1-md",
+      "fromNode": "work-project-alpha-v1-index-md",
+      "toNode": "versionSnapshot-snapshot-alpha-v1-snapshots-snapshot-alpha-v1-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#8B5CF6",
+      "label": "snapshot"
+    }
+  ]
+}

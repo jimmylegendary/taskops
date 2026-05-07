@@ -1,6 +1,7 @@
 # Run Readiness
 
 TaskOps classifies every task node before it enters execution.
+Execution happens in independent run graphs under `runs/<run-id>/` and should remain bidirectionally traceable to the source task when the run originates from a task.
 
 ## Values
 
@@ -52,6 +53,8 @@ Required exploratory run output:
 
 The task cannot progress until an external dependency, missing input, permission, or decision is resolved.
 
+If the dependency has been intentionally handed to a human, another AI, an agent, or an external system, represent that in the run graph as a delegated waiting node rather than hiding it inside a vague blocker.
+
 ## Recommended task frontmatter
 
 ```yaml
@@ -84,3 +87,25 @@ The command returns the current readiness, reason, and next action:
 - `decompose_task_group`
 - `create_exploratory_run`
 - `resolve_blocker`
+
+## Delegated waiting in the run graph
+
+Delegation is execution truth, not decomposition truth.
+
+When a runnable/exploratory task requires someone else to produce an output, create a run node like:
+
+```yaml
+entityType: runNode
+type: delegate
+status: waiting
+delegateeType: human|ai|agent|system
+delegateeRef: jimmy
+request: The concrete ask.
+expectedOutput: The exact output needed before downstream execution continues.
+requestedAt: 2026-05-08T04:45:00+09:00
+timeoutAt: 2026-05-10T04:45:00+09:00
+sourceTaskId: task-user-constraints
+sourceTaskGroupVersionId: tgv-root-v1
+```
+
+Downstream run paths should not continue until the delegated node is resolved, cancelled, or timed out into an explicit follow-up.

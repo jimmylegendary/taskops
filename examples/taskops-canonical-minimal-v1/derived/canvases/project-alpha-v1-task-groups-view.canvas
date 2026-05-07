@@ -1,0 +1,276 @@
+{
+  "nodes": [
+    {
+      "id": "work-project-alpha-v1-index-md",
+      "type": "file",
+      "file": "index.md",
+      "x": 0,
+      "y": 0,
+      "width": 320,
+      "height": 100,
+      "color": "#94A3B8"
+    },
+    {
+      "id": "taskGroup-tg-design-task-groups-tg-design-index-md",
+      "type": "file",
+      "file": "task-groups/tg-design/index.md",
+      "x": 0,
+      "y": 220,
+      "width": 280,
+      "height": 92,
+      "color": "#F59E0B"
+    },
+    {
+      "id": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "type": "file",
+      "file": "task-groups/tg-design/versions/tgv-design-v1/index.md",
+      "x": 0,
+      "y": 370,
+      "width": 260,
+      "height": 84,
+      "color": "#60A5FA"
+    },
+    {
+      "id": "task-task-model-task-groups-tg-design-versions-tgv-design-v1-tasks-task-model-md",
+      "type": "file",
+      "file": "task-groups/tg-design/versions/tgv-design-v1/tasks/task-model.md",
+      "x": 0,
+      "y": 510,
+      "width": 240,
+      "height": 78,
+      "color": "#10B981"
+    },
+    {
+      "id": "task-task-verify-example-task-groups-tg-design-versions-tgv-design-v1-tasks-task-verify-example-md",
+      "type": "file",
+      "file": "task-groups/tg-design/versions/tgv-design-v1/tasks/task-verify-example.md",
+      "x": 0,
+      "y": 614,
+      "width": 240,
+      "height": 78,
+      "color": "#10B981"
+    },
+    {
+      "id": "eow-eow-task-model-task-groups-tg-design-versions-tgv-design-v1-eow-eow-task-model-md",
+      "type": "file",
+      "file": "task-groups/tg-design/versions/tgv-design-v1/eow/eow-task-model.md",
+      "x": 0,
+      "y": 718,
+      "width": 200,
+      "height": 70,
+      "color": "#EF4444"
+    },
+    {
+      "id": "eow-eow-task-verify-example-task-groups-tg-design-versions-tgv-design-v1-eow-eow-task-verify-example-md",
+      "type": "file",
+      "file": "task-groups/tg-design/versions/tgv-design-v1/eow/eow-task-verify-example.md",
+      "x": 0,
+      "y": 822,
+      "width": 200,
+      "height": 70,
+      "color": "#EF4444"
+    },
+    {
+      "id": "taskGroup-tg-root-task-groups-tg-root-index-md",
+      "type": "file",
+      "file": "task-groups/tg-root/index.md",
+      "x": 920,
+      "y": 220,
+      "width": 280,
+      "height": 92,
+      "color": "#F59E0B"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/index.md",
+      "x": 920,
+      "y": 370,
+      "width": 260,
+      "height": 84,
+      "color": "#60A5FA"
+    },
+    {
+      "id": "task-task-design-task-groups-tg-root-versions-tgv-root-v1-tasks-task-design-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/tasks/task-design.md",
+      "x": 920,
+      "y": 510,
+      "width": 240,
+      "height": 78,
+      "color": "#10B981"
+    },
+    {
+      "id": "task-task-run-task-groups-tg-root-versions-tgv-root-v1-tasks-task-run-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/tasks/task-run.md",
+      "x": 920,
+      "y": 614,
+      "width": 240,
+      "height": 78,
+      "color": "#10B981"
+    },
+    {
+      "id": "task-task-structure-task-groups-tg-root-versions-tgv-root-v1-tasks-task-structure-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/tasks/task-structure.md",
+      "x": 920,
+      "y": 718,
+      "width": 240,
+      "height": 78,
+      "color": "#10B981"
+    },
+    {
+      "id": "eow-eow-task-run-task-groups-tg-root-versions-tgv-root-v1-eow-eow-task-run-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-run.md",
+      "x": 920,
+      "y": 822,
+      "width": 200,
+      "height": 70,
+      "color": "#EF4444"
+    },
+    {
+      "id": "eow-eow-task-structure-task-groups-tg-root-versions-tgv-root-v1-eow-eow-task-structure-md",
+      "type": "file",
+      "file": "task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-structure.md",
+      "x": 920,
+      "y": 926,
+      "width": 200,
+      "height": 70,
+      "color": "#EF4444"
+    }
+  ],
+  "edges": [
+    {
+      "id": "work-project-alpha-v1-index-md--taskGroup-tg-design-task-groups-tg-design-index-md",
+      "fromNode": "work-project-alpha-v1-index-md",
+      "toNode": "taskGroup-tg-design-task-groups-tg-design-index-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#F59E0B",
+      "label": "taskGroup"
+    },
+    {
+      "id": "taskGroup-tg-design-task-groups-tg-design-index-md--taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "fromNode": "taskGroup-tg-design-task-groups-tg-design-index-md",
+      "toNode": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#60A5FA",
+      "label": "selected"
+    },
+    {
+      "id": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md--task-task-model-task-groups-tg-design-versions-tgv-design-v1-tasks-task-model-md",
+      "fromNode": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "toNode": "task-task-model-task-groups-tg-design-versions-tgv-design-v1-tasks-task-model-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "task"
+    },
+    {
+      "id": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md--task-task-verify-example-task-groups-tg-design-versions-tgv-design-v1-tasks-task-verify-example-md",
+      "fromNode": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "toNode": "task-task-verify-example-task-groups-tg-design-versions-tgv-design-v1-tasks-task-verify-example-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "task"
+    },
+    {
+      "id": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md--eow-eow-task-model-task-groups-tg-design-versions-tgv-design-v1-eow-eow-task-model-md",
+      "fromNode": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "toNode": "eow-eow-task-model-task-groups-tg-design-versions-tgv-design-v1-eow-eow-task-model-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "EoW -> task-model"
+    },
+    {
+      "id": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md--eow-eow-task-verify-example-task-groups-tg-design-versions-tgv-design-v1-eow-eow-task-verify-example-md",
+      "fromNode": "taskGroupVersion-tgv-design-v1-task-groups-tg-design-versions-tgv-design-v1-index-md",
+      "toNode": "eow-eow-task-verify-example-task-groups-tg-design-versions-tgv-design-v1-eow-eow-task-verify-example-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "EoW -> task-verify-example"
+    },
+    {
+      "id": "work-project-alpha-v1-index-md--taskGroup-tg-root-task-groups-tg-root-index-md",
+      "fromNode": "work-project-alpha-v1-index-md",
+      "toNode": "taskGroup-tg-root-task-groups-tg-root-index-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#F59E0B",
+      "label": "taskGroup"
+    },
+    {
+      "id": "taskGroup-tg-root-task-groups-tg-root-index-md--taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "fromNode": "taskGroup-tg-root-task-groups-tg-root-index-md",
+      "toNode": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#60A5FA",
+      "label": "selected"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md--task-task-design-task-groups-tg-root-versions-tgv-root-v1-tasks-task-design-md",
+      "fromNode": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "toNode": "task-task-design-task-groups-tg-root-versions-tgv-root-v1-tasks-task-design-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#2563EB",
+      "label": "task"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md--task-task-run-task-groups-tg-root-versions-tgv-root-v1-tasks-task-run-md",
+      "fromNode": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "toNode": "task-task-run-task-groups-tg-root-versions-tgv-root-v1-tasks-task-run-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#2563EB",
+      "label": "task"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md--task-task-structure-task-groups-tg-root-versions-tgv-root-v1-tasks-task-structure-md",
+      "fromNode": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "toNode": "task-task-structure-task-groups-tg-root-versions-tgv-root-v1-tasks-task-structure-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "task"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md--eow-eow-task-run-task-groups-tg-root-versions-tgv-root-v1-eow-eow-task-run-md",
+      "fromNode": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "toNode": "eow-eow-task-run-task-groups-tg-root-versions-tgv-root-v1-eow-eow-task-run-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "EoW -> task-run"
+    },
+    {
+      "id": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md--eow-eow-task-structure-task-groups-tg-root-versions-tgv-root-v1-eow-eow-task-structure-md",
+      "fromNode": "taskGroupVersion-tgv-root-v1-task-groups-tg-root-versions-tgv-root-v1-index-md",
+      "toNode": "eow-eow-task-structure-task-groups-tg-root-versions-tgv-root-v1-eow-eow-task-structure-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "EoW -> task-structure"
+    }
+  ]
+}

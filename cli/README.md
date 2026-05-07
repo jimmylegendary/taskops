@@ -1,6 +1,6 @@
 # TaskOps CLI
 
-npm-distributed CLI for canonical md-first TaskOps projects.
+npm-distributed CLI for canonical md-first TaskOps work trees.
 
 ## Commands
 
@@ -9,9 +9,9 @@ npm-distributed CLI for canonical md-first TaskOps projects.
 - `taskops validate <path>`
 - `taskops summary <path> [--write]`
 - `taskops show <path> [--json]`
-- `taskops classify-runnable <project-dir> <task-id> [--json]`
-- `taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>`
-- `taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>`
+- `taskops classify-runnable <work-dir> <task-id> [--json]`
+- `taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>`
+- `taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>`
 - `taskops git-status <vault-dir>`
 - `taskops git-sync <vault-dir> [--message ...]`
 - `taskops watch-sync <vault-dir> [--debounce-ms 5000] [--message ...]`
@@ -27,7 +27,7 @@ Or from this monorepo during development:
 ```bash
 cd cli
 npm pack
-npm install -g ./taskops-0.3.0.tgz
+npm install -g ./taskops-0.4.0.tgz
 ```
 
 ## Smoke test
@@ -48,7 +48,7 @@ taskops vault-init ~/vaults/my-taskops-vault \
   --language en
 ```
 
-If you also want newly scaffolded TaskOps project values/log lines to follow a language while keeping field names and section labels in English, initialize the project with:
+If you also want newly scaffolded TaskOps work values/log lines to follow a language while keeping field names and section labels in English, initialize the work with:
 
 ```bash
 taskops init ./my-project \
@@ -103,6 +103,19 @@ Readiness values:
 - `blocked` → resolve the blocker first
 
 `needs_exploration` is for unknown-unknowns: search, trial, debug, prototype, or retrospective work whose output is understanding rather than direct completion.
+
+## Closure and delegation
+
+New work roots use `entityType: work`, explicit EoW nodes for terminal branches, and independent run folders under `runs/<run-id>/`.
+
+The validator summarizes:
+
+- terminal task EoW coverage
+- EoW node count
+- waiting delegation count
+- whether the work is still open or complete
+
+Use task `runRefs` plus run-node `sourceTaskId` / `sourceTaskGroupVersionId` for bidirectional task↔run traceability. Use `type: delegate` with `status: waiting` when a run path is waiting on a human, another AI, an agent, or an external system.
 
 If the Obsidian plugin is installed on desktop, it will also look for `.taskops/taskops-sync.json` and debounce-push vault changes automatically.
 

@@ -2,26 +2,35 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSy
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'cancelled'];
+export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
-export const ENTITY_TYPES = ['project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge'];
+export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow'];
+export const WORK_ENTITY_TYPES = ['work', 'project'];
+export const EOW_GRAPH_TYPES = ['task', 'run'];
+export const EOW_ATTACHED_TO_TYPES = ['task', 'runNode'];
 export const TASKOPS_SYNC_DIR = '.taskops';
 export const TASKOPS_SYNC_CONFIG = 'taskops-sync.json';
 export const DEFAULT_LANGUAGE = 'en';
 
 const SUMMARY_LABELS = Object.freeze({
-  projectId: 'Project ID',
-  projectObjective: 'Project objective',
-  projectStatus: 'Project status',
+  projectId: 'Work ID',
+  projectObjective: 'Work objective',
+  projectStatus: 'Work status',
   rootTaskGroup: 'Root task group',
   activeSnapshot: 'Active snapshot',
   taskGroups: 'Task groups',
   taskGroupVersions: 'Task group versions',
   tasks: 'Tasks',
   snapshots: 'Snapshots',
+  runs: 'Runs',
   runNodes: 'Run nodes',
   runEdges: 'Run edges',
+  eowNodes: 'EoW nodes',
+  taskEowCoverage: 'Terminal task EoW coverage',
+  waitingDelegations: 'Waiting delegations',
+  openBlockers: 'Open blockers',
+  workCompletion: 'Work completion',
   taskStatusCounts: 'Task status counts',
   selectedVersion: 'Selected version',
   warnings: 'Warnings',
@@ -52,9 +61,12 @@ const LOCALIZED_TEXT = {
     validation: {
       missingRequiredField: (field) => `missing required field '${field}'`,
       entityTypeMustBe: (type) => `entityType must be '${type}'`,
+      entityTypeMustBeOneOf: (types) => `entityType must be one of: ${types.join(', ')}`,
       invalidStatus: (status) => `invalid status '${status}'`,
       invalidRunReadiness: (value) => `invalid runReadiness '${value}'`,
       invalidUnderstandingLevel: (value) => `invalid understandingLevel '${value}'`,
+      invalidEowGraphType: (value) => `invalid EoW graphType '${value}'`,
+      invalidEowAttachedToType: (value) => `invalid EoW attachedToType '${value}'`,
       missingIndexMd: 'missing index.md',
       idMustMatchFolderName: (name) => `id must match folder name '${name}'`,
       idMustMatchFileName: (name) => `id must match file name '${name}'`,
@@ -70,15 +82,23 @@ const LOCALIZED_TEXT = {
       selectedVersionNotFound: (id) => `selected versionId '${id}' not found`,
       rootTaskGroupNotFound: (id) => `rootTaskGroupId '${id}' not found`,
       activeSnapshotNotFound: (id) => `activeSnapshotId '${id}' not found`,
-      projectIdMustBe: (id) => `projectId must be '${id}'`,
+      projectIdMustBe: (id) => `projectId/workId must be '${id}'`,
       runIdMustBe: (id) => `runId must be '${id}'`,
       sourceTaskGroupVersionNotFound: (id) => `sourceTaskGroupVersionId '${id}' not found`,
       sourceTaskNotFound: (id) => `sourceTaskId '${id}' not found`,
       fromRunNodeNotFound: (id) => `fromRunNodeId '${id}' not found`,
       toRunNodeNotFound: (id) => `toRunNodeId '${id}' not found`,
-      missingRunIndex: 'missing run/index.md',
+      missingRunIndex: 'missing runs/<run-id>/index.md',
       childTaskGroupNotFound: (id) => `childTaskGroupId '${id}' not found`,
       missingTasksDirectory: "missing tasks/ directory",
+      eowAttachedTaskNotFound: (id) => `EoW attached task '${id}' not found`,
+      eowAttachedRunNodeNotFound: (id) => `EoW attached run node '${id}' not found`,
+      terminalTaskMissingEow: (id) => `terminal task '${id}' has no EoW node`,
+      runTerminalMissingEow: (runId, id) => `run '${runId}' terminal node '${id}' has no EoW node`,
+      runRefTargetNotFound: (runId, nodeId) => `runRef target '${runId}/${nodeId}' not found`,
+      runRefSourceMismatch: (runId, nodeId, taskId) => `runRef '${runId}/${nodeId}' does not point back to task '${taskId}'`,
+      missingTaskBackReference: (taskId, runId, nodeId) => `run node '${runId}/${nodeId}' points to task '${taskId}' but task has no matching runRefs entry`,
+      delegateMissingField: (field) => `delegation/waiting node missing '${field}'`,
       taskGroupNotFound: (id) => `Task group not found: ${id}`,
       versionAlreadyExists: (id) => `Version already exists: ${id}`,
     },
@@ -106,9 +126,12 @@ const LOCALIZED_TEXT = {
     validation: {
       missingRequiredField: (field) => `필수 frontmatter field '${field}'가 없음`,
       entityTypeMustBe: (type) => `entityType은 '${type}'여야 함`,
+      entityTypeMustBeOneOf: (types) => `entityType은 다음 중 하나여야 함: ${types.join(', ')}`,
       invalidStatus: (status) => `유효하지 않은 status '${status}'`,
       invalidRunReadiness: (value) => `유효하지 않은 runReadiness '${value}'`,
       invalidUnderstandingLevel: (value) => `유효하지 않은 understandingLevel '${value}'`,
+      invalidEowGraphType: (value) => `유효하지 않은 EoW graphType '${value}'`,
+      invalidEowAttachedToType: (value) => `유효하지 않은 EoW attachedToType '${value}'`,
       missingIndexMd: 'index.md가 없음',
       idMustMatchFolderName: (name) => `id는 folder name '${name}'와 일치해야 함`,
       idMustMatchFileName: (name) => `id는 file name '${name}'와 일치해야 함`,
@@ -124,15 +147,23 @@ const LOCALIZED_TEXT = {
       selectedVersionNotFound: (id) => `selected versionId '${id}'를 찾지 못함`,
       rootTaskGroupNotFound: (id) => `rootTaskGroupId '${id}'를 찾지 못함`,
       activeSnapshotNotFound: (id) => `activeSnapshotId '${id}'를 찾지 못함`,
-      projectIdMustBe: (id) => `projectId는 '${id}'여야 함`,
+      projectIdMustBe: (id) => `projectId/workId는 '${id}'여야 함`,
       runIdMustBe: (id) => `runId는 '${id}'여야 함`,
       sourceTaskGroupVersionNotFound: (id) => `sourceTaskGroupVersionId '${id}'를 찾지 못함`,
       sourceTaskNotFound: (id) => `sourceTaskId '${id}'를 찾지 못함`,
       fromRunNodeNotFound: (id) => `fromRunNodeId '${id}'를 찾지 못함`,
       toRunNodeNotFound: (id) => `toRunNodeId '${id}'를 찾지 못함`,
-      missingRunIndex: 'run/index.md가 없음',
+      missingRunIndex: 'runs/<run-id>/index.md가 없음',
       childTaskGroupNotFound: (id) => `childTaskGroupId '${id}'를 찾지 못함`,
       missingTasksDirectory: 'tasks/ 디렉터리가 없음',
+      eowAttachedTaskNotFound: (id) => `EoW가 붙은 task '${id}'를 찾지 못함`,
+      eowAttachedRunNodeNotFound: (id) => `EoW가 붙은 run node '${id}'를 찾지 못함`,
+      terminalTaskMissingEow: (id) => `terminal task '${id}'에 EoW node가 없음`,
+      runTerminalMissingEow: (runId, id) => `run '${runId}' terminal node '${id}'에 EoW node가 없음`,
+      runRefTargetNotFound: (runId, nodeId) => `runRef target '${runId}/${nodeId}'를 찾지 못함`,
+      runRefSourceMismatch: (runId, nodeId, taskId) => `runRef '${runId}/${nodeId}'가 task '${taskId}'로 되돌아가리키지 않음`,
+      missingTaskBackReference: (taskId, runId, nodeId) => `run node '${runId}/${nodeId}'가 task '${taskId}'를 가리키지만 task에 대응 runRefs가 없음`,
+      delegateMissingField: (field) => `delegation/waiting node에 '${field}'가 없음`,
       taskGroupNotFound: (id) => `Task group '${id}'를 찾지 못함`,
       versionAlreadyExists: (id) => `Version '${id}'가 이미 존재함`,
     },
@@ -303,19 +334,19 @@ export function discoverProjects(inputPath) {
   if (fileExists(directIndex)) {
     try {
       const fm = parseMarkdownFile(directIndex);
-      if (fm.entityType === 'project') return [full];
+      if (WORK_ENTITY_TYPES.includes(fm.entityType)) return [full];
     } catch {}
   }
   const projects = listDirs(full).filter((dir) => {
     const indexPath = join(dir, 'index.md');
     if (!fileExists(indexPath)) return false;
     try {
-      return parseMarkdownFile(indexPath).entityType === 'project';
+      return WORK_ENTITY_TYPES.includes(parseMarkdownFile(indexPath).entityType);
     } catch {
       return false;
     }
   });
-  if (projects.length === 0) throw new Error(`No TaskOps project found under ${inputPath}`);
+  if (projects.length === 0) throw new Error(`No TaskOps work found under ${inputPath}`);
   return projects;
 }
 
@@ -326,16 +357,30 @@ export function parseProject(projectDir) {
   const project = parseMarkdownFile(projectIndex);
   const language = normalizeLanguage(project.language || resolveLanguage(projectDir));
   const t = localeBundle(language).validation;
+
   checkFields(project, ['taskOpsVersion', 'entityType', 'id', 'title', 'objective', 'activeRootTaskGroupId', 'createdAt', 'status'], projectIndex, errors, language);
-  if (project.entityType !== 'project') errors.push(withPath(projectIndex, t.entityTypeMustBe('project')));
+  if (!WORK_ENTITY_TYPES.includes(project.entityType)) errors.push(withPath(projectIndex, t.entityTypeMustBeOneOf(WORK_ENTITY_TYPES)));
   if (!STATUS_VALUES.includes(project.status)) errors.push(withPath(projectIndex, t.invalidStatus(project.status)));
 
   const taskGroups = new Map();
   const versions = new Map();
   const tasks = new Map();
   const snapshots = new Map();
+  const runs = new Map();
   const runNodes = new Map();
   const runEdges = new Map();
+  const eowNodes = new Map();
+  const taskEowsByTaskKey = new Map();
+  const runEowsByRunNodeKey = new Map();
+
+  const addEow = (eow, filePath) => {
+    if (eowNodes.has(eow.id)) errors.push(withPath(filePath, `duplicate EoW id '${eow.id}'`));
+    eowNodes.set(eow.id, { ...eow, path: filePath });
+  };
+
+  const normalizeRunRefs = (task) => Array.isArray(task.runRefs) ? task.runRefs : [];
+  const taskKey = (versionId, taskId) => `${versionId}:${taskId}`;
+  const runNodeKey = (runId, nodeId) => `${runId}:${nodeId}`;
 
   for (const tgDir of listDirs(join(projectDir, 'task-groups'))) {
     const tgIndex = join(tgDir, 'index.md');
@@ -354,7 +399,7 @@ export function parseProject(projectDir) {
       if (v.entityType !== 'taskGroupVersion') errors.push(withPath(versionIndex, t.entityTypeMustBe('taskGroupVersion')));
       if (v.id !== basename(versionDir)) errors.push(withPath(versionIndex, t.idMustMatchFolderName(basename(versionDir))));
       if (v.taskGroupId !== tg.id) errors.push(withPath(versionIndex, t.taskGroupIdMustBe(tg.id)));
-      const versionRecord = { ...v, path: versionDir, tasks: [] };
+      const versionRecord = { ...v, path: versionDir, tasks: [], eows: [] };
       versions.set(v.id, versionRecord);
       taskGroups.get(tg.id).versions.push(versionRecord);
 
@@ -371,11 +416,31 @@ export function parseProject(projectDir) {
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
-        const key = `${v.id}:${task.id}`;
+        const key = taskKey(v.id, task.id);
         if (tasks.has(key)) errors.push(withPath(taskPath, t.duplicateTaskKey(key)));
         const taskRecord = { ...task, path: taskPath };
         tasks.set(key, taskRecord);
         versionRecord.tasks.push(taskRecord);
+      }
+
+      for (const eowPath of listMd(join(versionDir, 'eow'))) {
+        const eow = parseMarkdownFile(eowPath);
+        checkFields(eow, ['taskOpsVersion', 'entityType', 'id', 'graphType', 'attachedToType', 'attachedToId', 'reason', 'declaredBy', 'declaredAt', 'createdAt', 'status'], eowPath, errors, language);
+        if (eow.entityType !== 'eow') errors.push(withPath(eowPath, t.entityTypeMustBe('eow')));
+        if (eow.id !== basename(eowPath, '.md')) errors.push(withPath(eowPath, t.idMustMatchFileName(basename(eowPath, '.md'))));
+        if (!STATUS_VALUES.includes(eow.status)) errors.push(withPath(eowPath, t.invalidStatus(eow.status)));
+        if (!EOW_GRAPH_TYPES.includes(eow.graphType)) errors.push(withPath(eowPath, t.invalidEowGraphType(eow.graphType)));
+        if (!EOW_ATTACHED_TO_TYPES.includes(eow.attachedToType)) errors.push(withPath(eowPath, t.invalidEowAttachedToType(eow.attachedToType)));
+        if (eow.graphType !== 'task') errors.push(withPath(eowPath, t.invalidEowGraphType(eow.graphType)));
+        if (eow.attachedToType !== 'task') errors.push(withPath(eowPath, t.invalidEowAttachedToType(eow.attachedToType)));
+        if (eow.taskGroupVersionId && eow.taskGroupVersionId !== v.id) errors.push(withPath(eowPath, t.taskGroupVersionIdMustBe(v.id)));
+        const attachedKey = taskKey(v.id, eow.attachedToId);
+        if (!tasks.has(attachedKey)) errors.push(withPath(eowPath, t.eowAttachedTaskNotFound(eow.attachedToId)));
+        const eowRecord = { ...eow, path: eowPath, taskGroupId: tg.id, taskGroupVersionId: v.id };
+        addEow(eowRecord, eowPath);
+        versionRecord.eows.push(eowRecord);
+        if (!taskEowsByTaskKey.has(attachedKey)) taskEowsByTaskKey.set(attachedKey, []);
+        taskEowsByTaskKey.get(attachedKey).push(eowRecord);
       }
     }
   }
@@ -404,39 +469,95 @@ export function parseProject(projectDir) {
   }
   if (project.activeSnapshotId && !snapshots.has(project.activeSnapshotId)) errors.push(withPath(projectIndex, t.activeSnapshotNotFound(project.activeSnapshotId)));
 
-  const runIndex = join(projectDir, 'run', 'index.md');
-  if (fileExists(runIndex)) {
+  const parseRunFolder = (runDir, { legacy = false } = {}) => {
+    const runIndex = join(runDir, 'index.md');
+    if (!fileExists(runIndex)) { errors.push(withPath(runDir, t.missingIndexMd)); return; }
     const run = parseMarkdownFile(runIndex);
-    checkFields(run, ['taskOpsVersion', 'entityType', 'id', 'projectId', 'createdAt'], runIndex, errors, language);
+    checkFields(run, ['taskOpsVersion', 'entityType', 'id', 'createdAt', 'status'], runIndex, errors, language);
     if (run.entityType !== 'run') errors.push(withPath(runIndex, t.entityTypeMustBe('run')));
-    if (run.projectId !== project.id) errors.push(withPath(runIndex, t.projectIdMustBe(project.id)));
+    if (!legacy && run.id !== basename(runDir)) errors.push(withPath(runIndex, t.idMustMatchFolderName(basename(runDir))));
+    const ownerId = run.workId ?? run.projectId;
+    if (!ownerId) errors.push(withPath(runIndex, t.missingRequiredField('workId')));
+    else if (ownerId !== project.id) errors.push(withPath(runIndex, t.projectIdMustBe(project.id)));
+    if (!STATUS_VALUES.includes(run.status)) errors.push(withPath(runIndex, t.invalidStatus(run.status)));
 
-    for (const nodePath of listMd(join(projectDir, 'run', 'nodes'))) {
+    const runRecord = { ...run, path: runDir, nodes: [], edges: [], eows: [], legacy };
+    if (runs.has(run.id)) errors.push(withPath(runIndex, `duplicate run id '${run.id}'`));
+    runs.set(run.id, runRecord);
+    const graphNodes = new Map();
+
+    for (const nodePath of listMd(join(runDir, 'nodes'))) {
       const node = parseMarkdownFile(nodePath);
+      if (node.entityType === 'eow') {
+        checkFields(node, ['taskOpsVersion', 'entityType', 'id', 'runId', 'graphType', 'attachedToType', 'attachedToId', 'reason', 'declaredBy', 'declaredAt', 'createdAt', 'status'], nodePath, errors, language);
+        if (node.id !== basename(nodePath, '.md')) errors.push(withPath(nodePath, t.idMustMatchFileName(basename(nodePath, '.md'))));
+        if (node.runId !== run.id) errors.push(withPath(nodePath, t.runIdMustBe(run.id)));
+        if (!STATUS_VALUES.includes(node.status)) errors.push(withPath(nodePath, t.invalidStatus(node.status)));
+        if (node.graphType !== 'run') errors.push(withPath(nodePath, t.invalidEowGraphType(node.graphType)));
+        if (node.attachedToType !== 'runNode') errors.push(withPath(nodePath, t.invalidEowAttachedToType(node.attachedToType)));
+        const eowRecord = { ...node, path: nodePath };
+        addEow(eowRecord, nodePath);
+        runRecord.eows.push(eowRecord);
+        graphNodes.set(node.id, eowRecord);
+        const attachedKey = runNodeKey(run.id, node.attachedToId);
+        if (!runEowsByRunNodeKey.has(attachedKey)) runEowsByRunNodeKey.set(attachedKey, []);
+        runEowsByRunNodeKey.get(attachedKey).push(eowRecord);
+        continue;
+      }
+
       checkFields(node, ['taskOpsVersion', 'entityType', 'id', 'runId', 'type', 'title', 'status', 'createdAt'], nodePath, errors, language);
       if (node.entityType !== 'runNode') errors.push(withPath(nodePath, t.entityTypeMustBe('runNode')));
       if (node.id !== basename(nodePath, '.md')) errors.push(withPath(nodePath, t.idMustMatchFileName(basename(nodePath, '.md'))));
       if (node.runId !== run.id) errors.push(withPath(nodePath, t.runIdMustBe(run.id)));
+      if (!STATUS_VALUES.includes(node.status)) errors.push(withPath(nodePath, t.invalidStatus(node.status)));
       if (node.sourceTaskGroupVersionId && !versions.has(node.sourceTaskGroupVersionId)) errors.push(withPath(nodePath, t.sourceTaskGroupVersionNotFound(node.sourceTaskGroupVersionId)));
       if (node.sourceTaskId) {
-        const found = [...tasks.values()].some((t) => t.id === node.sourceTaskId);
+        const found = [...tasks.values()].some((task) => task.id === node.sourceTaskId && (!node.sourceTaskGroupVersionId || task.taskGroupVersionId === node.sourceTaskGroupVersionId));
         if (!found) errors.push(withPath(nodePath, t.sourceTaskNotFound(node.sourceTaskId)));
       }
-      runNodes.set(node.id, { ...node, path: nodePath });
+      if (node.status === 'waiting' || node.type === 'delegate') {
+        for (const field of ['delegateeType', 'delegateeRef', 'expectedOutput', 'requestedAt']) {
+          if (!(field in node) || node[field] === '' || node[field] == null) warnings.push(withPath(nodePath, t.delegateMissingField(field)));
+        }
+      }
+      const nodeRecord = { ...node, path: nodePath };
+      const key = runNodeKey(run.id, node.id);
+      if (runNodes.has(key)) errors.push(withPath(nodePath, `duplicate run node key '${key}'`));
+      runNodes.set(key, nodeRecord);
+      runRecord.nodes.push(nodeRecord);
+      graphNodes.set(node.id, nodeRecord);
     }
-    for (const edgePath of listMd(join(projectDir, 'run', 'edges'))) {
+
+    for (const edgePath of listMd(join(runDir, 'edges'))) {
       const edge = parseMarkdownFile(edgePath);
       checkFields(edge, ['taskOpsVersion', 'entityType', 'id', 'runId', 'fromRunNodeId', 'toRunNodeId', 'edgeType', 'createdAt'], edgePath, errors, language);
       if (edge.entityType !== 'runEdge') errors.push(withPath(edgePath, t.entityTypeMustBe('runEdge')));
       if (edge.id !== basename(edgePath, '.md')) errors.push(withPath(edgePath, t.idMustMatchFileName(basename(edgePath, '.md'))));
       if (edge.runId !== run.id) errors.push(withPath(edgePath, t.runIdMustBe(run.id)));
-      if (!runNodes.has(edge.fromRunNodeId)) errors.push(withPath(edgePath, t.fromRunNodeNotFound(edge.fromRunNodeId)));
-      if (!runNodes.has(edge.toRunNodeId)) errors.push(withPath(edgePath, t.toRunNodeNotFound(edge.toRunNodeId)));
-      runEdges.set(edge.id, { ...edge, path: edgePath });
+      if (!graphNodes.has(edge.fromRunNodeId)) errors.push(withPath(edgePath, t.fromRunNodeNotFound(edge.fromRunNodeId)));
+      if (!graphNodes.has(edge.toRunNodeId)) errors.push(withPath(edgePath, t.toRunNodeNotFound(edge.toRunNodeId)));
+      const edgeRecord = { ...edge, path: edgePath };
+      const key = `${run.id}:${edge.id}`;
+      if (runEdges.has(key)) errors.push(withPath(edgePath, `duplicate run edge key '${key}'`));
+      runEdges.set(key, edgeRecord);
+      runRecord.edges.push(edgeRecord);
     }
-  } else {
-    warnings.push(withPath(projectDir, t.missingRunIndex));
+
+    for (const eow of runRecord.eows) {
+      if (!graphNodes.has(eow.attachedToId) || graphNodes.get(eow.attachedToId).entityType !== 'runNode') {
+        errors.push(withPath(eow.path, t.eowAttachedRunNodeNotFound(eow.attachedToId)));
+      }
+    }
+  };
+
+  const runsDir = join(projectDir, 'runs');
+  for (const runDir of listDirs(runsDir)) parseRunFolder(runDir);
+  const legacyRunDir = join(projectDir, 'run');
+  if (fileExists(join(legacyRunDir, 'index.md'))) {
+    parseRunFolder(legacyRunDir, { legacy: true });
+    warnings.push(withPath(legacyRunDir, 'legacy run/ layout is supported; prefer runs/<run-id>/ for independent run graphs'));
   }
+  if (runs.size === 0) warnings.push(withPath(projectDir, t.missingRunIndex));
 
   for (const version of versions.values()) {
     for (const task of version.tasks) {
@@ -444,7 +565,83 @@ export function parseProject(projectDir) {
     }
   }
 
-  return { projectDir, project, taskGroups, versions, tasks, snapshots, runNodes, runEdges, errors, warnings, language };
+  for (const task of tasks.values()) {
+    for (const ref of normalizeRunRefs(task)) {
+      if (!ref || typeof ref !== 'object') {
+        warnings.push(withPath(task.path, 'runRefs entry must be an object'));
+        continue;
+      }
+      if (!ref.runId || !ref.runNodeId) {
+        warnings.push(withPath(task.path, 'runRefs entry must include runId and runNodeId'));
+        continue;
+      }
+      const node = runNodes.get(runNodeKey(ref.runId, ref.runNodeId));
+      if (!node) {
+        errors.push(withPath(task.path, t.runRefTargetNotFound(ref.runId, ref.runNodeId)));
+        continue;
+      }
+      if (node.sourceTaskId !== task.id || (node.sourceTaskGroupVersionId && node.sourceTaskGroupVersionId !== task.taskGroupVersionId)) {
+        errors.push(withPath(task.path, t.runRefSourceMismatch(ref.runId, ref.runNodeId, task.id)));
+      }
+    }
+  }
+
+  for (const node of runNodes.values()) {
+    if (!node.sourceTaskId) continue;
+    const candidates = [...tasks.values()].filter((task) => task.id === node.sourceTaskId && (!node.sourceTaskGroupVersionId || task.taskGroupVersionId === node.sourceTaskGroupVersionId));
+    for (const task of candidates) {
+      const hasRef = normalizeRunRefs(task).some((ref) => ref && ref.runId === node.runId && ref.runNodeId === node.id);
+      if (!hasRef) warnings.push(withPath(node.path, t.missingTaskBackReference(task.id, node.runId, node.id)));
+    }
+  }
+
+  let terminalTaskCount = 0;
+  let terminalTaskEowCount = 0;
+  const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
+  const selectedPairs = activeSnapshot?.selectedVersions || [];
+  const selectedTaskGroupIds = new Set(selectedPairs.map((pair) => pair.taskGroupId));
+  for (const pair of selectedPairs) {
+    const version = versions.get(pair.versionId);
+    if (!version) continue;
+    for (const task of version.tasks) {
+      const branchContinues = task.childTaskGroupId && selectedTaskGroupIds.has(task.childTaskGroupId);
+      if (branchContinues) continue;
+      terminalTaskCount += 1;
+      const hasEow = taskEowsByTaskKey.has(taskKey(version.id, task.id));
+      if (hasEow) terminalTaskEowCount += 1;
+      else warnings.push(withPath(task.path, t.terminalTaskMissingEow(task.id)));
+    }
+  }
+
+  let runTerminalNodeCount = 0;
+  let runTerminalEowCount = 0;
+  let waitingDelegationCount = 0;
+  for (const run of runs.values()) {
+    const outgoing = new Set(run.edges.map((edge) => edge.fromRunNodeId));
+    for (const node of run.nodes) {
+      if (node.status === 'waiting' || (node.type === 'delegate' && !['done', 'cancelled'].includes(node.status))) waitingDelegationCount += 1;
+      if (outgoing.has(node.id) || node.status === 'cancelled') continue;
+      runTerminalNodeCount += 1;
+      const hasEow = runEowsByRunNodeKey.has(runNodeKey(run.id, node.id));
+      if (hasEow) runTerminalEowCount += 1;
+      else if (node.status === 'done') warnings.push(withPath(node.path, t.runTerminalMissingEow(run.id, node.id)));
+    }
+  }
+  const openBlockerCount = [...tasks.values()].filter((task) => task.status === 'blocked').length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
+
+  const closure = {
+    terminalTaskCount,
+    terminalTaskEowCount,
+    openTerminalTaskCount: Math.max(0, terminalTaskCount - terminalTaskEowCount),
+    runTerminalNodeCount,
+    runTerminalEowCount,
+    openRunTerminalNodeCount: Math.max(0, runTerminalNodeCount - runTerminalEowCount),
+    waitingDelegationCount,
+    openBlockerCount,
+    complete: terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0,
+  };
+
+  return { projectDir, project, taskGroups, versions, tasks, snapshots, runs, runNodes, runEdges, eowNodes, errors, warnings, language, closure };
 }
 
 export function classifyTaskReadiness(task) {
@@ -515,11 +712,14 @@ export function summarizeProject(parsed) {
   const versions = [...parsed.versions.values()];
   const tasks = [...parsed.tasks.values()];
   const snapshots = [...parsed.snapshots.values()];
+  const runs = [...(parsed.runs?.values() || [])];
   const runNodes = [...parsed.runNodes.values()];
   const runEdges = [...parsed.runEdges.values()];
+  const eowNodes = [...(parsed.eowNodes?.values() || [])];
   const countsByStatus = STATUS_VALUES.map((status) => [status, tasks.filter((t) => t.status === status).length]);
   const countsByReadiness = RUN_READINESS_VALUES.map((value) => [value, tasks.filter((task) => classifyTaskReadiness(task).runReadiness === value).length]);
   const activeSnapshot = project.activeSnapshotId ? parsed.snapshots.get(project.activeSnapshotId) : null;
+  const closure = parsed.closure || {};
   const lines = [
     `# ${project.title || project.id}`,
     '',
@@ -532,8 +732,14 @@ export function summarizeProject(parsed) {
     `- ${SUMMARY_LABELS.taskGroupVersions}: ${versions.length}`,
     `- ${SUMMARY_LABELS.tasks}: ${tasks.length}`,
     `- ${SUMMARY_LABELS.snapshots}: ${snapshots.length}`,
+    `- ${SUMMARY_LABELS.runs}: ${runs.length}`,
     `- ${SUMMARY_LABELS.runNodes}: ${runNodes.length}`,
     `- ${SUMMARY_LABELS.runEdges}: ${runEdges.length}`,
+    `- ${SUMMARY_LABELS.eowNodes}: ${eowNodes.length}`,
+    `- ${SUMMARY_LABELS.taskEowCoverage}: ${closure.terminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}`,
+    `- ${SUMMARY_LABELS.waitingDelegations}: ${closure.waitingDelegationCount ?? 0}`,
+    `- ${SUMMARY_LABELS.openBlockers}: ${closure.openBlockerCount ?? 0}`,
+    `- ${SUMMARY_LABELS.workCompletion}: ${closure.complete === true ? 'complete' : 'open'}`,
     '',
     `## ${SUMMARY_LABELS.taskStatusCounts}`,
     ...countsByStatus.map(([status, count]) => `- ${status}: ${count}`),
@@ -565,14 +771,22 @@ export function summarizeProject(parsed) {
   if (runNodes.length === 0) lines.push(`- ${t.noRunNodes}`);
   else {
     for (const node of runNodes.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
-      lines.push(`- ${t.node} ${node.id} [${node.status}] type=${node.type}${node.sourceTaskId ? ` sourceTask=${node.sourceTaskId}` : ''}`);
+      lines.push(`- ${t.node} ${node.runId}/${node.id} [${node.status}] type=${node.type}${node.sourceTaskId ? ` sourceTask=${node.sourceTaskId}` : ''}`);
     }
   }
   lines.push('', `## ${SUMMARY_LABELS.runEdges}`);
   if (runEdges.length === 0) lines.push(`- ${t.none}`);
   else {
     for (const edge of runEdges.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
-      lines.push(`- ${t.edge} ${edge.id}: ${edge.fromRunNodeId} -${edge.edgeType}-> ${edge.toRunNodeId}`);
+      lines.push(`- ${t.edge} ${edge.runId}/${edge.id}: ${edge.fromRunNodeId} -${edge.edgeType}-> ${edge.toRunNodeId}`);
+    }
+  }
+  lines.push('', '## EoW nodes');
+  if (eowNodes.length === 0) lines.push(`- ${t.none}`);
+  else {
+    for (const eow of eowNodes.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
+      const target = eow.runId ? `${eow.runId}/${eow.attachedToId}` : eow.attachedToId;
+      lines.push(`- EoW ${eow.id} [${eow.graphType}] -> ${eow.attachedToType}:${target} (${eow.reason})`);
     }
   }
   if (parsed.errors.length) {
@@ -815,20 +1029,21 @@ export function initProject(dir, { id, title, objective, language = null }) {
   const resolvedLanguage = normalizeLanguage(language || resolveLanguage(root));
   const t = localeBundle(resolvedLanguage).init;
   ensureDir(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'tasks'));
+  ensureDir(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'eow'));
   ensureDir(join(root, 'snapshots'));
-  ensureDir(join(root, 'run', 'nodes'));
-  ensureDir(join(root, 'run', 'edges'));
+  ensureDir(join(root, 'runs', 'run-main', 'nodes'));
+  ensureDir(join(root, 'runs', 'run-main', 'edges'));
   ensureDir(join(root, 'derived', 'canvases'));
   ensureDir(join(root, 'derived', 'views'));
   const now = isoNow();
-  writeFileSync(join(root, 'index.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'project', id, title, objective, language: resolvedLanguage, activeRootTaskGroupId: 'tg-root', activeSnapshotId: 'snapshot-root-v1', createdAt: now, status: 'active' }) + `# ${title}\n`, 'utf8');
-  writeFileSync(join(root, 'project-log.md'), `# Project log\n\n- ${t.projectInitialized}\n`, 'utf8');
+  writeFileSync(join(root, 'index.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'work', id, title, objective, language: resolvedLanguage, activeRootTaskGroupId: 'tg-root', activeSnapshotId: 'snapshot-root-v1', createdAt: now, status: 'active' }) + `# ${title}\n`, 'utf8');
+  writeFileSync(join(root, 'work-log.md'), `# Work log\n\n- ${t.projectInitialized}\n`, 'utf8');
   writeFileSync(join(root, 'task-groups', 'tg-root', 'index.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'taskGroup', id: 'tg-root', objective, activeVersionId: 'tgv-root-v1', createdAt: now, status: 'active' }) + '# Root task group\n', 'utf8');
   writeFileSync(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'index.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: 'tgv-root-v1', taskGroupId: 'tg-root', version: 'v1', summary: t.initialRootDecomposition, selected: true, createdAt: now, status: 'active' }) + '# Root version\n', 'utf8');
   writeFileSync(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'decomposition-log.md'), `# Decomposition log\n\n- ${t.initialVersionCreated}\n`, 'utf8');
   writeFileSync(join(root, 'snapshots', 'snapshot-root-v1.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'versionSnapshot', id: 'snapshot-root-v1', rootTaskGroupId: 'tg-root', createdAt: now, label: t.initialSnapshot, status: 'active', selectedVersions: [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }] }) + '# Snapshot root v1\n', 'utf8');
-  writeFileSync(join(root, 'run', 'index.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', projectId: id, createdAt: now, status: 'active' }) + '# Run main\n', 'utf8');
-  writeFileSync(join(root, 'run', 'run-log.md'), `# Run log\n\n- ${t.runInitialized}\n`, 'utf8');
+  writeFileSync(join(root, 'runs', 'run-main', 'index.md'), fmBlock({ taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: id, createdAt: now, status: 'active' }) + '# Run main\n', 'utf8');
+  writeFileSync(join(root, 'runs', 'run-main', 'run-log.md'), `# Run log\n\n- ${t.runInitialized}\n`, 'utf8');
   return root;
 }
 
@@ -842,6 +1057,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   const versionDir = join(taskGroupDir, 'versions', versionId);
   if (fileExists(versionDir)) throw new Error(localeBundle(language).validation.versionAlreadyExists(versionId));
   ensureDir(join(versionDir, 'tasks'));
+  ensureDir(join(versionDir, 'eow'));
   const now = isoNow();
   const versionFm = { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: versionId, taskGroupId, version: spec.version ?? versionId, summary: spec.summary, createdAt: now, status: spec.status ?? 'active' };
   if (supersedesVersionId) versionFm.supersedesVersionId = supersedesVersionId;
@@ -858,6 +1074,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       if (task[key] !== undefined && task[key] !== null) fm[key] = task[key];
     }
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
+    if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');
   });
   return versionDir;

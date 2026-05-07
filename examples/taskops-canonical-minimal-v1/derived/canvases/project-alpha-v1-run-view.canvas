@@ -1,0 +1,116 @@
+{
+  "nodes": [
+    {
+      "id": "work-project-alpha-v1-index-md",
+      "type": "file",
+      "file": "index.md",
+      "x": 0,
+      "y": 0,
+      "width": 320,
+      "height": 100,
+      "color": "#94A3B8"
+    },
+    {
+      "id": "run-run-alpha-v1-runs-run-alpha-v1-index-md",
+      "type": "file",
+      "file": "runs/run-alpha-v1/index.md",
+      "x": 0,
+      "y": 180,
+      "width": 260,
+      "height": 84,
+      "color": "#334155"
+    },
+    {
+      "id": "eow-eow-run-node-verify-runs-run-alpha-v1-nodes-eow-run-node-verify-md",
+      "type": "file",
+      "file": "runs/run-alpha-v1/nodes/eow-run-node-verify.md",
+      "x": 0,
+      "y": 340,
+      "width": 200,
+      "height": 70,
+      "color": "#EF4444"
+    },
+    {
+      "id": "runNode-run-node-structure-runs-run-alpha-v1-nodes-run-node-structure-md",
+      "type": "file",
+      "file": "runs/run-alpha-v1/nodes/run-node-structure.md",
+      "x": 320,
+      "y": 340,
+      "width": 240,
+      "height": 78,
+      "color": "#2563EB"
+    },
+    {
+      "id": "runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md",
+      "type": "file",
+      "file": "runs/run-alpha-v1/nodes/run-node-verify.md",
+      "x": 640,
+      "y": 340,
+      "width": 240,
+      "height": 78,
+      "color": "#2563EB"
+    }
+  ],
+  "edges": [
+    {
+      "id": "work-project-alpha-v1-index-md--run-run-alpha-v1-runs-run-alpha-v1-index-md",
+      "fromNode": "work-project-alpha-v1-index-md",
+      "toNode": "run-run-alpha-v1-runs-run-alpha-v1-index-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#334155",
+      "label": "run"
+    },
+    {
+      "id": "run-run-alpha-v1-runs-run-alpha-v1-index-md--eow-eow-run-node-verify-runs-run-alpha-v1-nodes-eow-run-node-verify-md",
+      "fromNode": "run-run-alpha-v1-runs-run-alpha-v1-index-md",
+      "toNode": "eow-eow-run-node-verify-runs-run-alpha-v1-nodes-eow-run-node-verify-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "EoW -> run-node-verify"
+    },
+    {
+      "id": "run-run-alpha-v1-runs-run-alpha-v1-index-md--runNode-run-node-structure-runs-run-alpha-v1-nodes-run-node-structure-md",
+      "fromNode": "run-run-alpha-v1-runs-run-alpha-v1-index-md",
+      "toNode": "runNode-run-node-structure-runs-run-alpha-v1-nodes-run-node-structure-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "implementation"
+    },
+    {
+      "id": "run-run-alpha-v1-runs-run-alpha-v1-index-md--runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md",
+      "fromNode": "run-run-alpha-v1-runs-run-alpha-v1-index-md",
+      "toNode": "runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#16A34A",
+      "label": "verification"
+    },
+    {
+      "id": "runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md--eow-eow-run-node-verify-runs-run-alpha-v1-nodes-eow-run-node-verify-md",
+      "fromNode": "runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md",
+      "toNode": "eow-eow-run-node-verify-runs-run-alpha-v1-nodes-eow-run-node-verify-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#64748B",
+      "label": "closes_with"
+    },
+    {
+      "id": "runNode-run-node-structure-runs-run-alpha-v1-nodes-run-node-structure-md--runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md",
+      "fromNode": "runNode-run-node-structure-runs-run-alpha-v1-nodes-run-node-structure-md",
+      "toNode": "runNode-run-node-verify-runs-run-alpha-v1-nodes-run-node-verify-md",
+      "fromSide": "right",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "color": "#64748B",
+      "label": "informs"
+    }
+  ]
+}

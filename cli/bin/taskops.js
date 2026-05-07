@@ -20,7 +20,7 @@ function usage() {
   console.log(`TaskOps CLI
 
 Usage:
-  taskops init <dir> --id <project-id> --title <title> --objective <objective> [--language <code>]
+  taskops init <dir> --id <work-id> --title <title> --objective <objective> [--language <code>]
   taskops vault-init <vault-dir> [--repo-url <url>] [--branch <branch>] [--auto-sync true|false] [--language <code>] [--debounce-ms <ms>] [--commit-message <msg>]
   taskops validate <path>
   taskops summary <path> [--write]
@@ -64,7 +64,7 @@ function requireFlag(flags, key) {
 
 function parseOne(pathArg) {
   const projects = discoverProjects(pathArg);
-  if (projects.length !== 1) fail(`Expected exactly 1 project under ${pathArg}, found ${projects.length}`);
+  if (projects.length !== 1) fail(`Expected exactly 1 TaskOps work under ${pathArg}, found ${projects.length}`);
   return parseProject(projects[0]);
 }
 
@@ -159,8 +159,11 @@ try {
         versions: tg.versions.map((v) => ({ id: v.id, summary: v.summary, selected: v.selected === true, taskCount: v.tasks.length })),
       })),
       snapshots: [...parsed.snapshots.values()],
+      runs: [...parsed.runs.values()],
       runNodes: [...parsed.runNodes.values()],
       runEdges: [...parsed.runEdges.values()],
+      eowNodes: [...parsed.eowNodes.values()],
+      closure: parsed.closure,
       errors: parsed.errors,
       warnings: parsed.warnings,
     };

@@ -1,6 +1,6 @@
 ---
 taskOpsVersion: v1
-entityType: project
+entityType: work
 id: project-alpha-v1
 title: TaskOps canonical minimal v1 example
 objective: Prove the first TaskOps v1 md-first layout for versioned task groups, snapshots, and run graph separation.

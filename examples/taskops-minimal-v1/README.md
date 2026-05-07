@@ -7,7 +7,9 @@ Use this folder when you want a slightly denser example with more task groups, s
 
 It demonstrates:
 - a broader root decomposition than the canonical minimal fixture
-- multiple child task groups under the same project
+- multiple child task groups under the same work
 - more than one snapshot note
-- a denser run graph with extra nodes/edges
+- a denser independent run graph with extra nodes/edges
+- explicit task/run EoW nodes
+- one delegated waiting run node
 - the same canonical vs derived split as the main v1 layout

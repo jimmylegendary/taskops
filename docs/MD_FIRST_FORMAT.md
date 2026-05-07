@@ -1,6 +1,6 @@
-# TaskOps md-first format (draft v1)
+# TaskOps md-first format
 
-This document defines the first md-first storage direction for TaskOps.
+This document defines the canonical markdown-first storage direction for TaskOps.
 
 ## Goals
 
@@ -9,18 +9,19 @@ This document defines the first md-first storage direction for TaskOps.
 - append-preserving where possible
 - suitable for both skill and Obsidian plugin surfaces
 - clear separation between canonical state and derived visualization artifacts
+- graph-visible closure through explicit EoW nodes
 
 ## Design stance
 
-TaskOps should store **canonical decomposition state** and **canonical execution state** in markdown-first structures.
+TaskOps stores **canonical decomposition state** and **canonical execution state** in markdown-first structures.
 Derived artifacts such as canvas views, summaries, or exports must stay explicitly non-canonical.
 
-## Top-level project shape
+## Top-level work shape
 
 ```text
-<taskops-project>/
+<taskops-work>/
   index.md
-  project-log.md
+  work-log.md
   task-groups/
     <task-group-id>/
       index.md
@@ -30,31 +31,42 @@ Derived artifacts such as canvas views, summaries, or exports must stay explicit
           decomposition-log.md
           tasks/
             <task-id>.md
+          eow/
+            <eow-id>.md
   snapshots/
     <snapshot-id>.md
-  run/
-    index.md
-    nodes/
-      <run-node-id>.md
-    edges/
-      <run-edge-id>.md
-    run-log.md
+  runs/
+    <run-id>/
+      index.md
+      nodes/
+        <run-node-id>.md
+        <eow-id>.md
+      edges/
+        <run-edge-id>.md
+      run-log.md
   derived/
     canvases/
     views/
 ```
+
+Legacy notes:
+- old `entityType: project` roots may still be read, but new roots should use `entityType: work`
+- old singular `run/` folders may still be read, but new execution graphs should use `runs/<run-id>/`
 
 ## Canonical split
 
 ### Task graph canonical area
 - `task-groups/`
 - `snapshots/`
+- task-graph EoW nodes under each selected task-group version's `eow/`
 
 ### Run graph canonical area
-- `run/`
+- `runs/<run-id>/`
+- run-graph EoW nodes inside the run graph's `nodes/`
 
 ### Non-canonical derived area
 - `derived/`
+- old generated `canvases/` folders when present
 
 ## Canonical entity notes
 
@@ -70,21 +82,24 @@ Minimum common fields:
 
 ## Entity notes
 
-### Project
+### Work
+
 Path:
-- `<project>/index.md`
+- `<work>/index.md`
 
 Suggested fields:
 - `taskOpsVersion`
-- `entityType: project`
+- `entityType: work`
 - `id`
 - `title`
 - `objective`
 - `activeRootTaskGroupId`
 - `activeSnapshotId?`
 - `createdAt`
+- `status`
 
 ### TaskGroup
+
 Path:
 - `task-groups/<task-group-id>/index.md`
 
@@ -97,6 +112,7 @@ Suggested fields:
 - `createdAt`
 
 ### TaskGroupVersion
+
 Path:
 - `task-groups/<task-group-id>/versions/<version-id>/index.md`
 
@@ -111,6 +127,7 @@ Suggested fields:
 - `createdAt`
 
 ### Task
+
 Path:
 - `task-groups/<task-group-id>/versions/<version-id>/tasks/<task-id>.md`
 
@@ -132,7 +149,17 @@ Suggested fields:
 - `decompositionConfidence?`
 - `executionConfidence?`
 - `childTaskGroupId?`
+- `runRefs?`
 - `createdAt`
+
+Example task↔run reference:
+
+```yaml
+runRefs:
+  - runId: run-alpha-v1
+    runNodeId: run-node-verify
+    role: verification
+```
 
 Example exploratory task metadata:
 
@@ -146,7 +173,42 @@ unknowns:
 nextLearningGoal: Run a minimal API trial and write the constraints needed for the next decomposition.
 ```
 
+### EoW for task graph
+
+Path:
+- `task-groups/<task-group-id>/versions/<version-id>/eow/<eow-id>.md`
+
+Suggested fields:
+- `entityType: eow`
+- `id`
+- `graphType: task`
+- `attachedToType: task`
+- `attachedToId`
+- `reason`
+- `declaredBy`
+- `declaredAt`
+- `evidenceRefs?`
+- `createdAt`
+- `status: done`
+
+Example:
+
+```yaml
+entityType: eow
+id: eow-task-verify-example
+graphType: task
+attachedToType: task
+attachedToId: task-verify-example
+reason: no_further_decomposition
+declaredBy: ai
+declaredAt: 2026-05-08T04:45:00+09:00
+evidenceRefs:
+  - run:run-alpha-v1/node:run-node-verify
+status: done
+```
+
 ### VersionSnapshot
+
 Path:
 - `snapshots/<snapshot-id>.md`
 
@@ -157,7 +219,7 @@ Suggested fields:
 - `createdAt`
 - `label?`
 
-Body should include a deterministic selected-version map, for example:
+Body/frontmatter should include a deterministic selected-version map, for example:
 
 ```yaml
 selectedVersions:
@@ -168,18 +230,21 @@ selectedVersions:
 ```
 
 ### Run index
+
 Path:
-- `run/index.md`
+- `runs/<run-id>/index.md`
 
 Suggested fields:
 - `entityType: run`
 - `id`
-- `projectId`
+- `workId`
 - `createdAt`
+- `status`
 
 ### RunNode
+
 Path:
-- `run/nodes/<run-node-id>.md`
+- `runs/<run-id>/nodes/<run-node-id>.md`
 
 Suggested fields:
 - `entityType: runNode`
@@ -192,11 +257,53 @@ Suggested fields:
 - `sourceTaskGroupVersionId?`
 - `createdAt`
 
-Suggested `type` values include `execute`, `explore`, `debug`, `review`, and `verify`. Use `explore` when the run objective is learning enough to update task readiness or decomposition.
+Suggested `type` values include `execute`, `explore`, `debug`, `review`, `verify`, and `delegate`.
+Use `explore` when the run objective is learning enough to update task readiness or decomposition.
+Use `delegate` when work is intentionally handed to a human, another AI, an agent, or an external system.
+
+Delegation/waiting example:
+
+```yaml
+entityType: runNode
+id: run-node-human-decision
+runId: run-alpha-v1
+type: delegate
+title: Ask Jimmy to confirm constraints
+status: waiting
+sourceTaskId: task-user-constraints
+sourceTaskGroupVersionId: tgv-root-v1
+delegateeType: human
+delegateeRef: jimmy
+request: Confirm the constraints needed before downstream execution.
+expectedOutput: A clear decision and any constraints that update the task graph.
+requestedAt: 2026-05-08T04:45:00+09:00
+timeoutAt: 2026-05-10T04:45:00+09:00
+```
+
+### EoW for run graph
+
+Path:
+- `runs/<run-id>/nodes/<eow-id>.md`
+
+Suggested fields:
+- `entityType: eow`
+- `id`
+- `runId`
+- `graphType: run`
+- `attachedToType: runNode`
+- `attachedToId`
+- `reason`
+- `declaredBy`
+- `declaredAt`
+- `createdAt`
+- `status: done`
+
+Run EoW nodes should usually be connected by a `runEdge` with `edgeType: closes_with`.
 
 ### RunEdge
+
 Path:
-- `run/edges/<run-edge-id>.md`
+- `runs/<run-id>/edges/<run-edge-id>.md`
 
 Suggested fields:
 - `entityType: runEdge`
@@ -207,10 +314,12 @@ Suggested fields:
 - `edgeType`
 - `createdAt`
 
+`fromRunNodeId` and `toRunNodeId` may point to either a `runNode` or an EoW node inside the same run graph.
+
 ## Logging files
 
 Append-oriented logs should be plain markdown:
-- `project-log.md`
+- `work-log.md`
 - `decomposition-log.md`
 - `run-log.md`
 
@@ -221,15 +330,22 @@ Purpose:
 
 ## Validation targets
 
-Validator v1 should check at least:
+Validator should check at least:
+
+### Work
+- root `index.md` exists
+- new roots use `entityType: work`
+- legacy `entityType: project` is readable
+- active root task group and active snapshot exist
 
 ### Task graph
 - required files/folders exist
 - ids match paths
 - task-group-version ownership is coherent
-- sibling task ids are unique
+- sibling task ids are unique within a version
 - optional invariant warnings for coverage / orthogonality / closure quality
 - only one active version per task group unless explicitly marked otherwise
+- active-snapshot terminal task branches have EoW nodes
 
 ### Snapshots
 - selected task groups exist
@@ -237,9 +353,13 @@ Validator v1 should check at least:
 - selected path is structurally reachable from root
 
 ### Run graph
+- independent `runs/<run-id>/` folders are valid
 - run nodes exist
-- run edges reference real nodes
+- run edges reference real run nodes or EoW nodes
 - referenced source task/task-group-version ids exist if present
+- task `runRefs` and run-node `sourceTaskId` agree bidirectionally
+- delegated/waiting nodes include enough request/delegatee metadata
+- done terminal run paths have EoW nodes
 
 ## Selection model
 
@@ -256,20 +376,25 @@ Examples:
 - filtered work views
 - visual layouts
 
-All should live under `derived/` and be clearly labeled non-canonical.
+All should live under `derived/` or a clearly non-canonical generated surface and be labeled non-canonical.
 
 ## Reference example
 
-See `../examples/taskops-canonical-minimal-v1/` for the first concrete v1-shaped example using:
+See `../examples/taskops-canonical-minimal-v1/` for the concrete v1-shaped example using:
+- `entityType: work`
 - versioned task groups
 - a selected snapshot
-- a separate run graph
-- a clearly non-canonical `derived/` area
+- explicit EoW nodes
+- independent `runs/<run-id>/` graph storage
+- bidirectional task↔run references
+- a clearly non-canonical derived area
 
 ## Migration note
 
 This format is a reset from the earlier `graph-task` md-first project/step/phase/node hierarchy.
 That older shape is still useful as source material, but TaskOps v1 should align storage around:
+- work roots
 - versioned task groups
 - explicit snapshots
-- explicit run graph separation
+- explicit EoW closure nodes
+- independent run graph separation

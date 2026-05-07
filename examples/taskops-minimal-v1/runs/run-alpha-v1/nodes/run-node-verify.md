@@ -5,7 +5,7 @@ id: run-node-verify
 runId: run-alpha-v1
 type: verification
 title: Inspect the example for coherence
-status: active
+status: done
 sourceTaskId: task-verify-example
 sourceTaskGroupVersionId: tgv-design-v1
 createdAt: 2026-04-27T03:12:00+09:00

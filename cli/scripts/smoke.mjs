@@ -71,7 +71,7 @@ writeFileSync(specPath, JSON.stringify({
 run(['decompose', projectDir, '--task-group-id', 'tg-root', '--spec', specPath]);
 run(['validate', projectDir]);
 const summary = run(['summary', projectDir]).stdout;
-if (!summary.includes('Demo Project') || !summary.includes('task-alpha') || !summary.includes('task-discovery [pending; needs_exploration]') || !summary.includes('- Project objective: Smoke test the TaskOps CLI') || !summary.includes('## Selected version') || !summary.includes('초기 루트 분해')) {
+if (!summary.includes('Demo Project') || !summary.includes('task-alpha') || !summary.includes('task-discovery [pending; needs_exploration]') || !summary.includes('- Work objective: Smoke test the TaskOps CLI') || !summary.includes('## Selected version') || !summary.includes('초기 루트 분해')) {
   console.error('Unexpected summary output');
   console.error(summary);
   process.exit(1);

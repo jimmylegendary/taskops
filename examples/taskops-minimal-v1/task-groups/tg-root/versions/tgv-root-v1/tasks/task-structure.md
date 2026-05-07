@@ -9,6 +9,10 @@ objective: Create the top-level project, snapshot, run, and derived folders cohe
 responsibility: Own the root container layout and shared canonical boundaries.
 completionCriteria: Top-level folders and index notes exist with coherent ids and purposes.
 order: 1
+runRefs:
+  - runId: run-alpha-v1
+    runNodeId: run-node-structure
+    role: primary_execution
 createdAt: 2026-04-27T03:10:00+09:00
 status: done
 ---

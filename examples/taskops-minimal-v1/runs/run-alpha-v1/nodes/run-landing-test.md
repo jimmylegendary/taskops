@@ -5,7 +5,7 @@ id: run-landing-test
 runId: run-alpha-v1
 type: experiment
 title: Run a landing-page conversion test
-status: active
+status: done
 sourceTaskId: task-improve-conversion
 sourceTaskGroupVersionId: tgv-acquire-users-v1
 createdAt: 2026-04-27T00:00:00Z

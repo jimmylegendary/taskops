@@ -11,10 +11,12 @@ TaskOps is not a checklist store. It turns an objective into a task tree, then u
    - `needs_decomposition`
    - `needs_exploration`
    - `blocked`
-4. Send only `runnable` nodes into the run graph.
+4. Send only `runnable` nodes into an independent run graph under `runs/<run-id>/`.
 5. For `needs_decomposition`, create the next task group/version.
 6. For `needs_exploration`, create an exploratory run whose purpose is understanding, not delivery.
-7. After every run, feed the result back into the task graph: update unknowns, constraints, decomposition, or readiness.
+7. If a run needs a human, another AI, an agent, or an external system, create a `type: delegate` / `status: waiting` run node with expected output and timeout metadata.
+8. After every run, feed the result back into the task graph: update unknowns, constraints, decomposition, readiness, or task↔run refs.
+9. When a selected branch is truly terminal, attach an explicit EoW node. A branch without EoW is still open.
 
 ## Objective discipline
 
@@ -72,9 +74,25 @@ objective
 → tree decomposition
 → run-readiness classification
 → run / decompose / explore
-→ result + failure + learned constraints
+→ result + delegation + failure + learned constraints
 → revised tree
+→ EoW closure when a branch is terminal
 → better next classification
 ```
 
 The important rule: failed or exploratory execution is not waste. It is feedback that updates the task graph.
+
+## Closure discipline
+
+Do not treat `done` as the same thing as EoW.
+
+- `done` is a status on a task or run node.
+- `EoW` is a visible terminal graph node declaring that this branch/path should not decompose or execute further.
+
+Work completion should be derived from graph closure:
+
+```text
+all active-snapshot terminal task branches have EoW
++ required terminal run paths have EoW
++ no unresolved waiting/delegated/blocking nodes remain
+```

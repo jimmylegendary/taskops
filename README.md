@@ -2,8 +2,9 @@
 
 TaskOps is a task-operations framework built around two distinct but connected layers:
 
+- **work** — the top-level container around one objective
 - **task graph** — a decomposition graph that enforces structural quality
-- **run graph** — an execution graph that records real-world work, overlap, and dependency
+- **run graph** — independent execution graphs that record real-world work, overlap, dependency, delegation, waiting, and closure
 
 This monorepo contains:
 
@@ -27,21 +28,24 @@ The v1 working contract is now:
 
 - **Task graph** exists to guarantee good decomposition.
 - **Run graph** exists to represent execution reality.
+- **EoW (End of Work)** is a visible terminal node attached to task branches or run paths when they are truly closed.
+- **Delegated waiting** is represented as `type: delegate` / `status: waiting` in the run graph, with delegatee, request, expected output, and optional timeout metadata.
+- **Task↔run references** are bidirectional: tasks use `runRefs`; run nodes use `sourceTaskId` / `sourceTaskGroupVersionId`.
 - **Run readiness** classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, or `blocked` before execution.
 - **Exploratory runs** are first-class feedback loops for unknown-unknowns: run/search/try/error to learn enough to decompose honestly.
 - **Task groups** are versioned decomposition units.
 - **Refactor** creates a new task-group version rather than mutating decomposition history away.
 - **Snapshots** represent selected version paths, not every possible combinatorial version state.
 
-## v1 canonical project shape
+## v1 canonical work shape
 
 ```text
-<taskops-project>/
+<taskops-work>/
   index.md
-  project-log.md
+  work-log.md
   task-groups/
   snapshots/
-  run/
+  runs/
   derived/
 ```
 
@@ -51,6 +55,8 @@ See:
 - `docs/DECOMPOSITION_PROTOCOL.md`
 - `docs/RUN_READINESS.md`
 - `examples/taskops-canonical-minimal-v1/`
+
+New roots use `entityType: work`. Legacy `entityType: project` and singular `run/` folders remain readable for migration, but new work should use independent `runs/<run-id>/` graphs.
 
 For a slightly denser non-canonical companion fixture, see `examples/taskops-minimal-v1/`.
 

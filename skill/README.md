@@ -5,9 +5,11 @@ Structured task-operations protocol with a **markdown-canonical** TaskOps v1 mod
 ## Canonical shape
 
 TaskOps v1 separates:
+- **work root** at `index.md` with `entityType: work`
 - **task graph** under `task-groups/`
 - **snapshot selection** under `snapshots/`
-- **execution truth** under `run/`
+- **execution truth** under independent `runs/<run-id>/` graphs
+- **EoW terminal nodes** under task-version `eow/` folders and run `nodes/`
 - **derived views** under `derived/`
 
 Markdown is canonical.

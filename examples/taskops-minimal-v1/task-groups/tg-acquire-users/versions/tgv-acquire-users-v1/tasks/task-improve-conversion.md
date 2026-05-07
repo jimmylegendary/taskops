@@ -9,6 +9,10 @@ objective: Improve the user path from arrival to activation
 responsibility: Conversion path ownership
 completionCriteria: A concrete activation path exists with identifiable improvement points
 order: 2
+runRefs:
+  - runId: run-alpha-v1
+    runNodeId: run-landing-test
+    role: experiment
 createdAt: 2026-04-27T00:00:00Z
 status: pending
 ---

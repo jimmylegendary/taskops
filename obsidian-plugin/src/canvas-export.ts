@@ -32,6 +32,7 @@ export interface CanvasData {
 export type CanvasViewMode = 'task-groups' | 'snapshots' | 'run';
 
 const COLORS: Record<string, string> = {
+  work: '#94A3B8',
   project: '#94A3B8',
   taskGroup: '#F59E0B',
   taskGroupVersion: '#60A5FA',
@@ -40,14 +41,17 @@ const COLORS: Record<string, string> = {
   run: '#334155',
   runNode: '#2563EB',
   runEdge: '#64748B',
+  eow: '#EF4444',
   active: '#2563EB',
   done: '#16A34A',
   blocked: '#DC2626',
+  waiting: '#F97316',
   pending: '#94A3B8',
   cancelled: '#6B7280',
 };
 
 const SIZE: Record<string, [number, number]> = {
+  work: [320, 100],
   project: [320, 100],
   taskGroup: [280, 92],
   taskGroupVersion: [260, 84],
@@ -56,6 +60,7 @@ const SIZE: Record<string, [number, number]> = {
   run: [260, 84],
   runNode: [240, 78],
   runEdge: [220, 72],
+  eow: [200, 70],
 };
 
 function key(entity: Entity): string {
@@ -87,14 +92,14 @@ function snapshotsOf(project: Entity): Entity[] {
   return project.children.filter((child) => child.type === 'versionSnapshot');
 }
 
-function runOf(project: Entity): Entity | null {
-  return project.children.find((child) => child.type === 'run') ?? null;
+function runsOf(project: Entity): Entity[] {
+  return project.children.filter((child) => child.type === 'run');
 }
 
 function buildTaskGroupCanvas(project: Entity): CanvasData {
   const nodes: CanvasNodeData[] = [];
   const edges: CanvasEdgeData[] = [];
-  const projectNode = fileNode(project, 0, 0, COLORS.project);
+  const projectNode = fileNode(project, 0, 0, COLORS[project.type] ?? COLORS.project);
   nodes.push(projectNode);
 
   taskGroupsOf(project).forEach((taskGroup, tgIndex) => {
@@ -114,10 +119,11 @@ function buildTaskGroupCanvas(project: Entity): CanvasData {
       edges.push(edge(taskGroupNode.id, versionNode.id, COLORS.taskGroupVersion, version.frontmatter.selected === true ? 'selected' : 'version'));
 
       version.children.forEach((task, taskIndex) => {
-        const taskNode = fileNode(task, versionX, versionY + 140 + taskIndex * 104, COLORS.task);
+        const color = task.type === 'eow' ? COLORS.eow : COLORS.task;
+        const taskNode = fileNode(task, versionX, versionY + 140 + taskIndex * 104, color);
         nodes.push(taskNode);
-        let label = 'task';
-        if (typeof task.frontmatter.childTaskGroupId === 'string') label = `task -> ${task.frontmatter.childTaskGroupId}`;
+        let label = task.type === 'eow' ? `EoW -> ${String(task.frontmatter.attachedToId ?? '')}` : 'task';
+        if (task.type === 'task' && typeof task.frontmatter.childTaskGroupId === 'string') label = `task -> ${task.frontmatter.childTaskGroupId}`;
         edges.push(edge(versionNode.id, taskNode.id, statusColor(task.status), label));
       });
     });
@@ -129,7 +135,7 @@ function buildTaskGroupCanvas(project: Entity): CanvasData {
 function buildSnapshotCanvas(project: Entity): CanvasData {
   const nodes: CanvasNodeData[] = [];
   const edges: CanvasEdgeData[] = [];
-  const projectNode = fileNode(project, 0, 0, COLORS.project);
+  const projectNode = fileNode(project, 0, 0, COLORS[project.type] ?? COLORS.project);
   nodes.push(projectNode);
   const versionNodeMap = new Map<string, CanvasNodeData>();
 
@@ -166,38 +172,43 @@ function buildSnapshotCanvas(project: Entity): CanvasData {
 function buildRunCanvas(project: Entity): CanvasData {
   const nodes: CanvasNodeData[] = [];
   const edges: CanvasEdgeData[] = [];
-  const projectNode = fileNode(project, 0, 0, COLORS.project);
+  const projectNode = fileNode(project, 0, 0, COLORS[project.type] ?? COLORS.project);
   nodes.push(projectNode);
-  const run = runOf(project);
-  if (!run) return { nodes, edges };
+  const runs = runsOf(project);
+  if (runs.length === 0) return { nodes, edges };
 
-  const runNode = fileNode(run, 0, 180, COLORS.run);
-  nodes.push(runNode);
-  edges.push(edge(projectNode.id, runNode.id, COLORS.run, 'run'));
+  runs.forEach((run, runIndex) => {
+    const baseY = 180 + runIndex * 420;
+    const runNode = fileNode(run, 0, baseY, COLORS.run);
+    nodes.push(runNode);
+    edges.push(edge(projectNode.id, runNode.id, COLORS.run, 'run'));
 
-  const runNodes = run.children.filter((child) => child.type === 'runNode');
-  const runEdges = run.children.filter((child) => child.type === 'runEdge');
-  const runNodeMap = new Map<string, CanvasNodeData>();
+    const graphNodes = run.children.filter((child) => child.type === 'runNode' || child.type === 'eow');
+    const runEdges = run.children.filter((child) => child.type === 'runEdge');
+    const runNodeMap = new Map<string, CanvasNodeData>();
 
-  runNodes.forEach((nodeEntity, idx) => {
-    const x = idx * 320;
-    const y = 340;
-    const node = fileNode(nodeEntity, x, y, COLORS.runNode);
-    nodes.push(node);
-    runNodeMap.set(nodeEntity.id, node);
-    edges.push(edge(runNode.id, node.id, statusColor(nodeEntity.status), String(nodeEntity.frontmatter.type ?? 'runNode')));
-  });
+    graphNodes.forEach((nodeEntity, idx) => {
+      const x = idx * 320;
+      const y = baseY + 160;
+      const color = nodeEntity.type === 'eow' ? COLORS.eow : COLORS.runNode;
+      const node = fileNode(nodeEntity, x, y, color);
+      nodes.push(node);
+      runNodeMap.set(nodeEntity.id, node);
+      const label = nodeEntity.type === 'eow' ? `EoW -> ${String(nodeEntity.frontmatter.attachedToId ?? '')}` : String(nodeEntity.frontmatter.type ?? 'runNode');
+      edges.push(edge(runNode.id, node.id, statusColor(nodeEntity.status), label));
+    });
 
-  runEdges.forEach((edgeEntity, idx) => {
-    const fromId = typeof edgeEntity.frontmatter.fromRunNodeId === 'string' ? edgeEntity.frontmatter.fromRunNodeId : null;
-    const toId = typeof edgeEntity.frontmatter.toRunNodeId === 'string' ? edgeEntity.frontmatter.toRunNodeId : null;
-    if (fromId && toId && runNodeMap.has(fromId) && runNodeMap.has(toId)) {
-      edges.push(edge(runNodeMap.get(fromId)!.id, runNodeMap.get(toId)!.id, COLORS.runEdge, String(edgeEntity.frontmatter.edgeType ?? 'edge')));
-    } else {
-      const stub = fileNode(edgeEntity, idx * 260, 520, COLORS.runEdge);
-      nodes.push(stub);
-      edges.push(edge(runNode.id, stub.id, COLORS.runEdge, 'edge-record'));
-    }
+    runEdges.forEach((edgeEntity, idx) => {
+      const fromId = typeof edgeEntity.frontmatter.fromRunNodeId === 'string' ? edgeEntity.frontmatter.fromRunNodeId : null;
+      const toId = typeof edgeEntity.frontmatter.toRunNodeId === 'string' ? edgeEntity.frontmatter.toRunNodeId : null;
+      if (fromId && toId && runNodeMap.has(fromId) && runNodeMap.has(toId)) {
+        edges.push(edge(runNodeMap.get(fromId)!.id, runNodeMap.get(toId)!.id, COLORS.runEdge, String(edgeEntity.frontmatter.edgeType ?? 'edge')));
+      } else {
+        const stub = fileNode(edgeEntity, idx * 260, baseY + 340, COLORS.runEdge);
+        nodes.push(stub);
+        edges.push(edge(runNode.id, stub.id, COLORS.runEdge, 'edge-record'));
+      }
+    });
   });
 
   return { nodes, edges };
@@ -242,7 +253,7 @@ async function exportProject(app: App, project: Entity, openFirst: boolean) {
   const files: Array<{ mode: CanvasViewMode; path: string }> = [];
   for (const mode of ['task-groups', 'snapshots', 'run'] as const) {
     const data = buildCanvas(project, mode);
-    const path = normalizePath(`${project.folderPath}/canvases/${project.id}-${mode}-view.canvas`);
+    const path = normalizePath(`${project.folderPath}/derived/canvases/${project.id}-${mode}-view.canvas`);
     await writeFile(app, path, `${JSON.stringify(data, null, 2)}\n`);
     files.push({ mode, path });
   }
@@ -278,5 +289,5 @@ export async function exportAllProjectCanvases(app: App, projects: Entity[]): Pr
 
 export function describeCanvasPaths(project: Entity): string[] {
   if (!project.folderPath) return [];
-  return (['task-groups', 'snapshots', 'run'] as CanvasViewMode[]).map((mode) => normalizePath(`${project.folderPath}/canvases/${project.id}-${mode}-view.canvas`));
+  return (['task-groups', 'snapshots', 'run'] as CanvasViewMode[]).map((mode) => normalizePath(`${project.folderPath}/derived/canvases/${project.id}-${mode}-view.canvas`));
 }

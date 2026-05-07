@@ -12,7 +12,7 @@ TaskOps v1 is **md-first**.
 Canonical state lives in markdown files arranged around:
 - `task-groups/`
 - `snapshots/`
-- `run/`
+- `runs/<run-id>/`
 - non-canonical `derived/`
 
 Do **not** treat `graph.json` as durable canonical state.
@@ -30,10 +30,15 @@ That older path is legacy source material only.
 
 - Task graph = decomposition truth
 - Run graph = execution truth
+- Work = top-level objective container (`entityType: work`; legacy `project` can still be read)
 - Task groups are versioned
 - Snapshots materialize selected version paths
+- EoW (End of Work) is an explicit terminal node, not just a status field
+- Run graphs are independent under `runs/<run-id>/` and may reference external runs/tasks without being merged
+- Task↔run traceability is bidirectional: task `runRefs` plus run-node `sourceTaskId` / `sourceTaskGroupVersionId`
+- Delegation/waiting belongs in the run graph as `type: delegate` / `status: waiting` with delegatee, request, expected output, and optional timeout metadata
 - Markdown is canonical; canvas/views are derived
-- Shared status vocabulary: `pending | active | done | blocked | cancelled`
+- Shared status vocabulary: `pending | active | done | blocked | waiting | cancelled`
 - Before execution, classify task run readiness as `runnable | needs_decomposition | needs_exploration | blocked`
 - Use `needs_exploration` when the objective is meaningful but the system does not yet know enough to decompose honestly; exploratory runs may search, try, debug, prototype, and reflect to learn constraints for the next graph update
 
@@ -43,6 +48,8 @@ That older path is legacy source material only.
 - Decompose depth 1 by default.
 - Do not turn decomposition into an activity checklist.
 - A task can be large but not decomposable yet; if the missing knowledge blocks honest decomposition, create an exploratory run and feed the result back into the task graph.
+- A terminal selected branch is not closed until an EoW node is attached.
+- Do not continue past a delegated/waiting run node until it resolves, is cancelled, or times out into an explicit follow-up.
 
 ## Preferred CLI
 

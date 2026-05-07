@@ -9,6 +9,10 @@ objective: Ensure the chosen snapshot and run graph can be inspected directly fr
 responsibility: Own the example-level coherence check.
 completionCriteria: A human can trace selected versions and run references without hidden state.
 order: 2
+runRefs:
+  - runId: run-alpha-v1
+    runNodeId: run-node-verify
+    role: verification
 createdAt: 2026-04-27T03:10:00+09:00
 status: active
 ---

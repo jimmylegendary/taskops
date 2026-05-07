@@ -51,22 +51,23 @@ const projects = [];
 for (const path of files) {
   if (basename(path) !== 'index.md') continue;
   const fm = parseFrontmatter(readFileSync(path, 'utf8'));
-  if (!fm || fm.entityType !== 'project') continue;
+  if (!fm || (fm.entityType !== 'work' && fm.entityType !== 'project')) continue;
   projects.push({ path, fm, root: dirname(path) });
 }
 if (projects.length !== 1) {
-  console.error(`FAIL: expected 1 project, found ${projects.length}`);
+  console.error(`FAIL: expected 1 work, found ${projects.length}`);
   process.exit(1);
 }
 
 const project = projects[0];
-console.log(`project: ${project.fm.id} status=${project.fm.status} at ${relative(EXAMPLE_ROOT, project.path)}`);
+console.log(`work: ${project.fm.id} status=${project.fm.status} at ${relative(EXAMPLE_ROOT, project.path)}`);
 let taskGroups = 0;
 let versions = 0;
 let tasks = 0;
 let snapshots = 0;
 let runNodes = 0;
 let runEdges = 0;
+let eowNodes = 0;
 
 for (const tgName of readdirSync(join(project.root, 'task-groups'))) {
   const tgDir = join(project.root, 'task-groups', tgName);
@@ -89,6 +90,16 @@ for (const tgName of readdirSync(join(project.root, 'task-groups'))) {
       tasks++;
       console.log(`      task: ${taskFm.id}`);
     }
+    const eowDir = join(versionDir, 'eow');
+    if (statSync(eowDir, { throwIfNoEntry: false })?.isDirectory()) {
+      for (const eowName of readdirSync(eowDir)) {
+        if (!eowName.endsWith('.md')) continue;
+        const eowFm = parseFrontmatter(readFileSync(join(eowDir, eowName), 'utf8'));
+        if (eowFm?.entityType !== 'eow') throw new Error(`Expected eow at ${eowName}`);
+        eowNodes++;
+        console.log(`      eow: ${eowFm.id}`);
+      }
+    }
   }
 }
 for (const snapName of readdirSync(join(project.root, 'snapshots'))) {
@@ -98,23 +109,31 @@ for (const snapName of readdirSync(join(project.root, 'snapshots'))) {
   snapshots++;
   console.log(`  snapshot: ${fm.id}`);
 }
-for (const runNodeName of readdirSync(join(project.root, 'run', 'nodes'))) {
-  if (!runNodeName.endsWith('.md')) continue;
-  const fm = parseFrontmatter(readFileSync(join(project.root, 'run', 'nodes', runNodeName), 'utf8'));
-  if (fm?.entityType !== 'runNode') throw new Error(`Expected runNode at ${runNodeName}`);
-  runNodes++;
-  console.log(`  runNode: ${fm.id}`);
-}
-for (const runEdgeName of readdirSync(join(project.root, 'run', 'edges'))) {
-  if (!runEdgeName.endsWith('.md')) continue;
-  const fm = parseFrontmatter(readFileSync(join(project.root, 'run', 'edges', runEdgeName), 'utf8'));
-  if (fm?.entityType !== 'runEdge') throw new Error(`Expected runEdge at ${runEdgeName}`);
-  runEdges++;
-  console.log(`  runEdge: ${fm.id}`);
+for (const runName of readdirSync(join(project.root, 'runs'))) {
+  const runDir = join(project.root, 'runs', runName);
+  if (!statSync(runDir).isDirectory()) continue;
+  for (const runNodeName of readdirSync(join(runDir, 'nodes'))) {
+    if (!runNodeName.endsWith('.md')) continue;
+    const fm = parseFrontmatter(readFileSync(join(runDir, 'nodes', runNodeName), 'utf8'));
+    if (fm?.entityType === 'eow') {
+      eowNodes++;
+      console.log(`  runEow: ${fm.id}`);
+    } else if (fm?.entityType === 'runNode') {
+      runNodes++;
+      console.log(`  runNode: ${fm.id}`);
+    } else throw new Error(`Expected runNode/eow at ${runNodeName}`);
+  }
+  for (const runEdgeName of readdirSync(join(runDir, 'edges'))) {
+    if (!runEdgeName.endsWith('.md')) continue;
+    const fm = parseFrontmatter(readFileSync(join(runDir, 'edges', runEdgeName), 'utf8'));
+    if (fm?.entityType !== 'runEdge') throw new Error(`Expected runEdge at ${runEdgeName}`);
+    runEdges++;
+    console.log(`  runEdge: ${fm.id}`);
+  }
 }
 
-console.log(`\nOK: projects=1 taskGroups=${taskGroups} versions=${versions} tasks=${tasks} snapshots=${snapshots} runNodes=${runNodes} runEdges=${runEdges}`);
-if (taskGroups !== 2 || versions !== 2 || tasks !== 5 || snapshots !== 1 || runNodes !== 2 || runEdges !== 1) {
+console.log(`\nOK: works=1 taskGroups=${taskGroups} versions=${versions} tasks=${tasks} snapshots=${snapshots} runNodes=${runNodes} runEdges=${runEdges} eowNodes=${eowNodes}`);
+if (taskGroups !== 2 || versions !== 2 || tasks !== 5 || snapshots !== 1 || runNodes !== 2 || runEdges !== 2 || eowNodes !== 5) {
   console.error('FAIL: counts do not match expected canonical example');
   process.exit(1);
 }

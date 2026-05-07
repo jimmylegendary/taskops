@@ -1,6 +1,7 @@
 import { App, TFile, TFolder } from 'obsidian';
 
 export type EntityType =
+  | 'work'
   | 'project'
   | 'taskGroup'
   | 'taskGroupVersion'
@@ -8,7 +9,8 @@ export type EntityType =
   | 'versionSnapshot'
   | 'run'
   | 'runNode'
-  | 'runEdge';
+  | 'runEdge'
+  | 'eow';
 
 export interface Entity {
   type: EntityType;
@@ -29,7 +31,7 @@ export interface ScanResult {
 }
 
 const REQUIRED_COMMON = ['taskOpsVersion', 'entityType', 'id'] as const;
-const STATUS_VALUES = new Set(['pending', 'active', 'done', 'blocked', 'cancelled']);
+const STATUS_VALUES = new Set(['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled']);
 const RUN_READINESS_VALUES = new Set(['runnable', 'needs_decomposition', 'needs_exploration', 'blocked']);
 const UNDERSTANDING_LEVEL_VALUES = new Set(['known', 'partial', 'unknown']);
 
@@ -164,9 +166,8 @@ function buildTaskGroupVersion(app: App, versionFolder: TFolder, projectId: stri
   const tasksFolder = findChildFolder(versionFolder, 'tasks');
   if (!tasksFolder) {
     version.issues.push("missing 'tasks/' folder");
-    return version;
-  }
-  for (const file of listMdFiles(tasksFolder)) {
+  } else {
+    for (const file of listMdFiles(tasksFolder)) {
     const task = entityFromLeafFile(app, file, 'task');
     if (!task) {
       version.issues.push(`task file '${file.name}' missing valid frontmatter (entityType: task)`);
@@ -180,7 +181,27 @@ function buildTaskGroupVersion(app: App, versionFolder: TFolder, projectId: stri
       runReadiness: typeof task.frontmatter.runReadiness === 'string' ? task.frontmatter.runReadiness : null,
       understandingLevel: typeof task.frontmatter.understandingLevel === 'string' ? task.frontmatter.understandingLevel : null,
     };
-    version.children.push(task);
+      version.children.push(task);
+    }
+  }
+
+  const taskIds = new Set(version.children.filter((child) => child.type === 'task').map((child) => child.id));
+  const eowFolder = findChildFolder(versionFolder, 'eow');
+  if (eowFolder) {
+    for (const file of listMdFiles(eowFolder)) {
+      const eow = entityFromLeafFile(app, file, 'eow');
+      if (!eow) {
+        version.issues.push(`EoW file '${file.name}' missing valid frontmatter (entityType: eow)`);
+        continue;
+      }
+      if (eow.frontmatter.graphType !== 'task') eow.issues.push("graphType should be 'task'");
+      if (eow.frontmatter.attachedToType !== 'task') eow.issues.push("attachedToType should be 'task'");
+      if (typeof eow.frontmatter.attachedToId === 'string' && !taskIds.has(eow.frontmatter.attachedToId)) {
+        eow.issues.push(`attached task '${String(eow.frontmatter.attachedToId)}' not found in this version`);
+      }
+      eow.extras = { order: Number.MAX_SAFE_INTEGER };
+      version.children.push(eow);
+    }
   }
   version.children.sort((a, b) => Number(a.extras?.order ?? 0) - Number(b.extras?.order ?? 0));
   return version;
@@ -248,27 +269,49 @@ function buildRun(app: App, runFolder: TFolder, versionIds: Set<string>, taskIds
   if (!run) return null;
   const nodesFolder = findChildFolder(runFolder, 'nodes');
   const edgesFolder = findChildFolder(runFolder, 'edges');
-  const seenNodes = new Set<string>();
+  const seenGraphNodes = new Set<string>();
+  const seenRunNodes = new Set<string>();
 
   if (!nodesFolder) run.issues.push("missing 'nodes/' folder");
   if (!edgesFolder) run.issues.push("missing 'edges/' folder");
 
   if (nodesFolder) {
     for (const file of listMdFiles(nodesFolder)) {
-      const node = entityFromLeafFile(app, file, 'runNode');
+      const fm = getFrontmatter(app, file);
+      const expectedType = fm?.entityType === 'eow' ? 'eow' : 'runNode';
+      const node = entityFromLeafFile(app, file, expectedType);
       if (!node) {
-        run.issues.push(`run node file '${file.name}' missing valid frontmatter (entityType: runNode)`);
+        run.issues.push(`run node file '${file.name}' missing valid frontmatter (entityType: runNode or eow)`);
         continue;
       }
       if (node.frontmatter.runId !== run.id) node.issues.push(`runId should be '${run.id}'`);
-      if (typeof node.frontmatter.sourceTaskGroupVersionId === 'string' && !versionIds.has(node.frontmatter.sourceTaskGroupVersionId)) {
-        node.issues.push(`sourceTaskGroupVersionId '${String(node.frontmatter.sourceTaskGroupVersionId)}' not found`);
+      if (node.type === 'eow') {
+        if (node.frontmatter.graphType !== 'run') node.issues.push("graphType should be 'run'");
+        if (node.frontmatter.attachedToType !== 'runNode') node.issues.push("attachedToType should be 'runNode'");
+      } else {
+        if (typeof node.frontmatter.sourceTaskGroupVersionId === 'string' && !versionIds.has(node.frontmatter.sourceTaskGroupVersionId)) {
+          node.issues.push(`sourceTaskGroupVersionId '${String(node.frontmatter.sourceTaskGroupVersionId)}' not found`);
+        }
+        if (typeof node.frontmatter.sourceTaskId === 'string' && !taskIds.has(node.frontmatter.sourceTaskId)) {
+          node.issues.push(`sourceTaskId '${String(node.frontmatter.sourceTaskId)}' not found`);
+        }
+        if (node.frontmatter.status === 'waiting' || node.frontmatter.type === 'delegate') {
+          for (const field of ['delegateeType', 'delegateeRef', 'expectedOutput', 'requestedAt']) {
+            if (node.frontmatter[field] === undefined || node.frontmatter[field] === null || node.frontmatter[field] === '') {
+              node.issues.push(`delegation/waiting node missing '${field}'`);
+            }
+          }
+        }
+        seenRunNodes.add(node.id);
       }
-      if (typeof node.frontmatter.sourceTaskId === 'string' && !taskIds.has(node.frontmatter.sourceTaskId)) {
-        node.issues.push(`sourceTaskId '${String(node.frontmatter.sourceTaskId)}' not found`);
-      }
-      seenNodes.add(node.id);
+      seenGraphNodes.add(node.id);
       run.children.push(node);
+    }
+  }
+
+  for (const child of run.children) {
+    if (child.type === 'eow' && typeof child.frontmatter.attachedToId === 'string' && !seenRunNodes.has(child.frontmatter.attachedToId)) {
+      child.issues.push(`attached run node '${String(child.frontmatter.attachedToId)}' not found`);
     }
   }
 
@@ -280,10 +323,10 @@ function buildRun(app: App, runFolder: TFolder, versionIds: Set<string>, taskIds
         continue;
       }
       if (edge.frontmatter.runId !== run.id) edge.issues.push(`runId should be '${run.id}'`);
-      if (typeof edge.frontmatter.fromRunNodeId === 'string' && !seenNodes.has(edge.frontmatter.fromRunNodeId)) {
+      if (typeof edge.frontmatter.fromRunNodeId === 'string' && !seenGraphNodes.has(edge.frontmatter.fromRunNodeId)) {
         edge.issues.push(`fromRunNodeId '${String(edge.frontmatter.fromRunNodeId)}' not found`);
       }
-      if (typeof edge.frontmatter.toRunNodeId === 'string' && !seenNodes.has(edge.frontmatter.toRunNodeId)) {
+      if (typeof edge.frontmatter.toRunNodeId === 'string' && !seenGraphNodes.has(edge.frontmatter.toRunNodeId)) {
         edge.issues.push(`toRunNodeId '${String(edge.frontmatter.toRunNodeId)}' not found`);
       }
       run.children.push(edge);
@@ -294,8 +337,8 @@ function buildRun(app: App, runFolder: TFolder, versionIds: Set<string>, taskIds
 }
 
 function buildProject(app: App, projectFolder: TFolder): Entity {
-  const project = entityFromIndex(app, projectFolder, 'project');
-  if (!project) throw new Error(`buildProject called on non-project folder ${projectFolder.path}`);
+  const project = entityFromIndex(app, projectFolder, 'work') ?? entityFromIndex(app, projectFolder, 'project');
+  if (!project) throw new Error(`buildProject called on non-TaskOps work folder ${projectFolder.path}`);
 
   const taskGroupsFolder = findChildFolder(projectFolder, 'task-groups');
   if (!taskGroupsFolder) project.issues.push("project has no 'task-groups/' folder");
@@ -325,13 +368,23 @@ function buildProject(app: App, projectFolder: TFolder): Entity {
     project.issues.push("project has no 'snapshots/' folder");
   }
 
-  const runFolder = findChildFolder(projectFolder, 'run');
-  if (runFolder) {
-    const run = buildRun(app, runFolder, versionIds, taskIds);
-    if (run) project.children.push(run);
-    else project.issues.push("run folder missing valid index.md with entityType: run");
+  const runsFolder = findChildFolder(projectFolder, 'runs');
+  if (runsFolder) {
+    for (const runFolder of listFolders(runsFolder)) {
+      const run = buildRun(app, runFolder, versionIds, taskIds);
+      if (run) project.children.push(run);
+      else project.issues.push(`run folder '${runFolder.name}' missing valid index.md with entityType: run`);
+    }
   } else {
-    project.issues.push("project has no 'run/' folder");
+    const legacyRunFolder = findChildFolder(projectFolder, 'run');
+    if (legacyRunFolder) {
+      const run = buildRun(app, legacyRunFolder, versionIds, taskIds);
+      if (run) project.children.push(run);
+      else project.issues.push("legacy run folder missing valid index.md with entityType: run");
+      project.issues.push("legacy 'run/' folder is readable; prefer 'runs/<run-id>/'");
+    } else {
+      project.issues.push("work has no 'runs/' folder");
+    }
   }
 
   if (typeof project.frontmatter.activeRootTaskGroupId === 'string' && !taskGroupIds.has(project.frontmatter.activeRootTaskGroupId)) {
@@ -344,6 +397,7 @@ function buildProject(app: App, projectFolder: TFolder): Entity {
 
   project.children.sort((a, b) => {
     const order: Record<EntityType, number> = {
+      work: 0,
       project: 0,
       taskGroup: 1,
       versionSnapshot: 2,
@@ -351,7 +405,8 @@ function buildProject(app: App, projectFolder: TFolder): Entity {
       taskGroupVersion: 4,
       task: 5,
       runNode: 6,
-      runEdge: 7,
+      eow: 7,
+      runEdge: 8,
     };
     const diff = order[a.type] - order[b.type];
     return diff !== 0 ? diff : a.id.localeCompare(b.id);
@@ -368,11 +423,11 @@ export function scanProjects(app: App): ScanResult {
   for (const file of app.vault.getMarkdownFiles()) {
     if (file.name !== 'index.md') continue;
     const fm = getFrontmatter(app, file);
-    if (!fm || fm.entityType !== 'project') continue;
+    if (!fm || (fm.entityType !== 'work' && fm.entityType !== 'project')) continue;
     const parent = file.parent;
     if (!(parent instanceof TFolder)) continue;
     const project = buildProject(app, parent);
-    if (seenProjectIds.has(project.id)) globalIssues.push(`duplicate project id '${project.id}' at ${parent.path}`);
+    if (seenProjectIds.has(project.id)) globalIssues.push(`duplicate work id '${project.id}' at ${parent.path}`);
     seenProjectIds.add(project.id);
     projects.push(project);
   }
