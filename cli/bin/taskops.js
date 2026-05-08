@@ -25,9 +25,9 @@ Usage:
   taskops validate <path>
   taskops summary <path> [--write]
   taskops show <path> [--json]
-  taskops classify-runnable <project-dir> <task-id> [--json]
-  taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>
-  taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
+  taskops classify-runnable <work-dir> <task-id> [--json]
+  taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
+  taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
   taskops git-status <vault-dir>
   taskops git-sync <vault-dir> [--message <msg>] [--branch <branch>]
   taskops watch-sync <vault-dir> [--message <msg>] [--debounce-ms <ms>] [--branch <branch>]

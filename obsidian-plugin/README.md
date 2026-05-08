@@ -3,10 +3,10 @@
 Tree-first Obsidian client for the canonical md-first TaskOps v1 model.
 
 ## What it does
-- scans the current vault for TaskOps projects
-- detects a project when a folder contains `index.md` with `entityType: project`
+- scans the current vault for TaskOps work roots
+- detects a work root when a folder contains `index.md` with `entityType: work`; legacy `entityType: project` remains readable for migration
 - renders a side-panel tree:
-  - Project
+  - Work
   - TaskGroup
     - TaskGroupVersion
       - Task
@@ -25,7 +25,7 @@ Tree-first Obsidian client for the canonical md-first TaskOps v1 model.
 This MVP is intentionally read-only.
 
 Included:
-- parse the canonical TaskOps v1 folder layout
+- parse the canonical TaskOps v1 folder layout (`task-groups/`, `snapshots/`, `runs/<run-id>/`, and non-canonical `derived/`)
 - inspect the tree in Obsidian
 - open canonical markdown files
 - refresh the parsed state
@@ -61,8 +61,8 @@ Expected output includes:
 - `task: task-design`
 - `snapshot: snapshot-alpha-v1`
 - `runNode: run-node-verify`
-- canvas file paths under `taskops/examples/taskops-canonical-minimal-v1/canvases/`
-- final parse line: `OK: projects=1 taskGroups=2 versions=2 tasks=5 snapshots=1 runNodes=2 runEdges=1`
+- canvas file paths under `taskops/examples/taskops-canonical-minimal-v1/derived/canvases/`
+- final parse line: `OK: works=1 taskGroups=2 versions=2 tasks=5 snapshots=1 runNodes=2 runEdges=2 eowNodes=5`
 
 ## Git-backed vault auto-sync
 If your vault is also your GitHub-backed work repo, initialize it first with the CLI:
@@ -98,20 +98,20 @@ Notes:
    - turn off Restricted mode
    - enable **TaskOps Explorer**
 7. Click the ribbon icon or run the command:
-   - `TaskOps Explorer: Open project explorer`
+   - `TaskOps Explorer: Open work explorer`
 
 ### Option B — use your real vault
-If your real vault contains TaskOps v1 project folders with the same structure, install the plugin the same way and open the explorer.
+If your real vault contains TaskOps v1 work folders with the same structure, install the plugin the same way and open the explorer.
 
 ## Export canvas views in Obsidian
 After enabling the plugin, you can run either of these commands:
-- `TaskOps Explorer: Export canvas views for active project`
-- `TaskOps Explorer: Export canvas views for all projects`
+- `TaskOps Explorer: Export canvas views for active work`
+- `TaskOps Explorer: Export canvas views for all work roots`
 
-For each project, the plugin writes three derived canvas files:
-- `<project-id>-task-groups-view.canvas`
-- `<project-id>-snapshots-view.canvas`
-- `<project-id>-run-view.canvas`
+For each work root, the plugin writes three derived canvas files under `derived/canvases/`:
+- `derived/canvases/<work-id>-task-groups-view.canvas`
+- `derived/canvases/<work-id>-snapshots-view.canvas`
+- `derived/canvases/<work-id>-run-view.canvas`
 
 Markdown remains canonical.
 
@@ -120,7 +120,7 @@ The plugin currently flags issues such as:
 - missing required frontmatter
 - wrong `entityType`
 - id mismatch with folder/file name
-- missing `task-groups/`, `snapshots/`, or `run/`
+- missing `task-groups/`, `snapshots/`, or `runs/`
 - selected snapshot references to missing task groups or versions
 - run edges that reference missing run nodes
 - task `childTaskGroupId` references that do not resolve

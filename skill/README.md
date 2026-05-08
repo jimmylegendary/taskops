@@ -33,8 +33,8 @@ Derived canvas/views are not.
 Prefer the CLI for current validation and summaries:
 
 ```bash
-taskops validate <project-dir>
-taskops summary <project-dir>
+taskops validate <work-dir>
+taskops summary <work-dir>
 ```
 
 For a git-backed Obsidian vault workflow:

@@ -249,7 +249,7 @@ function projectForActiveFile(projects: Entity[], active: unknown): Entity | nul
 }
 
 async function exportProject(app: App, project: Entity, openFirst: boolean) {
-  if (!project.folderPath) throw new Error(`project ${project.id} is missing folderPath`);
+  if (!project.folderPath) throw new Error(`work ${project.id} is missing folderPath`);
   const files: Array<{ mode: CanvasViewMode; path: string }> = [];
   for (const mode of ['task-groups', 'snapshots', 'run'] as const) {
     const data = buildCanvas(project, mode);
@@ -266,12 +266,12 @@ async function exportProject(app: App, project: Entity, openFirst: boolean) {
 
 export async function exportActiveProjectCanvases(app: App, projects: Entity[]): Promise<void> {
   if (projects.length === 0) {
-    new Notice('TaskOps: no projects found to export');
+    new Notice('TaskOps: no work roots found to export');
     return;
   }
   const activeProject = projectForActiveFile(projects, app.workspace.getActiveFile());
   if (!activeProject) {
-    new Notice('TaskOps: open a note inside a project first, or use export-all');
+    new Notice('TaskOps: open a note inside a work root first, or use export-all');
     return;
   }
   const result = await exportProject(app, activeProject, true);
@@ -280,11 +280,11 @@ export async function exportActiveProjectCanvases(app: App, projects: Entity[]):
 
 export async function exportAllProjectCanvases(app: App, projects: Entity[]): Promise<void> {
   if (projects.length === 0) {
-    new Notice('TaskOps: no projects found to export');
+    new Notice('TaskOps: no work roots found to export');
     return;
   }
   for (const project of projects) await exportProject(app, project, false);
-  new Notice(`TaskOps: exported canvas views for ${projects.length} project${projects.length === 1 ? '' : 's'}`);
+  new Notice(`TaskOps: exported canvas views for ${projects.length} work root${projects.length === 1 ? '' : 's'}`);
 }
 
 export function describeCanvasPaths(project: Entity): string[] {

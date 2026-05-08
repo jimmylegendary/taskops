@@ -77,8 +77,8 @@ executionConfidence: 0.2
 ## CLI
 
 ```bash
-taskops classify-runnable <project-dir> <task-id>
-taskops classify-runnable <project-dir> <task-id> --json
+taskops classify-runnable <work-dir> <task-id>
+taskops classify-runnable <work-dir> <task-id> --json
 ```
 
 The command returns the current readiness, reason, and next action:

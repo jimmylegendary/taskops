@@ -1,6 +1,6 @@
 ---
 name: taskops
-description: "Manage TaskOps md-first projects built around versioned task groups, explicit snapshots, and a separate run graph. Use when you need to inspect or author the canonical markdown layout, validate project structure, summarize project state, or work with the TaskOps CLI / Obsidian plugin surfaces."
+description: "Manage TaskOps md-first work roots built around versioned task groups, explicit snapshots, and a separate run graph. Use when you need to inspect or author the canonical markdown layout, validate project structure, summarize project state, or work with the TaskOps CLI / Obsidian plugin surfaces."
 ---
 
 # TaskOps
@@ -59,14 +59,14 @@ Use the npm CLI first:
 taskops validate <path>
 taskops summary <path>
 taskops show <path> --json
-taskops classify-runnable <project-dir> <task-id> --json
+taskops classify-runnable <work-dir> <task-id> --json
 taskops init <dir> --id <id> --title <title> --objective <objective>
 taskops vault-init <vault-dir> --repo-url <url> --branch <branch> --auto-sync true
 taskops git-status <vault-dir>
 taskops git-sync <vault-dir> --message <message>
 taskops watch-sync <vault-dir> --debounce-ms 5000
-taskops decompose <project-dir> --task-group-id <id> --spec <spec.json>
-taskops refactor <project-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
+taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
+taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
 ```
 
 ## Git-backed vault rule
@@ -87,8 +87,8 @@ Only use it when the task is explicitly about legacy behavior or migration.
 Run:
 
 ```bash
-taskops validate <project-dir>
-taskops summary <project-dir>
+taskops validate <work-dir>
+taskops summary <work-dir>
 ```
 
 If you changed the skill itself, also run:

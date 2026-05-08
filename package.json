@@ -15,6 +15,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:version-sync": "node ./scripts/check-version-sync.mjs",
-    "verify": "npm run test:version-sync && npm run typecheck && npm run build && npm run test"
+    "verify": "npm run test:version-sync && npm run test:contract && npm run typecheck && npm run build && npm run test",
+    "test:contract": "node ./scripts/check-contract-docs.mjs"
   }
 }

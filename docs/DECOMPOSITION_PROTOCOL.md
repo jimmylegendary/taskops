@@ -4,7 +4,7 @@ TaskOps is not a checklist store. It turns an objective into a task tree, then u
 
 ## Core loop
 
-1. State the project objective in one sentence.
+1. State the work objective in one sentence.
 2. Decompose only one requested depth at a time.
 3. Classify each task node by run readiness:
    - `runnable`
@@ -20,7 +20,7 @@ TaskOps is not a checklist store. It turns an objective into a task tree, then u
 
 ## Objective discipline
 
-Every project and task group should have a one-line objective. That objective is the root of its decomposition tree.
+Every work root and task group should have a one-line objective. That objective is the root of its decomposition tree.
 
 Good:
 

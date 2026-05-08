@@ -19,7 +19,7 @@ export default class GraphTaskPlugin extends Plugin {
 
     this.addCommand({
       id: 'open-explorer',
-      name: 'Open project explorer',
+      name: 'Open work explorer',
       callback: () => {
         void this.activateView();
       },
@@ -33,7 +33,7 @@ export default class GraphTaskPlugin extends Plugin {
 
     this.addCommand({
       id: 'export-active-project-canvases',
-      name: 'Export canvas views for active project',
+      name: 'Export canvas views for active work',
       callback: async () => {
         const { projects } = scanProjects(this.app);
         await exportActiveProjectCanvases(this.app, projects);
@@ -42,7 +42,7 @@ export default class GraphTaskPlugin extends Plugin {
 
     this.addCommand({
       id: 'export-all-project-canvases',
-      name: 'Export canvas views for all projects',
+      name: 'Export canvas views for all work roots',
       callback: async () => {
         const { projects } = scanProjects(this.app);
         await exportAllProjectCanvases(this.app, projects);

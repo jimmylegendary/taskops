@@ -341,7 +341,7 @@ function buildProject(app: App, projectFolder: TFolder): Entity {
   if (!project) throw new Error(`buildProject called on non-TaskOps work folder ${projectFolder.path}`);
 
   const taskGroupsFolder = findChildFolder(projectFolder, 'task-groups');
-  if (!taskGroupsFolder) project.issues.push("project has no 'task-groups/' folder");
+  if (!taskGroupsFolder) project.issues.push("work has no 'task-groups/' folder");
 
   const taskGroupIds = new Set<string>();
   const versionIds = new Set<string>();
@@ -365,7 +365,7 @@ function buildProject(app: App, projectFolder: TFolder): Entity {
       project.children.push(snapshot);
     }
   } else {
-    project.issues.push("project has no 'snapshots/' folder");
+    project.issues.push("work has no 'snapshots/' folder");
   }
 
   const runsFolder = findChildFolder(projectFolder, 'runs');
