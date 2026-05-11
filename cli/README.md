@@ -79,6 +79,7 @@ taskops validate <path>
 taskops summary <path> [--write]
 taskops show <path> [--json]
 taskops classify-runnable <work-dir> <task-id> [--json]
+taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
 taskops vault-init <vault-dir> [--repo-url <url>] [--branch main] [--auto-sync true|false]
@@ -86,6 +87,48 @@ taskops git-status <vault-dir>
 taskops git-sync <vault-dir> [--message <msg>] [--branch <branch>]
 taskops watch-sync <vault-dir> [--message <msg>] [--debounce-ms <ms>] [--branch <branch>]
 ```
+
+## Run a TaskOps work
+
+`taskops run <work-dir>` executes runnable tasks against the canonical markdown state. It is the bridge between the passive task graph and an actual run graph: agents (OpenClaw or otherwise) invoke this command rather than mutating files by hand.
+
+```bash
+# bounded single step using the safe synthetic executor
+taskops run ./my-work --executor dry-run --max-steps 1
+
+# real execution against an OpenClaw agent, capped by a deadline
+taskops run ./my-work --executor openclaw-agent --agent main --until 2026-05-13T09:00:00+09:00
+
+# machine-readable summary for programmatic callers
+taskops run ./my-work --max-steps 3 --json
+```
+
+The runner:
+
+- Re-uses an existing active run when there is exactly one, else creates/uses `runs/run-main/`. Override with `--run-id`.
+- Picks runnable tasks deterministically: active snapshot order, then `task.order`, then `id` lexicographic. Only tasks with status `pending`/`active` and run readiness `runnable` are eligible.
+- Updates the task graph and the run graph for every step (run node, runRefs, status, EoW nodes, `closes_with` edge).
+- Appends a JSONL event log at `runs/<run-id>/events.jsonl` plus human entries in `runs/<run-id>/run-log.md`.
+- Holds a `.taskops-runner.lock` directory under the work root and removes it on exit. A second runner against the same work refuses to start.
+
+### Stop conditions
+
+`--max-steps` and `--until` are both optional and combine with OR semantics: the runner stops before starting a new step if either limit is reached. When neither is supplied the runner defaults to `--max-steps 1` (one bounded step).
+
+| Stop reason         | Meaning                                                        |
+| ------------------- | -------------------------------------------------------------- |
+| `no_runnable`       | No remaining task matches the runnable filter.                 |
+| `max_steps`         | The `--max-steps` budget is exhausted.                         |
+| `deadline_reached`  | `--until` has already passed when the next step would start.   |
+| `task_failed`       | The executor reported a non-zero exit or timeout.              |
+| `validation_failed` | A mid-run re-parse found errors and the runner refused to act. |
+
+`--until` accepts any value `Date.parse` understands. When both `--until` and `--timeout` are supplied, the per-task timeout is capped at the remaining time before the deadline.
+
+### Executors
+
+- `--executor dry-run` (default) — no external process. Synthesises a successful result and mutates the markdown graph. Intended for smoke tests, dress rehearsals, and skill reviews. **It does not perform real work.** Pass `--executor openclaw-agent` to dispatch a real run.
+- `--executor openclaw-agent` — spawns `openclaw agent --agent <agent-id> --message <prompt> --json [--timeout <seconds>]`. The prompt carries the work objective and task triple (`objective`, `responsibility`, `completionCriteria`) and instructs the agent to execute one TaskOps task without recursively invoking `taskops run`. Default `--agent` is `main`.
 
 ## Canonical file layout
 

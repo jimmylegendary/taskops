@@ -67,7 +67,21 @@ taskops git-sync <vault-dir> --message <message>
 taskops watch-sync <vault-dir> --debounce-ms 5000
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
+taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--json]
 ```
+
+## Running TaskOps work
+
+`taskops run <work-dir>` is the canonical way to advance a TaskOps work graph. The skill is passive guidance; the runner is the layer that actually mutates state.
+
+- Use `taskops run <work-dir>` instead of editing run nodes / EoW / runRefs by hand. The runner deterministically picks runnable tasks (active snapshot order, then `task.order`, then `id`), creates the run node, mutates task status, appends `runRefs`, writes EoW for both task and run graphs, and creates the `closes_with` edge.
+- Prefer `--executor openclaw-agent --agent <agent-id>` for real execution. Default `--agent` is `main`. Only use `--executor dry-run` for smoke tests, reviews, or to demonstrate the graph mutations without touching an external agent — it produces synthetic success and never performs real work.
+- `--max-steps <n>` bounds the number of task executions. `--until <iso-timestamp>` bounds wall-clock work. Both are optional and **combine with OR semantics**: stop before a new step if either limit is reached.
+- If neither `--max-steps` nor `--until` is supplied, the runner defaults to `--max-steps 1` — exactly one step, then stop.
+- When the user says something like "before tomorrow 9am" or "by EOD", convert the requested deadline to an explicit ISO-8601 timestamp **with timezone** before passing it as `--until`. Do not pass natural-language deadlines.
+- Stop reasons reported back: `no_runnable`, `max_steps`, `deadline_reached`, `task_failed`, `validation_failed`. Always surface the reason to the user.
+- The runner appends to `runs/<run-id>/events.jsonl` and `runs/<run-id>/run-log.md`, and holds a `.taskops-runner.lock` directory inside the work root while running. Do not launch a second runner against the same work until the lock is gone.
+- Do **not** instruct the executing agent to call `taskops run` again — it runs one task. Recursion is the orchestrator's job, not the worker's.
 
 ## Git-backed vault rule
 

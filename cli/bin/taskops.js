@@ -15,6 +15,7 @@ import {
   writeSummary,
   writeVersionFromSpec,
 } from '../lib-taskops.js';
+import { runTaskOps } from '../lib-runner.js';
 
 function usage() {
   console.log(`TaskOps CLI
@@ -26,6 +27,7 @@ Usage:
   taskops summary <path> [--write]
   taskops show <path> [--json]
   taskops classify-runnable <work-dir> <task-id> [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
   taskops git-status <vault-dir>
@@ -188,6 +190,31 @@ try {
       console.log(`next_action: ${classification.nextAction}`);
     }
     process.exit(parsed.errors.length === 0 ? 0 : 1);
+  }
+
+  if (cmd === 'run') {
+    const workDir = positional[1];
+    if (!workDir) fail('Missing run work-dir');
+    const result = runTaskOps(workDir, {
+      runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
+      agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+      executor: flags.executor && flags.executor !== true ? String(flags.executor) : null,
+      maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      until: flags.until && flags.until !== true ? String(flags.until) : null,
+      timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
+    });
+    if (flags.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`workId=${result.workId} runId=${result.runId} executor=${result.executor} stopReason=${result.stopReason} stepsRun=${result.stepsRun}`);
+      if (result.maxSteps != null) console.log(`maxSteps=${result.maxSteps}`);
+      if (result.until) console.log(`until=${result.until}`);
+      console.log(`events=${result.eventsPath}`);
+      for (const t of result.tasks) {
+        console.log(`- task ${t.taskId} -> ${t.status} (runNode=${t.runNodeId})${t.message ? `: ${t.message}` : ''}`);
+      }
+    }
+    process.exit(result.stopReason === 'task_failed' || result.stopReason === 'validation_failed' ? 1 : 0);
   }
 
   if (cmd === 'decompose' || cmd === 'refactor') {

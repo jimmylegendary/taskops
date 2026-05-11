@@ -808,7 +808,7 @@ export function writeSummary(parsed, fileName = 'summary.md') {
 
 function isoNow() { return new Date().toISOString(); }
 
-function fmBlock(data) {
+export function fmBlock(data) {
   const lines = ['---'];
   const emit = (key, value, indent = '') => {
     if (Array.isArray(value)) {

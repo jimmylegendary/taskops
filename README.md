@@ -72,6 +72,9 @@ taskops validate ../examples/taskops-canonical-minimal-v1
 taskops summary ../examples/taskops-canonical-minimal-v1
 taskops classify-runnable ../examples/taskops-canonical-minimal-v1 task-run
 
+# advance one runnable task with the safe dry-run executor
+taskops run ../examples/taskops-canonical-minimal-v1 --executor dry-run --max-steps 1
+
 # scaffold with language-aware default values (field names stay English)
 taskops init ../tmp/demo-taskops \
   --id demo-taskops \

@@ -14,6 +14,7 @@
   "files": [
     "bin",
     "lib-taskops.js",
+    "lib-runner.js",
     "README.md",
     "scripts/smoke.mjs"
   ],
