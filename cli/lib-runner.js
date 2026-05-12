@@ -130,23 +130,147 @@ const ACTION_BY_READINESS = Object.freeze({
   needs_exploration: 'explore',
 });
 
+function runNodePause(runNode) {
+  switch (runNode.type) {
+    case 'delegate':
+      switch (runNode.status) {
+        case 'done':
+        case 'cancelled':
+          return null;
+        default:
+          return {
+            reason: STOP_REASONS.DELEGATION_PENDING,
+            detail: `Delegated run node ${runNode.runId}/${runNode.id} is pending (status=${runNode.status}).`,
+          };
+      }
+    default:
+      switch (runNode.status) {
+        case 'waiting':
+          return {
+            reason: STOP_REASONS.WAITING,
+            detail: `Run node ${runNode.runId}/${runNode.id} is waiting; resolve before continuing.`,
+          };
+        default:
+          return null;
+      }
+  }
+}
+
+function taskPause(task) {
+  switch (task.status) {
+    case 'waiting':
+      return {
+        reason: STOP_REASONS.WAITING,
+        detail: `Task ${task.id} is waiting; resolve before continuing.`,
+      };
+    default:
+      return null;
+  }
+}
+
+function blockerKey(ref) {
+  if (!ref || typeof ref !== 'object') return 'invalid:blocker';
+  switch (ref.type) {
+    case 'task': return `task:${ref.taskGroupVersionId || '*'}:${ref.id || ref.taskId || ''}`;
+    case 'runNode': return `runNode:${ref.runId || ''}:${ref.id || ref.runNodeId || ''}`;
+    default: return `${ref.type || 'unknown'}:${ref.id || ''}`;
+  }
+}
+
+function resolveBlocker(parsed, ref) {
+  if (!ref || typeof ref !== 'object') return { resolved: false, detail: 'Invalid blocker reference.' };
+  switch (ref.type) {
+    case 'task': {
+      const id = ref.id || ref.taskId;
+      const matches = [...parsed.tasks.values()].filter((task) => task.id === id && (!ref.taskGroupVersionId || task.taskGroupVersionId === ref.taskGroupVersionId));
+      if (matches.length === 0) return { resolved: false, detail: `Task blocker '${id}' not found.` };
+      const unresolved = matches.filter((task) => !['done', 'cancelled'].includes(task.status));
+      if (unresolved.length > 0) return { resolved: false, detail: `Task blocker '${id}' is ${unresolved.map((task) => task.status).join('/')}.` };
+      return { resolved: true, detail: `Task blocker '${id}' resolved.` };
+    }
+    case 'runNode': {
+      const id = ref.id || ref.runNodeId;
+      const key = `${ref.runId}:${id}`;
+      const node = parsed.runNodes.get(key);
+      if (!node) return { resolved: false, detail: `Run node blocker '${key}' not found.` };
+      if (!['done', 'cancelled'].includes(node.status)) return { resolved: false, detail: `Run node blocker '${key}' is ${node.status}.` };
+      return { resolved: true, detail: `Run node blocker '${key}' resolved.` };
+    }
+    default:
+      return { resolved: false, detail: `Unsupported blocker type '${ref.type || 'unknown'}'.` };
+  }
+}
+
+function normalizeBlockedBy(task) {
+  if (!task.blockedBy) return [];
+  return Array.isArray(task.blockedBy) ? task.blockedBy : [task.blockedBy];
+}
+
+export function recheckBlockedTasks(workDir, { dryRun = false } = {}) {
+  const workRoot = resolve(workDir);
+  const projects = discoverProjects(workRoot);
+  if (projects.length !== 1) throw new Error(`Expected exactly 1 TaskOps work under ${workDir}, found ${projects.length}`);
+  const projectDir = projects[0];
+  const parsed = parseProject(projectDir);
+  if (parsed.errors.length > 0) {
+    throw new Error(`TaskOps work has validation errors; cannot recheck blockers:\n- ${parsed.errors.join('\n- ')}`);
+  }
+
+  const checked = [];
+  const unblocked = [];
+  const stillBlocked = [];
+  const now = isoNow();
+
+  for (const task of parsed.tasks.values()) {
+    const blockers = normalizeBlockedBy(task);
+    if (blockers.length === 0) continue;
+    const isBlocked = task.status === 'blocked' || task.runReadiness === 'blocked';
+    if (!isBlocked) continue;
+    const results = blockers.map((ref) => ({ ref, key: blockerKey(ref), ...resolveBlocker(parsed, ref) }));
+    const allResolved = results.every((result) => result.resolved);
+    const item = { taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, path: task.path, allResolved, blockers: results };
+    checked.push(item);
+    if (!allResolved) {
+      stillBlocked.push(item);
+      continue;
+    }
+    unblocked.push(item);
+    if (dryRun) continue;
+    rewriteFrontmatter(task.path, (fm) => {
+      if (fm.status === 'blocked') fm.status = 'pending';
+      if (fm.runReadiness === 'blocked') {
+        if (fm.unblockRunReadiness) fm.runReadiness = fm.unblockRunReadiness;
+        else delete fm.runReadiness;
+      }
+      fm.runReadinessReason = sanitizeFmScalar(`Blockers resolved by taskops blocker recheck at ${now}.`);
+      delete fm.lastRunFailureReason;
+      return fm;
+    });
+  }
+
+  return { projectDir, checked, unblocked, stillBlocked, dryRun };
+}
+
 function pickNextAction(parsed) {
   for (const runNode of parsed.runNodes.values()) {
-    if (runNode.status === 'waiting') {
+    const pause = runNodePause(runNode);
+    switch (pause?.reason) {
+      case STOP_REASONS.WAITING:
       return {
         kind: 'stop',
         reason: STOP_REASONS.WAITING,
-        detail: `Run node ${runNode.runId}/${runNode.id} is waiting; resolve before continuing.`,
+        detail: pause.detail,
         source: { type: 'runNode', runId: runNode.runId, id: runNode.id },
       };
-    }
-    if (runNode.type === 'delegate' && !['done', 'cancelled'].includes(runNode.status)) {
+      case STOP_REASONS.DELEGATION_PENDING:
       return {
         kind: 'stop',
         reason: STOP_REASONS.DELEGATION_PENDING,
-        detail: `Delegated run node ${runNode.runId}/${runNode.id} is pending (status=${runNode.status}).`,
+        detail: pause.detail,
         source: { type: 'runNode', runId: runNode.runId, id: runNode.id },
       };
+      default:
+        break;
     }
   }
 
@@ -156,13 +280,17 @@ function pickNextAction(parsed) {
   for (const { task } of candidates) {
     if (['done', 'cancelled'].includes(task.status)) continue;
     anyOpenTask = true;
-    if (task.status === 'waiting') {
+    const pause = taskPause(task);
+    switch (pause?.reason) {
+      case STOP_REASONS.WAITING:
       return {
         kind: 'stop',
         reason: STOP_REASONS.WAITING,
-        detail: `Task ${task.id} is waiting; resolve before continuing.`,
+        detail: pause.detail,
         source: { type: 'task', id: task.id },
       };
+      default:
+        break;
     }
     const classification = classifyTaskReadiness(task);
     if (classification.runReadiness === 'blocked') continue;
@@ -793,6 +921,7 @@ export function runTaskOps(workDir, options = {}) {
       if (until != null && Date.now() >= until) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
       if (maxSteps != null && stepsRun >= maxSteps) { stopReason = STOP_REASONS.MAX_STEPS; break; }
 
+      recheckBlockedTasks(projectDir);
       parsed = parseProject(projectDir);
       if (parsed.errors.length > 0) {
         stopReason = STOP_REASONS.VALIDATION_FAILED;

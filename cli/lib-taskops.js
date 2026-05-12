@@ -1070,9 +1070,10 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId']) {
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId']) {
       if (task[key] !== undefined && task[key] !== null) fm[key] = task[key];
     }
+    if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');

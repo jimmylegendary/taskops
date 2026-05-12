@@ -401,5 +401,84 @@ if (waitingRunOut.stopReason !== 'waiting' || waitingRunOut.stepsRun !== 0) {
   process.exit(1);
 }
 
+// ---- delegate waiting must surface as delegation_pending, not generic waiting ----
+const delegateWorkDir = join(tempRoot, 'runner-delegate-waiting');
+run(['init', delegateWorkDir, '--id', 'runner-delegate-waiting', '--title', 'Runner delegate waiting', '--objective', 'Verify delegated waiting gets a precise stop reason', '--language', 'en']);
+writeFileSync(join(delegateWorkDir, 'runs', 'run-main', 'nodes', 'run-node-human-review.md'), `---
+taskOpsVersion: v1
+entityType: runNode
+id: run-node-human-review
+runId: run-main
+type: delegate
+title: Human review
+status: waiting
+delegateeType: human
+delegateeRef: stakeholder
+request: Review the proposed change.
+expectedOutput: Approval or requested revision.
+requestedAt: 2026-05-12T00:00:00Z
+createdAt: 2026-05-12T00:00:00Z
+---
+# Human review
+`, 'utf8');
+const delegateRunOut = JSON.parse(run(['run', delegateWorkDir, '--executor', 'dry-run', '--max-steps', '3', '--json']).stdout);
+if (delegateRunOut.stopReason !== 'delegation_pending' || delegateRunOut.stepsRun !== 0) {
+  console.error('Expected type=delegate/status=waiting to stop with delegation_pending, not waiting');
+  console.error(delegateRunOut);
+  process.exit(1);
+}
+
+// ---- blockedBy dependencies should unblock before runner selection ----
+const blockerWorkDir = join(tempRoot, 'runner-blocker-recheck');
+run(['init', blockerWorkDir, '--id', 'runner-blocker-recheck', '--title', 'Runner blocker recheck', '--objective', 'Verify blocked tasks can reopen when dependencies resolve', '--language', 'en']);
+const blockerSpecPath = join(tempRoot, 'runner-blocker-spec.json');
+writeFileSync(blockerSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Blocker recheck fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-prereq',
+      title: 'Resolved prerequisite',
+      objective: 'Represent already-complete prerequisite work.',
+      responsibility: 'Prerequisite owner has finished the needed work.',
+      completionCriteria: 'Prerequisite is marked done.',
+      order: 1,
+      status: 'done',
+      runReadiness: 'runnable',
+      understandingLevel: 'known'
+    },
+    {
+      id: 'task-dependent',
+      title: 'Dependent work',
+      objective: 'Run after the prerequisite is complete.',
+      responsibility: 'Execute once dependencies are resolved.',
+      completionCriteria: 'Dependent work has been executed.',
+      order: 2,
+      status: 'blocked',
+      runReadiness: 'blocked',
+      runReadinessReason: 'Waiting for task-prereq.',
+      blockedBy: [{ type: 'task', id: 'task-prereq', taskGroupVersionId: 'tgv-root-v2' }],
+      understandingLevel: 'known'
+    }
+  ]
+}, null, 2));
+run(['decompose', blockerWorkDir, '--task-group-id', 'tg-root', '--spec', blockerSpecPath]);
+const blockerSnapshotPath = join(blockerWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(blockerSnapshotPath, readFileSync(blockerSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const unblockDryRunOut = JSON.parse(run(['unblock-check', blockerWorkDir, '--dry-run', '--json']).stdout);
+if (unblockDryRunOut.unblocked.length !== 1 || unblockDryRunOut.unblocked[0].taskId !== 'task-dependent') {
+  console.error('Expected unblock-check to detect resolved task dependency');
+  console.error(unblockDryRunOut);
+  process.exit(1);
+}
+const blockerRunOut = JSON.parse(run(['run', blockerWorkDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
+if (blockerRunOut.stopReason !== 'max_steps' || blockerRunOut.stepsRun !== 1 || blockerRunOut.actions[0]?.taskId !== 'task-dependent') {
+  console.error('Expected runner to unblock and execute task-dependent');
+  console.error(blockerRunOut);
+  process.exit(1);
+}
+
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK: taskops CLI smoke passed');

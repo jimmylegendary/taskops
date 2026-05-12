@@ -9,14 +9,14 @@
       "example": 1,
       "objective": "Verify runner executes a short runnable coding-refactor task chain.",
       "maxSteps": 3,
-      "until": "2026-05-12T16:30:00+09:00",
+      "until": "2026-05-20T16:30:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "execute",
         "execute",
         "execute"
       ],
-      "command": "taskops run works/01-coding-refactor-execution --executor dry-run --max-steps 3 --until 2026-05-12T16:30:00+09:00 --json"
+      "command": "taskops run works/01-coding-refactor-execution --executor dry-run --max-steps 3 --until 2026-05-20T16:30:00+09:00 --json"
     },
     {
       "id": "02-content-pipeline-execution",
@@ -24,7 +24,7 @@
       "example": 2,
       "objective": "Verify runner handles several straightforward runnable tasks.",
       "maxSteps": 5,
-      "until": "2026-05-12T18:00:00+09:00",
+      "until": "2026-05-20T18:00:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "execute",
@@ -33,7 +33,7 @@
         "execute",
         "execute"
       ],
-      "command": "taskops run works/02-content-pipeline-execution --executor dry-run --max-steps 5 --until 2026-05-12T18:00:00+09:00 --json"
+      "command": "taskops run works/02-content-pipeline-execution --executor dry-run --max-steps 5 --until 2026-05-20T18:00:00+09:00 --json"
     },
     {
       "id": "03-product-spec-decomposition",
@@ -41,14 +41,14 @@
       "example": 1,
       "objective": "Verify needs_decomposition tasks expand into child task groups.",
       "maxSteps": 3,
-      "until": "2026-05-12T17:00:00+09:00",
+      "until": "2026-05-20T17:00:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "decompose",
         "decompose",
         "decompose"
       ],
-      "command": "taskops run works/03-product-spec-decomposition --executor dry-run --max-steps 3 --until 2026-05-12T17:00:00+09:00 --json"
+      "command": "taskops run works/03-product-spec-decomposition --executor dry-run --max-steps 3 --until 2026-05-20T17:00:00+09:00 --json"
     },
     {
       "id": "04-platform-migration-decomposition",
@@ -56,7 +56,7 @@
       "example": 2,
       "objective": "Verify larger decomposition branches remain bounded by maxSteps.",
       "maxSteps": 4,
-      "until": "2026-05-12T19:00:00+09:00",
+      "until": "2026-05-20T19:00:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "decompose",
@@ -64,7 +64,7 @@
         "decompose",
         "decompose"
       ],
-      "command": "taskops run works/04-platform-migration-decomposition --executor dry-run --max-steps 4 --until 2026-05-12T19:00:00+09:00 --json"
+      "command": "taskops run works/04-platform-migration-decomposition --executor dry-run --max-steps 4 --until 2026-05-20T19:00:00+09:00 --json"
     },
     {
       "id": "05-flaky-test-exploration",
@@ -72,13 +72,13 @@
       "example": 1,
       "objective": "Verify needs_exploration creates exploration artifacts before decomposition.",
       "maxSteps": 2,
-      "until": "2026-05-12T16:10:00+09:00",
+      "until": "2026-05-20T16:10:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "explore",
         "explore"
       ],
-      "command": "taskops run works/05-flaky-test-exploration --executor dry-run --max-steps 2 --until 2026-05-12T16:10:00+09:00 --json"
+      "command": "taskops run works/05-flaky-test-exploration --executor dry-run --max-steps 2 --until 2026-05-20T16:10:00+09:00 --json"
     },
     {
       "id": "06-market-research-exploration",
@@ -86,14 +86,14 @@
       "example": 2,
       "objective": "Verify exploratory work records unknowns and reflects into future decomposition.",
       "maxSteps": 3,
-      "until": "2026-05-12T20:00:00+09:00",
+      "until": "2026-05-20T20:00:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "explore",
         "explore",
         "explore"
       ],
-      "command": "taskops run works/06-market-research-exploration --executor dry-run --max-steps 3 --until 2026-05-12T20:00:00+09:00 --json"
+      "command": "taskops run works/06-market-research-exploration --executor dry-run --max-steps 3 --until 2026-05-20T20:00:00+09:00 --json"
     },
     {
       "id": "07-human-approval-waiting",
@@ -101,10 +101,10 @@
       "example": 1,
       "objective": "Verify waiting task pauses runner and surfaces the wait.",
       "maxSteps": 10,
-      "until": "2026-05-13T09:00:00+09:00",
+      "until": "2026-05-21T09:00:00+09:00",
       "expectedStop": "waiting",
       "expectedActions": [],
-      "command": "taskops run works/07-human-approval-waiting --executor dry-run --max-steps 10 --until 2026-05-13T09:00:00+09:00 --json"
+      "command": "taskops run works/07-human-approval-waiting --executor dry-run --max-steps 10 --until 2026-05-21T09:00:00+09:00 --json"
     },
     {
       "id": "08-delegated-review-pending",
@@ -112,10 +112,10 @@
       "example": 2,
       "objective": "Verify pending delegate run node pauses runner globally.",
       "maxSteps": 10,
-      "until": "2026-05-13T12:00:00+09:00",
+      "until": "2026-05-21T12:00:00+09:00",
       "expectedStop": "delegation_pending",
       "expectedActions": [],
-      "command": "taskops run works/08-delegated-review-pending --executor dry-run --max-steps 10 --until 2026-05-13T12:00:00+09:00 --json"
+      "command": "taskops run works/08-delegated-review-pending --executor dry-run --max-steps 10 --until 2026-05-21T12:00:00+09:00 --json"
     },
     {
       "id": "09-mixed-max-step-budget",
@@ -123,13 +123,13 @@
       "example": 1,
       "objective": "Verify maxSteps bounds execute plus decompose plus explore actions together.",
       "maxSteps": 2,
-      "until": "2026-05-12T21:00:00+09:00",
+      "until": "2026-05-20T21:00:00+09:00",
       "expectedStop": "max_steps",
       "expectedActions": [
         "execute",
         "decompose"
       ],
-      "command": "taskops run works/09-mixed-max-step-budget --executor dry-run --max-steps 2 --until 2026-05-12T21:00:00+09:00 --json"
+      "command": "taskops run works/09-mixed-max-step-budget --executor dry-run --max-steps 2 --until 2026-05-20T21:00:00+09:00 --json"
     },
     {
       "id": "10-deadline-reached-before-work",

@@ -88,6 +88,7 @@ taskops validate <path>
 taskops summary <path> [--write]
 taskops show <path> [--json]
 taskops classify-runnable <work-dir> <task-id> [--json]
+taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -115,11 +116,12 @@ taskops run ./my-work --max-steps 3 --json
 The runner:
 
 - Re-uses an existing active run when there is exactly one, else creates/uses `runs/run-main/`. Override with `--run-id`.
+- Rechecks blocked tasks that declare `blockedBy` references before selecting the next action. When every blocker is resolved, the runner reopens the task (`status: pending`) and clears `runReadiness: blocked` unless `unblockRunReadiness` says what readiness to use next. Use `taskops unblock-check <work-dir> --dry-run --json` to inspect the same transition without mutating files.
 - Picks the next task deterministically: active snapshot order, then `task.order`, then `id` lexicographic. Only tasks with status `pending`/`active` are eligible. Tasks classified as `blocked` are excluded; tasks classified as `runnable`, `needs_decomposition`, or `needs_exploration` are dispatched to the matching runner step.
 - For `runnable` tasks: creates the run node, mutates task status to done, attaches task and run EoW nodes, and writes the `closes_with` edge.
 - For `needs_decomposition` tasks: creates a `type: decomposition` run node, expands the task graph by writing a child task group and version (dry-run synthesizes a deterministic placeholder; `openclaw-agent` delegates authoring to the agent), updates the parent task's `childTaskGroupId`, marks the parent done with an EoW reason `decomposed_by_runner`, and closes the run node with an EoW reason `decomposition_recorded`.
 - For `needs_exploration` tasks: creates a `type: exploration` run node, writes a reflection artifact under `runs/<run-id>/artifacts/<run-node-id>.md`, marks the parent task done with an EoW reason `exploration_recorded_by_runner` and `runReadiness: needs_decomposition` (ready for an informed decomposition pass), and closes the run node with an EoW reason `exploration_recorded`.
-- Pauses immediately when it encounters a `status: waiting` task or run node, or a `type: delegate` run node that is not yet `done`/`cancelled`. The runner surfaces a waiting/delegation stop reason instead of silently skipping.
+- Pauses immediately when it encounters a `status: waiting` task or run node, or a `type: delegate` run node that is not yet `done`/`cancelled`. Delegated run nodes are classified by `type` first, so `type: delegate` + `status: waiting` reports `delegation_pending` rather than generic `waiting`.
 - Appends a JSONL event log at `runs/<run-id>/events.jsonl` plus human entries in `runs/<run-id>/run-log.md`.
 - Holds a `.taskops-runner.lock` directory under the work root and removes it on exit. A second runner against the same work refuses to start.
 

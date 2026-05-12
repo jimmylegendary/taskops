@@ -15,7 +15,7 @@ import {
   writeSummary,
   writeVersionFromSpec,
 } from '../lib-taskops.js';
-import { runTaskOps } from '../lib-runner.js';
+import { recheckBlockedTasks, runTaskOps } from '../lib-runner.js';
 
 function usage() {
   console.log(`TaskOps CLI
@@ -27,6 +27,7 @@ Usage:
   taskops summary <path> [--write]
   taskops show <path> [--json]
   taskops classify-runnable <work-dir> <task-id> [--json]
+  taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -190,6 +191,19 @@ try {
       console.log(`next_action: ${classification.nextAction}`);
     }
     process.exit(parsed.errors.length === 0 ? 0 : 1);
+  }
+
+  if (cmd === 'unblock-check') {
+    const workDir = positional[1];
+    if (!workDir) fail('Missing unblock-check work-dir');
+    const result = recheckBlockedTasks(workDir, { dryRun: flags['dry-run'] === true });
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`checked=${result.checked.length} unblocked=${result.unblocked.length} stillBlocked=${result.stillBlocked.length} dryRun=${result.dryRun}`);
+      for (const item of result.unblocked) console.log(`- unblocked ${item.taskId}`);
+      for (const item of result.stillBlocked) console.log(`- still_blocked ${item.taskId}: ${item.blockers.filter((b) => !b.resolved).map((b) => b.detail).join('; ')}`);
+    }
+    process.exit(0);
   }
 
   if (cmd === 'run') {

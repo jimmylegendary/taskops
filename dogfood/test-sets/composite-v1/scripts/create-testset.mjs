@@ -59,7 +59,7 @@ const defs = [
       task('task-explore-session-risk','Explore session invalidation risk','needs_exploration',3),
       task('task-write-migration-note','Write migration note','runnable',4),
     ],
-    maxSteps: 4, until: '2026-05-12T17:30:00+09:00', expectedStop: 'max_steps', expectedActions: ['execute','decompose','explore','execute'],
+    maxSteps: 4, until: '2026-05-20T17:30:00+09:00', expectedStop: 'max_steps', expectedActions: ['execute','decompose','explore','execute'],
   },
   {
     id: '02-research-to-build-chain', scenario: 'exploration first, then decomposition, then execution',
@@ -71,7 +71,7 @@ const defs = [
       task('task-build-demo-brief','Build demo brief artifact','runnable',3),
       task('task-prepare-review','Prepare review checklist','runnable',4),
     ],
-    maxSteps: 3, until: '2026-05-12T18:30:00+09:00', expectedStop: 'max_steps', expectedActions: ['explore','decompose','execute'],
+    maxSteps: 3, until: '2026-05-20T18:30:00+09:00', expectedStop: 'max_steps', expectedActions: ['explore','decompose','execute'],
   },
   {
     id: '03-ops-incident-with-blocker', scenario: 'mixed actionable tasks then blocked_only',
@@ -84,7 +84,7 @@ const defs = [
       task('task-wait-vendor-response','Wait for vendor response','blocked',4,'pending',{reason:'External vendor answer required.'}),
       task('task-run-prod-change','Run production change after approval','blocked',5,'pending',{reason:'Needs human production approval.'}),
     ],
-    maxSteps: 10, until: '2026-05-12T22:00:00+09:00', expectedStop: 'blocked_only', expectedActions: ['execute','explore','decompose'],
+    maxSteps: 10, until: '2026-05-20T22:00:00+09:00', expectedStop: 'blocked_only', expectedActions: ['execute','explore','decompose'],
   },
   {
     id: '04-campaign-with-human-wait', scenario: 'waiting task blocks otherwise actionable tasks',
@@ -96,7 +96,7 @@ const defs = [
       task('task-build-landing-copy','Build landing copy','runnable',3),
       task('task-decompose-channel-plan','Decompose channel plan','needs_decomposition',4),
     ],
-    maxSteps: 10, until: '2026-05-13T09:00:00+09:00', expectedStop: 'waiting', expectedActions: ['execute'],
+    maxSteps: 10, until: '2026-05-21T09:00:00+09:00', expectedStop: 'waiting', expectedActions: ['execute'],
   },
   {
     id: '05-delegated-review-after-progress', scenario: 'first run progresses, second run sees delegate pending',
@@ -106,7 +106,7 @@ const defs = [
       task('task-apply-feedback','Apply feedback after delegated review','runnable',1),
       task('task-update-spec','Update spec after approval','runnable',2),
     ],
-    maxSteps: 10, until: '2026-05-13T12:00:00+09:00', expectedStop: 'delegation_pending', expectedActions: [],
+    maxSteps: 10, until: '2026-05-21T12:00:00+09:00', expectedStop: 'delegation_pending', expectedActions: [],
     extra: (dir) => addDelegateRun(dir),
   },
   {
