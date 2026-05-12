@@ -448,8 +448,12 @@ function deriveDecompositionIds(task) {
 function performDryRunDecomposition({ projectDir, task }) {
   const { childTaskGroupId, versionId, suffix } = deriveDecompositionIds(task);
   const tgDir = join(projectDir, 'task-groups', childTaskGroupId);
+  const versionIndex = join(tgDir, 'versions', versionId, 'index.md');
+  if (existsSync(versionIndex)) {
+    return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
+  }
   if (existsSync(tgDir)) {
-    return { ok: false, message: `Child task group '${childTaskGroupId}' already exists; refusing to overwrite a real or prior decomposition` };
+    return { ok: false, message: `Child task group '${childTaskGroupId}' already exists without expected version '${versionId}'; refusing to overwrite a real or partial decomposition` };
   }
   const now = isoNow();
   ensureDir(join(tgDir, 'versions', versionId, 'tasks'));
