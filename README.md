@@ -1,10 +1,16 @@
 # TaskOps
 
-TaskOps is a task-operations framework built around two distinct but connected layers:
+**TODO lists don’t scale for AI agents.**
 
-- **work** — the top-level container around one objective
-- **task graph** — a decomposition graph that enforces structural quality
-- **run graph** — independent execution graphs that record real-world work, overlap, dependency, delegation, waiting, and closure
+Plans lie. Logs drift. Work gets half-done. TaskOps separates task decomposition from execution reality so human + AI work can be inspected, resumed, delegated, and closed honestly.
+
+TaskOps is an **agentic execution control layer** built around three connected records:
+
+- **work** — the top-level objective container
+- **task graph** — the decomposition truth: what should be done, what needs more breakdown, what needs exploration, and what is blocked
+- **run graph** — the execution truth: what actually happened, including agent runs, exploration, delegation, waiting, failures, and closure evidence
+
+Use TaskOps when a goal is too important to leave as a flat TODO list and too complex to trust to an unstructured chat log.
 
 This monorepo contains:
 
@@ -60,28 +66,42 @@ New roots use `entityType: work`. Legacy `entityType: project` and singular `run
 
 For a slightly denser non-canonical companion fixture, see `examples/taskops-minimal-v1/`.
 
-## CLI quick start
+## The core loop
 
 ```bash
-cd cli
-npm install
-npm test
+# 1. Create a work root around one objective
+taskops init ./oauth-refactor \
+  --id oauth-refactor \
+  --title "OAuth Flow Refactor" \
+  --objective "Refactor the OAuth flow safely with an AI coding agent"
 
-# examples
-taskops validate ../examples/taskops-canonical-minimal-v1
-taskops summary ../examples/taskops-canonical-minimal-v1
-taskops classify-runnable ../examples/taskops-canonical-minimal-v1 task-run
+# 2. Inspect whether the graph is structurally valid
+taskops validate ./oauth-refactor
+taskops summary ./oauth-refactor
 
-# advance one runnable task with the safe dry-run executor
-taskops run ../examples/taskops-canonical-minimal-v1 --executor dry-run --max-steps 1
+# 3. Classify what can honestly happen next
+taskops classify-runnable ./oauth-refactor task-auth-middleware --json
 
-# scaffold with language-aware default values (field names stay English)
-taskops init ../tmp/demo-taskops \
-  --id demo-taskops \
-  --title "Demo TaskOps" \
-  --objective "Ship the MVP" \
-  --language ko
+# 4. Advance bounded work: execute, decompose, or explore depending on readiness
+taskops run ./oauth-refactor --executor dry-run --max-steps 3 --json
+
+# 5. Review execution evidence
+taskops summary ./oauth-refactor
 ```
+
+`dry-run` is for smoke tests and graph rehearsals. For real work, use `--executor openclaw-agent --agent <agent-id>`.
+
+## Killer use case: large AI-assisted refactors
+
+For a goal like **“OAuth flow refactoring”**, TaskOps keeps the work honest:
+
+- the **work** records the objective
+- the **task graph** breaks it into analysis, implementation, tests, migration notes, and review
+- `runReadiness` decides whether each task is runnable, needs decomposition, needs exploration, or is blocked
+- the **run graph** records what the agent actually did, what failed, what was delegated, and what evidence closed the branch
+- reviewers can inspect both the intended decomposition and the execution trail before trusting the result
+
+That is the core promise: **TaskOps tells agents how the work is actually getting done.**
 
 ## Release model
 

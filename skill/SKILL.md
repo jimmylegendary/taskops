@@ -1,9 +1,13 @@
 ---
 name: taskops
-description: "Manage TaskOps md-first work roots built around versioned task groups, explicit snapshots, and a separate run graph. Use when you need to inspect or author the canonical markdown layout, validate project structure, summarize project state, or work with the TaskOps CLI / Obsidian plugin surfaces."
+description: "Manage AI-agent work as an execution graph instead of a flat TODO list. Use TaskOps to structure objectives, task decomposition, run readiness, execution logs, exploration, delegation/waiting, EoW closure, validation, summaries, and runner-driven progress."
 ---
 
 # TaskOps
+
+TaskOps is the execution control layer for human + AI work. Plans lie, logs drift, and TODO lists make agent work look simpler than it is; TaskOps separates task decomposition from execution reality.
+
+Use it when the user needs to know what should happen, what actually happened, what is blocked or delegated, and whether work is truly closed.
 
 ## Canonical rule
 

@@ -1,11 +1,13 @@
 # TaskOps CLI
 
-TaskOps is a markdown-first task operations CLI for structuring real work as two connected graphs:
+**Agentic work needs an execution graph, not a TODO list.**
 
-- **Task graph** — the decomposition truth: objective, task groups, selected snapshots, and explicit terminal EoW nodes.
-- **Run graph** — the execution truth: what actually happened, including exploratory work, delegation, waiting, verification, and closure.
+TaskOps is a markdown-first CLI for human + AI work where plans, execution logs, blockers, delegation, and closure evidence must stay inspectable and versionable.
 
-The CLI is designed for human + AI workflows where the state must stay inspectable, versionable, and usable from plain files, Obsidian, Git, and automation.
+It separates two truths:
+
+- **Task graph** — the decomposition truth: objective, task groups, selected snapshots, readiness, and explicit terminal EoW nodes.
+- **Run graph** — the execution truth: what actually happened, including execution, exploration, decomposition, delegation, waiting, verification, failure, and closure.
 
 ## Why TaskOps exists
 
@@ -40,36 +42,43 @@ Then run:
 taskops --help
 ```
 
-## Quick start
-
-Create a new work tree:
+## Quick start: the smallest useful loop
 
 ```bash
+# 1. Create a work tree around one objective
 taskops init ./my-work \
   --id my-work \
   --title "My Work" \
   --objective "Ship the first useful version" \
   --language en
-```
 
-Validate and summarize it:
-
-```bash
+# 2. Validate and summarize the current graph
 taskops validate ./my-work
 taskops summary ./my-work
-```
 
-Show machine-readable state:
-
-```bash
+# 3. Inspect machine-readable state
 taskops show ./my-work --json
-```
 
-Classify whether a task is runnable, needs decomposition, needs exploration, or is blocked:
-
-```bash
+# 4. Classify what can honestly happen next
 taskops classify-runnable ./my-work task-design --json
+
+# 5. Advance bounded work
+taskops run ./my-work --executor dry-run --max-steps 1 --json
 ```
+
+`taskops run` dispatches by readiness: runnable tasks execute, `needs_decomposition` tasks expand the task graph, `needs_exploration` tasks create exploratory run evidence, and blocked/waiting/delegated work stops instead of being silently skipped.
+
+## Example: AI-assisted OAuth refactor
+
+A large refactor should not be trusted to a flat checklist or a disappearing chat transcript. With TaskOps:
+
+1. A `work` captures the objective: “Refactor the OAuth flow safely.”
+2. The task graph decomposes analysis, token validation changes, regression tests, migration notes, and review.
+3. The runner classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, or `blocked`.
+4. The run graph records what the agent actually did, which tests failed, what was delegated, and why each branch was closed.
+5. Reviewers inspect `taskops summary`, `runs/<run-id>/events.jsonl`, and EoW nodes before trusting completion.
+
+TaskOps tells agents how the work is actually getting done.
 
 ## Commands
 
