@@ -1,0 +1,165 @@
+{
+  "ok": true,
+  "count": 10,
+  "tmpRoot": "/tmp/taskops-orthogonal-v1-smoke",
+  "results": [
+    {
+      "id": "01-coding-refactor-execution",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 3,
+      "actions": [
+        "execute",
+        "execute",
+        "execute"
+      ],
+      "expectedActions": [
+        "execute",
+        "execute",
+        "execute"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "02-content-pipeline-execution",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 5,
+      "actions": [
+        "execute",
+        "execute",
+        "execute",
+        "execute",
+        "execute"
+      ],
+      "expectedActions": [
+        "execute",
+        "execute",
+        "execute",
+        "execute",
+        "execute"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "03-product-spec-decomposition",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 3,
+      "actions": [
+        "decompose",
+        "decompose",
+        "decompose"
+      ],
+      "expectedActions": [
+        "decompose",
+        "decompose",
+        "decompose"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "04-platform-migration-decomposition",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 4,
+      "actions": [
+        "decompose",
+        "decompose",
+        "decompose",
+        "decompose"
+      ],
+      "expectedActions": [
+        "decompose",
+        "decompose",
+        "decompose",
+        "decompose"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "05-flaky-test-exploration",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 2,
+      "actions": [
+        "explore",
+        "explore"
+      ],
+      "expectedActions": [
+        "explore",
+        "explore"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "06-market-research-exploration",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 3,
+      "actions": [
+        "explore",
+        "explore",
+        "explore"
+      ],
+      "expectedActions": [
+        "explore",
+        "explore",
+        "explore"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "07-human-approval-waiting",
+      "stopReason": "waiting",
+      "expectedStop": "waiting",
+      "stepsRun": 0,
+      "actions": [],
+      "expectedActions": [],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "08-delegated-review-pending",
+      "stopReason": "delegation_pending",
+      "expectedStop": "delegation_pending",
+      "stepsRun": 0,
+      "actions": [],
+      "expectedActions": [],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "09-mixed-max-step-budget",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 2,
+      "actions": [
+        "execute",
+        "decompose"
+      ],
+      "expectedActions": [
+        "execute",
+        "decompose"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "10-deadline-reached-before-work",
+      "stopReason": "deadline_reached",
+      "expectedStop": "deadline_reached",
+      "stepsRun": 0,
+      "actions": [],
+      "expectedActions": [],
+      "okStop": true,
+      "okActions": true
+    }
+  ]
+}

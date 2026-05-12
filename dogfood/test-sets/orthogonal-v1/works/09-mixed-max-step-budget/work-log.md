@@ -1,0 +1,3 @@
+# Work log
+
+- Initialized project.
