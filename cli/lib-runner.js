@@ -16,6 +16,7 @@ export const DEFAULT_RUN_ID = 'run-main';
 export const DEFAULT_AGENT_ID = 'main';
 export const STOP_REASONS = Object.freeze({
   NO_RUNNABLE: 'no_runnable',
+  ALL_CLOSED: 'all_closed',
   BLOCKED_ONLY: 'blocked_only',
   WAITING: 'waiting',
   DELEGATION_PENDING: 'delegation_pending',
@@ -303,6 +304,13 @@ function pickNextAction(parsed) {
   if (anyOpenTask && onlyBlockedSeen) {
     return { kind: 'stop', reason: STOP_REASONS.BLOCKED_ONLY, detail: 'Only blocked tasks remain; unblock or cancel them before continuing.' };
   }
+  if (!anyOpenTask && parsed.closure && parsed.closure.complete === true) {
+    return {
+      kind: 'stop',
+      reason: STOP_REASONS.ALL_CLOSED,
+      detail: 'All selected terminal tasks are closed by task EoW, run terminal nodes are closed by run EoW, and no waiting/delegated/blocked work remains.',
+    };
+  }
   return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE };
 }
 
@@ -562,6 +570,28 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
   });
   appendRunLog(runDir, `${finishedAt} task_failed taskId=${task.id} reason=${result.message || ''}`);
   return { taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null };
+}
+
+export function extendActiveSnapshot(parsed, addition) {
+  if (!addition || !addition.taskGroupId || !addition.versionId) return false;
+  const snapshotId = parsed?.project?.activeSnapshotId;
+  if (!snapshotId) return false;
+  const snapshot = parsed.snapshots?.get(snapshotId);
+  if (!snapshot || !snapshot.path) return false;
+  const existing = Array.isArray(snapshot.selectedVersions) ? snapshot.selectedVersions : [];
+  if (existing.some((pair) => pair && pair.taskGroupId === addition.taskGroupId && pair.versionId === addition.versionId)) {
+    return false;
+  }
+  rewriteFrontmatter(snapshot.path, (fm) => {
+    const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
+    if (list.some((pair) => pair && pair.taskGroupId === addition.taskGroupId && pair.versionId === addition.versionId)) {
+      return fm;
+    }
+    list.push({ taskGroupId: addition.taskGroupId, versionId: addition.versionId });
+    fm.selectedVersions = list;
+    return fm;
+  });
+  return true;
 }
 
 function deriveDecompositionIds(task) {
@@ -934,7 +964,12 @@ export function runTaskOps(workDir, options = {}) {
         stopReason = next.reason;
         stopDetail = next.detail || null;
         stopSource = next.source || null;
-        if (stopReason === STOP_REASONS.WAITING || stopReason === STOP_REASONS.DELEGATION_PENDING || stopReason === STOP_REASONS.BLOCKED_ONLY) {
+        if (
+          stopReason === STOP_REASONS.WAITING
+          || stopReason === STOP_REASONS.DELEGATION_PENDING
+          || stopReason === STOP_REASONS.BLOCKED_ONLY
+          || stopReason === STOP_REASONS.ALL_CLOSED
+        ) {
           logEvent(eventsPath, { timestamp: isoNow(), type: stopReason, runId, detail: stopDetail, source: stopSource });
           appendRunLog(runDir, `${isoNow()} ${stopReason}${stopDetail ? ` ${stopDetail}` : ''}`);
         }
@@ -959,6 +994,26 @@ export function runTaskOps(workDir, options = {}) {
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
         });
+        if (
+          stepResult.status === 'completed'
+          && stepResult.childTaskGroupId
+          && stepResult.versionId
+        ) {
+          const extended = extendActiveSnapshot(parsed, {
+            taskGroupId: stepResult.childTaskGroupId,
+            versionId: stepResult.versionId,
+          });
+          if (extended) {
+            logEvent(eventsPath, {
+              timestamp: isoNow(), type: 'snapshot_extended', runId,
+              snapshotId: parsed.project.activeSnapshotId,
+              taskGroupId: stepResult.childTaskGroupId,
+              versionId: stepResult.versionId,
+              source: { taskId: stepResult.taskId, runNodeId: stepResult.runNodeId },
+            });
+            appendRunLog(runDir, `${isoNow()} snapshot_extended snapshotId=${parsed.project.activeSnapshotId} taskGroupId=${stepResult.childTaskGroupId} versionId=${stepResult.versionId}`);
+          }
+        }
       } else if (next.kind === 'explore') {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,

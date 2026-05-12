@@ -117,10 +117,21 @@ Downstream run paths should not continue until the delegated node is resolved, c
 | Classification        | Runner action                                                                                                                                            |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runnable`            | Execute via the executor; mark task done; attach task + run EoW; write `closes_with` edge.                                                               |
-| `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph with a child task group + version; set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. |
+| `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph with a child task group + version; set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. The runner also extends the active snapshot's `selectedVersions` to include the new child task group/version so the new children become visible to later steps of the same runner invocation. |
 | `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact under `runs/<run-id>/artifacts/`; close parent with EoW reason `exploration_recorded_by_runner` and switch its `runReadiness` to `needs_decomposition`. |
 | `blocked`             | Skip unless declared `blockedBy` references have all resolved; then reopen the task before selection. If only unresolved blocked tasks remain, stop with `blocked_only`. |
 
 The runner rechecks `blockedBy` references before each selection pass. A `blockedBy` entry can point at a task (`type: task`, `id`, optional `taskGroupVersionId`) or a run node (`type: runNode`, `runId`, `id`). When all referenced blockers are `done` or `cancelled`, the task is reopened with `status: pending`; `runReadiness: blocked` is cleared unless `unblockRunReadiness` provides the next readiness. `taskops unblock-check <work-dir> --dry-run --json` exposes the same check without mutating files.
 
 The runner pauses immediately on a `status: waiting` task or non-delegate run node, or on a `type: delegate` run node that is not yet `done`/`cancelled`. Delegate type wins over generic waiting, so `type: delegate` + `status: waiting` reports `delegation_pending`.
+
+## Terminal stop reasons
+
+When the runner cannot start a new step, it reports one of the following:
+
+- `all_closed` — every selected terminal task is closed by task EoW, every run terminal node is closed by run EoW, and no waiting/delegated/blocked work remains. This is the closure-complete terminal state.
+- `no_runnable` — nothing is actionable but the work is not yet closed (terminal EoW coverage incomplete or otherwise inconsistent). Inspect the work before treating this as a successful finish.
+- `blocked_only` — open tasks remain but every one is `blocked`.
+- `waiting` / `delegation_pending` — a task or run node is parked waiting on something external.
+- `max_steps` / `deadline_reached` — safety caps stopped the run before further work could begin. They take precedence over `all_closed` / `no_runnable`.
+- `task_failed` / `validation_failed` — the executor failed or a mid-run re-parse found errors.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -236,12 +236,132 @@ if (typeof reasonProbeParsed.lastRunFailureReason !== 'string' || reasonProbePar
 }
 
 const secondRunOut = JSON.parse(run(['run', runnerWorkDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
-if (secondRunOut.stopReason !== 'no_runnable' || secondRunOut.stepsRun !== 1 || secondRunOut.tasks[0].taskId !== 'task-second') {
-  console.error('Expected the second run to finish task-second and stop with no_runnable');
+if (secondRunOut.stopReason !== 'all_closed' || secondRunOut.stepsRun !== 1 || secondRunOut.tasks[0].taskId !== 'task-second') {
+  console.error('Expected the second run to finish task-second and stop with all_closed (closure complete)');
   console.error(secondRunOut);
   process.exit(1);
 }
 run(['validate', runnerWorkDir]);
+
+// ---- decomposition child tasks must be picked up in the same runner invocation ----
+const visibleDecomposeDir = join(tempRoot, 'runner-visible-decompose');
+run(['init', visibleDecomposeDir, '--id', 'runner-visible-decompose', '--title', 'Runner visible decompose', '--objective', 'Verify decomposition child tasks become visible in the same run', '--language', 'en']);
+const visibleParentSpec = join(tempRoot, 'runner-visible-parent-spec.json');
+writeFileSync(visibleParentSpec, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Parent decomposition fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-parent',
+      title: 'Parent task to decompose',
+      objective: 'Expand into pre-authored child tasks.',
+      responsibility: 'Own the decomposition step that exposes children.',
+      completionCriteria: 'Child task group is referenced and children are visible.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'needs_decomposition',
+      runReadinessReason: 'Parent must decompose so the pre-authored child task group becomes visible to the runner.',
+      understandingLevel: 'partial'
+    }
+  ]
+}, null, 2));
+run(['decompose', visibleDecomposeDir, '--task-group-id', 'tg-root', '--spec', visibleParentSpec]);
+const visibleParentSnapshot = join(visibleDecomposeDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(visibleParentSnapshot, readFileSync(visibleParentSnapshot, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+// Pre-author the child task group/version with a runnable child so dry-run decomposition reuses it
+// and the child becomes selectable in the same invocation once the snapshot is extended.
+const childSpecPath = join(tempRoot, 'runner-visible-child-spec.json');
+writeFileSync(childSpecPath, JSON.stringify({
+  versionId: 'tgv-parent-v1',
+  version: 'v1',
+  summary: 'Pre-authored child of task-parent',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-parent-child',
+      title: 'Child task that should be picked up in same run',
+      objective: 'Run after the parent decomposition step extends the snapshot.',
+      responsibility: 'Own the second runner step in the same invocation.',
+      completionCriteria: 'Runner marks this child task done.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Objective, responsibility, and completion criteria are present.',
+      understandingLevel: 'known'
+    }
+  ]
+}, null, 2));
+// Create child task group folder manually so decompose --task-group-id can attach a version into it.
+const visibleChildGroupDir = join(visibleDecomposeDir, 'task-groups', 'tg-parent');
+mkdirSync(join(visibleChildGroupDir, 'versions'), { recursive: true });
+writeFileSync(join(visibleChildGroupDir, 'index.md'), `---\ntaskOpsVersion: v1\nentityType: taskGroup\nid: tg-parent\nobjective: Pre-authored decomposition of task-parent.\ncreatedAt: ${new Date().toISOString()}\nstatus: active\n---\n# tg-parent\n`, 'utf8');
+run(['decompose', visibleDecomposeDir, '--task-group-id', 'tg-parent', '--spec', childSpecPath]);
+const visibleRunOut = JSON.parse(run(['run', visibleDecomposeDir, '--executor', 'dry-run', '--max-steps', '2', '--json']).stdout);
+const visibleActions = visibleRunOut.actions || visibleRunOut.tasks || [];
+if (visibleRunOut.stepsRun !== 2 || visibleActions.length !== 2 || visibleRunOut.stopReason !== 'max_steps') {
+  console.error('Expected two steps and max_steps stop when decomposition exposes a runnable child in the same invocation');
+  console.error(visibleRunOut);
+  process.exit(1);
+}
+if (visibleActions[0].kind !== 'decompose' || visibleActions[0].taskId !== 'task-parent') {
+  console.error('Expected first step to decompose task-parent');
+  console.error(visibleActions);
+  process.exit(1);
+}
+if (visibleActions[1].kind !== 'execute' || visibleActions[1].taskId !== 'task-parent-child') {
+  console.error('Expected second step to execute the pre-authored child task-parent-child after snapshot extension');
+  console.error(visibleActions);
+  process.exit(1);
+}
+const visibleSnapshotAfter = readFileSync(visibleParentSnapshot, 'utf8');
+if (!visibleSnapshotAfter.includes('taskGroupId: tg-parent') || !visibleSnapshotAfter.includes('versionId: tgv-parent-v1')) {
+  console.error('Snapshot must be extended with the decomposed child task group/version');
+  console.error(visibleSnapshotAfter);
+  process.exit(1);
+}
+run(['validate', visibleDecomposeDir]);
+
+// ---- all_closed: fully closed work stops with the new reason instead of no_runnable ----
+const allClosedDir = join(tempRoot, 'runner-all-closed');
+run(['init', allClosedDir, '--id', 'runner-all-closed', '--title', 'Runner all closed', '--objective', 'Verify runner reports all_closed when work is fully closed', '--language', 'en']);
+const allClosedSpec = join(tempRoot, 'runner-all-closed-spec.json');
+writeFileSync(allClosedSpec, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Single runnable that closes the work',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-only',
+      title: 'Only runnable task',
+      objective: 'Execute and close the work.',
+      responsibility: 'Own the terminal runnable step.',
+      completionCriteria: 'Runner marks this task done with EoW.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Objective, responsibility, and completion criteria are present.',
+      understandingLevel: 'known'
+    }
+  ]
+}, null, 2));
+run(['decompose', allClosedDir, '--task-group-id', 'tg-root', '--spec', allClosedSpec]);
+const allClosedSnapshot = join(allClosedDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(allClosedSnapshot, readFileSync(allClosedSnapshot, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const allClosedRunOut = JSON.parse(run(['run', allClosedDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
+if (allClosedRunOut.stopReason !== 'all_closed' || allClosedRunOut.stepsRun !== 1) {
+  console.error('Expected all_closed stop reason once work is fully closed by EoW');
+  console.error(allClosedRunOut);
+  process.exit(1);
+}
+const allClosedRunLog = readFileSync(join(allClosedDir, 'runs', 'run-main', 'run-log.md'), 'utf8');
+if (!allClosedRunLog.includes('all_closed')) {
+  console.error('Expected run-log.md to mention all_closed');
+  console.error(allClosedRunLog);
+  process.exit(1);
+}
 
 // ---- runner semantics: decomposition + exploration + blocked + waiting ----
 const dispatchWorkDir = join(tempRoot, 'runner-dispatch');

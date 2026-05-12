@@ -117,7 +117,7 @@ Downstream run paths should not continue until the delegated node is resolved, c
 | Classification        | Runner action                                                                                                                                            |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runnable`            | Execute via the executor; mark task done; attach task + run EoW; write the `closes_with` edge.                                                           |
-| `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph (child task group + v1 version); set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. |
+| `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph (child task group + v1 version); set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. The runner also extends the active snapshot's `selectedVersions` with the new child task group/version so the new children become visible to later steps of the same runner invocation. |
 | `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact at `runs/<run-id>/artifacts/<run-node-id>.md`; close parent with EoW reason `exploration_recorded_by_runner` and set `runReadiness: needs_decomposition`. |
 | `blocked`             | Skip unless declared `blockedBy` references have all resolved; then reopen the task before selection. If only unresolved blocked tasks remain, the runner stops with `blocked_only`. |
 
@@ -126,3 +126,13 @@ Before each selection pass, the runner rechecks `blockedBy` references. A blocke
 Additionally, the runner pauses immediately when it encounters a `status: waiting` task or non-delegate run node, or a `type: delegate` run node that is not `done`/`cancelled`. Delegate type wins over generic waiting, so `type: delegate` + `status: waiting` reports `delegation_pending`.
 
 Dry-run decomposition synthesizes a single `runReadiness: blocked` placeholder child marked `Synthetic dry-run placeholder. A human must supply real inputs before this becomes runnable.` so it cannot be mistaken for real progress. Dry-run exploration writes a deterministic reflection artifact with the same caveat.
+
+## Terminal stop reasons
+
+`taskops run` reports one of these when it cannot start a new step:
+
+- `all_closed` — the selected work is fully closed: every terminal task is closed by task EoW, every run terminal node is closed by run EoW, and no waiting/delegated/blocked work remains. This is the closure-complete terminal state.
+- `no_runnable` — nothing is actionable but the work is not yet closed (terminal EoW coverage incomplete or otherwise inconsistent). Inspect rather than treat as success.
+- `blocked_only`, `waiting`, `delegation_pending` — open work parked on blockers/wait/delegation; resolve before continuing.
+- `max_steps`, `deadline_reached` — safety caps stopped the run before further work could begin and take precedence over `all_closed` / `no_runnable`.
+- `task_failed`, `validation_failed` — executor failure or mid-run re-parse error.
