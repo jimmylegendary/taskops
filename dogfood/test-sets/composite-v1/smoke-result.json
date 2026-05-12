@@ -1,0 +1,97 @@
+{
+  "ok": true,
+  "count": 6,
+  "tmpRoot": "/tmp/taskops-composite-v1-smoke",
+  "results": [
+    {
+      "id": "01-refactor-full-chain",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 4,
+      "actions": [
+        "execute",
+        "decompose",
+        "explore",
+        "execute"
+      ],
+      "expectedActions": [
+        "execute",
+        "decompose",
+        "explore",
+        "execute"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "02-research-to-build-chain",
+      "stopReason": "max_steps",
+      "expectedStop": "max_steps",
+      "stepsRun": 3,
+      "actions": [
+        "explore",
+        "decompose",
+        "execute"
+      ],
+      "expectedActions": [
+        "explore",
+        "decompose",
+        "execute"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "03-ops-incident-with-blocker",
+      "stopReason": "blocked_only",
+      "expectedStop": "blocked_only",
+      "stepsRun": 3,
+      "actions": [
+        "execute",
+        "explore",
+        "decompose"
+      ],
+      "expectedActions": [
+        "execute",
+        "explore",
+        "decompose"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "04-campaign-with-human-wait",
+      "stopReason": "waiting",
+      "expectedStop": "waiting",
+      "stepsRun": 1,
+      "actions": [
+        "execute"
+      ],
+      "expectedActions": [
+        "execute"
+      ],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "05-delegated-review-after-progress",
+      "stopReason": "delegation_pending",
+      "expectedStop": "delegation_pending",
+      "stepsRun": 0,
+      "actions": [],
+      "expectedActions": [],
+      "okStop": true,
+      "okActions": true
+    },
+    {
+      "id": "06-deadline-cuts-composite-work",
+      "stopReason": "deadline_reached",
+      "expectedStop": "deadline_reached",
+      "stepsRun": 0,
+      "actions": [],
+      "expectedActions": [],
+      "okStop": true,
+      "okActions": true
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "id": "taskops-runner-composite-v1",
+  "createdAt": "2026-05-12T15:50:00+09:00",
+  "description": "Composite TaskOps runner scenarios mixing multiple readiness and stop-condition behaviors.",
+  "cases": [
+    {
+      "id": "01-refactor-full-chain",
+      "scenario": "execute + decompose + explore in one bounded run",
+      "objective": "Exercise a realistic refactor path that executes, decomposes, explores, then stops by maxSteps.",
+      "maxSteps": 4,
+      "until": "2026-05-12T17:30:00+09:00",
+      "expectedStop": "max_steps",
+      "expectedActions": [
+        "execute",
+        "decompose",
+        "explore",
+        "execute"
+      ],
+      "command": "taskops run works/01-refactor-full-chain --executor dry-run --max-steps 4 --until 2026-05-12T17:30:00+09:00 --json"
+    },
+    {
+      "id": "02-research-to-build-chain",
+      "scenario": "exploration first, then decomposition, then execution",
+      "objective": "Exercise unknown-first work where exploration and decomposition both happen before execution.",
+      "maxSteps": 3,
+      "until": "2026-05-12T18:30:00+09:00",
+      "expectedStop": "max_steps",
+      "expectedActions": [
+        "explore",
+        "decompose",
+        "execute"
+      ],
+      "command": "taskops run works/02-research-to-build-chain --executor dry-run --max-steps 3 --until 2026-05-12T18:30:00+09:00 --json"
+    },
+    {
+      "id": "03-ops-incident-with-blocker",
+      "scenario": "mixed actionable tasks then blocked_only",
+      "objective": "Exercise mixed work that honestly stops when only blocked follow-ups remain.",
+      "maxSteps": 10,
+      "until": "2026-05-12T22:00:00+09:00",
+      "expectedStop": "blocked_only",
+      "expectedActions": [
+        "execute",
+        "explore",
+        "decompose"
+      ],
+      "command": "taskops run works/03-ops-incident-with-blocker --executor dry-run --max-steps 10 --until 2026-05-12T22:00:00+09:00 --json"
+    },
+    {
+      "id": "04-campaign-with-human-wait",
+      "scenario": "waiting task blocks otherwise actionable tasks",
+      "objective": "Verify a waiting task pauses before later executable tasks.",
+      "maxSteps": 10,
+      "until": "2026-05-13T09:00:00+09:00",
+      "expectedStop": "waiting",
+      "expectedActions": [
+        "execute"
+      ],
+      "command": "taskops run works/04-campaign-with-human-wait --executor dry-run --max-steps 10 --until 2026-05-13T09:00:00+09:00 --json"
+    },
+    {
+      "id": "05-delegated-review-after-progress",
+      "scenario": "first run progresses, second run sees delegate pending",
+      "objective": "Fixture includes a pending delegate; runner must stop before dispatching new work.",
+      "maxSteps": 10,
+      "until": "2026-05-13T12:00:00+09:00",
+      "expectedStop": "delegation_pending",
+      "expectedActions": [],
+      "command": "taskops run works/05-delegated-review-after-progress --executor dry-run --max-steps 10 --until 2026-05-13T12:00:00+09:00 --json"
+    },
+    {
+      "id": "06-deadline-cuts-composite-work",
+      "scenario": "deadline has priority before action dispatch",
+      "objective": "Verify expired until prevents execute/decompose/explore from starting.",
+      "maxSteps": 10,
+      "until": "2026-01-01T00:00:00+09:00",
+      "expectedStop": "deadline_reached",
+      "expectedActions": [],
+      "command": "taskops run works/06-deadline-cuts-composite-work --executor dry-run --max-steps 10 --until 2026-01-01T00:00:00+09:00 --json"
+    }
+  ]
+}
