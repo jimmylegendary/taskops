@@ -209,9 +209,12 @@ try {
       console.log(`workId=${result.workId} runId=${result.runId} executor=${result.executor} stopReason=${result.stopReason} stepsRun=${result.stepsRun}`);
       if (result.maxSteps != null) console.log(`maxSteps=${result.maxSteps}`);
       if (result.until) console.log(`until=${result.until}`);
+      if (result.stopDetail) console.log(`stopDetail=${result.stopDetail}`);
       console.log(`events=${result.eventsPath}`);
-      for (const t of result.tasks) {
-        console.log(`- task ${t.taskId} -> ${t.status} (runNode=${t.runNodeId})${t.message ? `: ${t.message}` : ''}`);
+      for (const t of result.actions || result.tasks || []) {
+        const kind = t.kind ? `[${t.kind}] ` : '';
+        const extra = t.childTaskGroupId ? ` childTaskGroup=${t.childTaskGroupId}` : (t.artifactPath ? ` artifact=${t.artifactPath}` : '');
+        console.log(`- ${kind}task ${t.taskId} -> ${t.status} (runNode=${t.runNodeId})${extra}${t.message ? `: ${t.message}` : ''}`);
       }
     }
     process.exit(result.stopReason === 'task_failed' || result.stopReason === 'validation_failed' ? 1 : 0);

@@ -106,29 +106,35 @@ taskops run ./my-work --max-steps 3 --json
 The runner:
 
 - Re-uses an existing active run when there is exactly one, else creates/uses `runs/run-main/`. Override with `--run-id`.
-- Picks runnable tasks deterministically: active snapshot order, then `task.order`, then `id` lexicographic. Only tasks with status `pending`/`active` and run readiness `runnable` are eligible.
-- Updates the task graph and the run graph for every step (run node, runRefs, status, EoW nodes, `closes_with` edge).
+- Picks the next task deterministically: active snapshot order, then `task.order`, then `id` lexicographic. Only tasks with status `pending`/`active` are eligible. Tasks classified as `blocked` are excluded; tasks classified as `runnable`, `needs_decomposition`, or `needs_exploration` are dispatched to the matching runner step.
+- For `runnable` tasks: creates the run node, mutates task status to done, attaches task and run EoW nodes, and writes the `closes_with` edge.
+- For `needs_decomposition` tasks: creates a `type: decomposition` run node, expands the task graph by writing a child task group and version (dry-run synthesizes a deterministic placeholder; `openclaw-agent` delegates authoring to the agent), updates the parent task's `childTaskGroupId`, marks the parent done with an EoW reason `decomposed_by_runner`, and closes the run node with an EoW reason `decomposition_recorded`.
+- For `needs_exploration` tasks: creates a `type: exploration` run node, writes a reflection artifact under `runs/<run-id>/artifacts/<run-node-id>.md`, marks the parent task done with an EoW reason `exploration_recorded_by_runner` and `runReadiness: needs_decomposition` (ready for an informed decomposition pass), and closes the run node with an EoW reason `exploration_recorded`.
+- Pauses immediately when it encounters a `status: waiting` task or run node, or a `type: delegate` run node that is not yet `done`/`cancelled`. The runner surfaces a waiting/delegation stop reason instead of silently skipping.
 - Appends a JSONL event log at `runs/<run-id>/events.jsonl` plus human entries in `runs/<run-id>/run-log.md`.
 - Holds a `.taskops-runner.lock` directory under the work root and removes it on exit. A second runner against the same work refuses to start.
 
 ### Stop conditions
 
-`--max-steps` and `--until` are both optional and combine with OR semantics: the runner stops before starting a new step if either limit is reached. When neither is supplied the runner defaults to `--max-steps 1` (one bounded step).
+`--max-steps` and `--until` are both optional and combine with OR semantics: the runner stops before starting a new step if either limit is reached. When neither is supplied the runner defaults to `--max-steps 1` (one bounded step). Every action — execute, decompose, or explore — counts as one step against `--max-steps`.
 
-| Stop reason         | Meaning                                                        |
-| ------------------- | -------------------------------------------------------------- |
-| `no_runnable`       | No remaining task matches the runnable filter.                 |
-| `max_steps`         | The `--max-steps` budget is exhausted.                         |
-| `deadline_reached`  | `--until` has already passed when the next step would start.   |
-| `task_failed`       | The executor reported a non-zero exit or timeout.              |
-| `validation_failed` | A mid-run re-parse found errors and the runner refused to act. |
+| Stop reason            | Meaning                                                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- |
+| `no_runnable`          | No remaining task is actionable (runnable, decomposable, or explorable).                                 |
+| `blocked_only`         | Open tasks remain but they are all classified as `blocked`; resolve the blockers before continuing.      |
+| `waiting`              | A task or run node is in `status: waiting`; resolve or cancel it before continuing.                      |
+| `delegation_pending`   | A `type: delegate` run node is still pending (not `done`/`cancelled`); resolve the delegation first.     |
+| `max_steps`            | The `--max-steps` budget is exhausted.                                                                   |
+| `deadline_reached`     | `--until` has already passed when the next step would start.                                             |
+| `task_failed`          | The executor reported a non-zero exit, timeout, or refused to author the expected decomposition/artifact.|
+| `validation_failed`    | A mid-run re-parse found errors and the runner refused to act.                                           |
 
 `--until` accepts any value `Date.parse` understands. When both `--until` and `--timeout` are supplied, the per-task timeout is capped at the remaining time before the deadline.
 
 ### Executors
 
-- `--executor dry-run` (default) — no external process. Synthesises a successful result and mutates the markdown graph. Intended for smoke tests, dress rehearsals, and skill reviews. **It does not perform real work.** Pass `--executor openclaw-agent` to dispatch a real run.
-- `--executor openclaw-agent` — spawns `openclaw agent --agent <agent-id> --message <prompt> --json [--timeout <seconds>]`. The prompt carries the work objective and task triple (`objective`, `responsibility`, `completionCriteria`) and instructs the agent to execute one TaskOps task without recursively invoking `taskops run`. Default `--agent` is `main`.
+- `--executor dry-run` (default) — no external process. Synthesises a successful result and mutates the markdown graph. For decomposition steps it writes a deterministic child task group/version with a single blocked placeholder task asking for human input. For exploration steps it writes a deterministic reflection artifact under `runs/<run-id>/artifacts/`. Intended for smoke tests, dress rehearsals, and skill reviews. **It does not perform real work.** Pass `--executor openclaw-agent` to dispatch a real run.
+- `--executor openclaw-agent` — spawns `openclaw agent --agent <agent-id> --message <prompt> --json [--timeout <seconds>]`. The prompt is tailored to the picked action — execute, decompose, or explore — and instructs the agent not to recursively invoke `taskops run`. After the agent returns the runner verifies that the expected artifact (the executed task's outcome, the decomposition version index, or the exploration artifact) was authored before marking the step done. Default `--agent` is `main`.
 
 ## Canonical file layout
 

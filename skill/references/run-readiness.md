@@ -109,3 +109,18 @@ sourceTaskGroupVersionId: tgv-root-v1
 ```
 
 Downstream run paths should not continue until the delegated node is resolved, cancelled, or timed out into an explicit follow-up.
+
+## Runner dispatch table
+
+`taskops run` does not only consume `runnable` tasks. Each step picks the next non-`done`/`cancelled` task in active snapshot order and dispatches based on the classification:
+
+| Classification        | Runner action                                                                                                                                            |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runnable`            | Execute via the executor; mark task done; attach task + run EoW; write the `closes_with` edge.                                                           |
+| `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph (child task group + v1 version); set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. |
+| `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact at `runs/<run-id>/artifacts/<run-node-id>.md`; close parent with EoW reason `exploration_recorded_by_runner` and set `runReadiness: needs_decomposition`. |
+| `blocked`             | Skip. If only blocked tasks remain, the runner stops with `blocked_only`.                                                                                |
+
+Additionally, the runner pauses immediately when it encounters a `status: waiting` task or run node, or a `type: delegate` run node that is not `done`/`cancelled` — stop reasons `waiting` and `delegation_pending` respectively.
+
+Dry-run decomposition synthesizes a single `runReadiness: blocked` placeholder child marked `Synthetic dry-run placeholder. A human must supply real inputs before this becomes runnable.` so it cannot be mistaken for real progress. Dry-run exploration writes a deterministic reflection artifact with the same caveat.

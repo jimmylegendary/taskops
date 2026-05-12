@@ -109,3 +109,16 @@ sourceTaskGroupVersionId: tgv-root-v1
 ```
 
 Downstream run paths should not continue until the delegated node is resolved, cancelled, or timed out into an explicit follow-up.
+
+## Runner dispatch
+
+`taskops run` consumes every actionable readiness, not only `runnable`. Each step:
+
+| Classification        | Runner action                                                                                                                                            |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runnable`            | Execute via the executor; mark task done; attach task + run EoW; write `closes_with` edge.                                                               |
+| `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph with a child task group + version; set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. |
+| `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact under `runs/<run-id>/artifacts/`; close parent with EoW reason `exploration_recorded_by_runner` and switch its `runReadiness` to `needs_decomposition`. |
+| `blocked`             | Skip. If only blocked tasks remain, stop with `blocked_only`.                                                                                            |
+
+The runner pauses immediately on a `status: waiting` task or run node, or on a `type: delegate` run node that is not yet `done`/`cancelled` — surfacing `waiting` or `delegation_pending` rather than silently skipping.

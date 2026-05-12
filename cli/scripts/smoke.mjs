@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -242,6 +242,164 @@ if (secondRunOut.stopReason !== 'no_runnable' || secondRunOut.stepsRun !== 1 || 
   process.exit(1);
 }
 run(['validate', runnerWorkDir]);
+
+// ---- runner semantics: decomposition + exploration + blocked + waiting ----
+const dispatchWorkDir = join(tempRoot, 'runner-dispatch');
+run(['init', dispatchWorkDir, '--id', 'runner-dispatch', '--title', 'Runner dispatch', '--objective', 'Smoke test runner readiness dispatch', '--language', 'en']);
+const dispatchSpecPath = join(tempRoot, 'runner-dispatch-spec.json');
+writeFileSync(dispatchSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Mixed readiness decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-explore',
+      title: 'Explore unknown surface',
+      objective: 'Surface unknowns about an unfamiliar surface before decomposing.',
+      responsibility: 'Author an exploration record so the next pass can decompose honestly.',
+      completionCriteria: 'Exploration artifact lists learned facts, unknowns, and a suggested next step.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'needs_exploration',
+      runReadinessReason: 'Inner structure is unknown; explore before decomposing.',
+      understandingLevel: 'unknown',
+      unknowns: ['Surface boundaries', 'Failure modes'],
+      nextLearningGoal: 'Sketch the smallest probe that exposes the boundary.'
+    },
+    {
+      id: 'task-decompose',
+      title: 'Decompose mid-confidence area',
+      objective: 'Split a mid-confidence area into child responsibilities.',
+      responsibility: 'Own the decomposition into a child task group with a v1 version.',
+      completionCriteria: 'A child task group + version exists with at least one child task.',
+      order: 2,
+      status: 'pending',
+      runReadiness: 'needs_decomposition',
+      runReadinessReason: 'Domain understanding is sufficient to split into responsibilities.',
+      understandingLevel: 'partial'
+    },
+    {
+      id: 'task-blocked',
+      title: 'Blocked area waiting on external input',
+      objective: 'Cannot progress without external input.',
+      responsibility: 'Owner must supply input before this becomes runnable.',
+      completionCriteria: 'External input has arrived and is reflected in the task graph.',
+      order: 3,
+      status: 'pending',
+      runReadiness: 'blocked',
+      runReadinessReason: 'Blocked on missing external input.',
+      understandingLevel: 'partial'
+    }
+  ]
+}, null, 2));
+run(['decompose', dispatchWorkDir, '--task-group-id', 'tg-root', '--spec', dispatchSpecPath]);
+const dispatchSnapshotPath = join(dispatchWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(dispatchSnapshotPath, readFileSync(dispatchSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+
+const exploreRunOut = JSON.parse(run(['run', dispatchWorkDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
+if (exploreRunOut.stopReason !== 'max_steps' || exploreRunOut.stepsRun !== 1 || (exploreRunOut.actions || exploreRunOut.tasks)[0].kind !== 'explore') {
+  console.error('Expected the first dispatch step to be an exploration action');
+  console.error(exploreRunOut);
+  process.exit(1);
+}
+const exploreArtifactPath = join(dispatchWorkDir, 'runs', 'run-main', 'artifacts', 'run-node-task-explore.md');
+const exploreArtifactBody = readFileSync(exploreArtifactPath, 'utf8');
+if (!exploreArtifactBody.includes('Exploration artifact for task-explore') || !exploreArtifactBody.includes('Recorded unknowns')) {
+  console.error('Dry-run exploration did not write the expected artifact body');
+  console.error(exploreArtifactBody);
+  process.exit(1);
+}
+const exploreTaskAfter = readFileSync(join(dispatchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-explore.md'), 'utf8');
+if (!exploreTaskAfter.includes('status: done') || !exploreTaskAfter.includes('runReadiness: needs_decomposition') || !exploreTaskAfter.includes('runRefs:')) {
+  console.error('task-explore must be marked done with runReadiness=needs_decomposition after exploration step');
+  console.error(exploreTaskAfter);
+  process.exit(1);
+}
+run(['validate', dispatchWorkDir]);
+
+const decomposeRunOut = JSON.parse(run(['run', dispatchWorkDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
+if (decomposeRunOut.stopReason !== 'max_steps' || decomposeRunOut.stepsRun !== 1) {
+  console.error('Expected the second dispatch step to consume one action');
+  console.error(decomposeRunOut);
+  process.exit(1);
+}
+const decomposeAction = (decomposeRunOut.actions || decomposeRunOut.tasks)[0];
+// After exploration, task-explore's readiness is needs_decomposition (lower task-order priority than task-decompose since order=1 still beats order=2).
+if (decomposeAction.kind !== 'decompose' || !['task-explore', 'task-decompose'].includes(decomposeAction.taskId)) {
+  console.error('Expected the second dispatch step to be a decomposition action on one of the open tasks');
+  console.error(decomposeAction);
+  process.exit(1);
+}
+const decomposeChildIndex = join(dispatchWorkDir, 'task-groups', decomposeAction.childTaskGroupId, 'versions', decomposeAction.versionId, 'index.md');
+const decomposeChildIndexBody = readFileSync(decomposeChildIndex, 'utf8');
+if (!decomposeChildIndexBody.includes('entityType: taskGroupVersion')) {
+  console.error('Dry-run decomposition did not write a valid child task group version');
+  console.error(decomposeChildIndexBody);
+  process.exit(1);
+}
+const decomposeParentTaskPath = join(dispatchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', `${decomposeAction.taskId}.md`);
+const decomposeParentBody = readFileSync(decomposeParentTaskPath, 'utf8');
+if (!decomposeParentBody.includes(`childTaskGroupId: ${decomposeAction.childTaskGroupId}`) || !decomposeParentBody.includes('status: done')) {
+  console.error('Decomposed parent task must reference the child task group and be marked done');
+  console.error(decomposeParentBody);
+  process.exit(1);
+}
+const decomposeChildTasks = readdirSync(join(dispatchWorkDir, 'task-groups', decomposeAction.childTaskGroupId, 'versions', decomposeAction.versionId, 'tasks'));
+if (decomposeChildTasks.length < 1) {
+  console.error('Dry-run decomposition must create at least one child task');
+  console.error(decomposeChildTasks);
+  process.exit(1);
+}
+const decomposeChildBody = readFileSync(join(dispatchWorkDir, 'task-groups', decomposeAction.childTaskGroupId, 'versions', decomposeAction.versionId, 'tasks', decomposeChildTasks[0]), 'utf8');
+if (!decomposeChildBody.includes('runReadiness: blocked')) {
+  console.error('Dry-run synthetic child task must be runReadiness=blocked to prevent auto-progress');
+  console.error(decomposeChildBody);
+  process.exit(1);
+}
+run(['validate', dispatchWorkDir]);
+
+const drainRunOut = JSON.parse(run(['run', dispatchWorkDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
+if (drainRunOut.stopReason !== 'blocked_only') {
+  console.error('Expected dispatch runner to stop with blocked_only once decomposable tasks are consumed');
+  console.error(drainRunOut);
+  process.exit(1);
+}
+run(['validate', dispatchWorkDir]);
+
+// ---- waiting stop reason ----
+const waitingWorkDir = join(tempRoot, 'runner-waiting');
+run(['init', waitingWorkDir, '--id', 'runner-waiting', '--title', 'Runner waiting', '--objective', 'Verify the runner pauses on waiting tasks', '--language', 'en']);
+const waitingSpecPath = join(tempRoot, 'runner-waiting-spec.json');
+writeFileSync(waitingSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Waiting task fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-waiting',
+      title: 'Awaiting an external decision',
+      objective: 'Surface the waiting state to the runner.',
+      responsibility: 'Owner is waiting on a stakeholder decision.',
+      completionCriteria: 'Decision arrives and the task is unblocked.',
+      order: 1,
+      status: 'waiting',
+      runReadiness: 'runnable',
+      runReadinessReason: 'All run criteria present but parked while waiting on an external decision.',
+      understandingLevel: 'known'
+    }
+  ]
+}, null, 2));
+run(['decompose', waitingWorkDir, '--task-group-id', 'tg-root', '--spec', waitingSpecPath]);
+const waitingSnapshotPath = join(waitingWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(waitingSnapshotPath, readFileSync(waitingSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const waitingRunOut = JSON.parse(run(['run', waitingWorkDir, '--executor', 'dry-run', '--max-steps', '3', '--json']).stdout);
+if (waitingRunOut.stopReason !== 'waiting' || waitingRunOut.stepsRun !== 0) {
+  console.error('Expected the runner to stop with waiting when the next task is in status: waiting');
+  console.error(waitingRunOut);
+  process.exit(1);
+}
 
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK: taskops CLI smoke passed');

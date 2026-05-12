@@ -74,12 +74,18 @@ taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|
 
 `taskops run <work-dir>` is the canonical way to advance a TaskOps work graph. The skill is passive guidance; the runner is the layer that actually mutates state.
 
-- Use `taskops run <work-dir>` instead of editing run nodes / EoW / runRefs by hand. The runner deterministically picks runnable tasks (active snapshot order, then `task.order`, then `id`), creates the run node, mutates task status, appends `runRefs`, writes EoW for both task and run graphs, and creates the `closes_with` edge.
-- Prefer `--executor openclaw-agent --agent <agent-id>` for real execution. Default `--agent` is `main`. Only use `--executor dry-run` for smoke tests, reviews, or to demonstrate the graph mutations without touching an external agent — it produces synthetic success and never performs real work.
-- `--max-steps <n>` bounds the number of task executions. `--until <iso-timestamp>` bounds wall-clock work. Both are optional and **combine with OR semantics**: stop before a new step if either limit is reached.
+- Use `taskops run <work-dir>` instead of editing run nodes / EoW / runRefs / child task groups by hand. The runner deterministically picks the next task (active snapshot order, then `task.order`, then `id`), classifies it, and dispatches the matching action.
+- The runner handles three task readiness states each as one bounded step:
+  - `runnable` — creates the run node, executes via the executor, marks the task done, writes the task and run EoW nodes, and creates the `closes_with` edge.
+  - `needs_decomposition` — creates a `type: decomposition` run node, expands the task graph with a child task group and a v1 version (dry-run synthesizes a deterministic placeholder; `openclaw-agent` delegates authoring to the agent and verifies the result), sets the parent task's `childTaskGroupId`, and closes the parent task with EoW reason `decomposed_by_runner`.
+  - `needs_exploration` — creates a `type: exploration` run node, writes a reflection artifact at `runs/<run-id>/artifacts/<run-node-id>.md`, then marks the parent done with EoW reason `exploration_recorded_by_runner` and sets its `runReadiness` to `needs_decomposition` so the next pass can author informed children.
+- `blocked` tasks are excluded from execution. If only blocked tasks remain the runner stops with `blocked_only`.
+- `status: waiting` tasks and run nodes, and `type: delegate` run nodes that are not yet `done`/`cancelled`, pause the runner with stop reason `waiting` or `delegation_pending`. Surface the pause to the user; do not auto-skip.
+- Prefer `--executor openclaw-agent --agent <agent-id>` for real execution, decomposition, and exploration. Default `--agent` is `main`. Only use `--executor dry-run` for smoke tests, reviews, or to demonstrate the graph mutations without touching an external agent — it produces synthetic success and never performs real work. The synthetic decomposition placeholders are explicitly `runReadiness: blocked` so they cannot be mistaken for real progress.
+- `--max-steps <n>` bounds the total number of actions (execute + decompose + explore). `--until <iso-timestamp>` bounds wall-clock work. Both are optional and **combine with OR semantics**: stop before a new step if either limit is reached.
 - If neither `--max-steps` nor `--until` is supplied, the runner defaults to `--max-steps 1` — exactly one step, then stop.
 - When the user says something like "before tomorrow 9am" or "by EOD", convert the requested deadline to an explicit ISO-8601 timestamp **with timezone** before passing it as `--until`. Do not pass natural-language deadlines.
-- Stop reasons reported back: `no_runnable`, `max_steps`, `deadline_reached`, `task_failed`, `validation_failed`. Always surface the reason to the user.
+- Stop reasons reported back: `no_runnable`, `blocked_only`, `waiting`, `delegation_pending`, `max_steps`, `deadline_reached`, `task_failed`, `validation_failed`. Always surface the reason to the user.
 - The runner appends to `runs/<run-id>/events.jsonl` and `runs/<run-id>/run-log.md`, and holds a `.taskops-runner.lock` directory inside the work root while running. Do not launch a second runner against the same work until the lock is gone.
 - Do **not** instruct the executing agent to call `taskops run` again — it runs one task. Recursion is the orchestrator's job, not the worker's.
 
