@@ -15,7 +15,7 @@ import {
   writeSummary,
   writeVersionFromSpec,
 } from '../lib-taskops.js';
-import { recheckBlockedTasks, runTaskOps } from '../lib-runner.js';
+import { closeTarget, computeNextAction, explainWork, recheckBlockedTasks, runTaskOps } from '../lib-runner.js';
 
 function usage() {
   console.log(`TaskOps CLI
@@ -27,6 +27,9 @@ Usage:
   taskops summary <path> [--write]
   taskops show <path> [--json]
   taskops classify-runnable <work-dir> <task-id> [--json]
+  taskops next <work-dir> [--json]
+  taskops explain <work-dir> [--json]
+  taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -191,6 +194,71 @@ try {
       console.log(`next_action: ${classification.nextAction}`);
     }
     process.exit(parsed.errors.length === 0 ? 0 : 1);
+  }
+
+  if (cmd === 'next') {
+    const workDir = positional[1];
+    if (!workDir) fail('Missing next work-dir');
+    const result = computeNextAction(workDir);
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`work=${result.workId} action=${result.action}`);
+      if (result.target) {
+        const t = result.target;
+        const targetStr = t.type === 'runNode' ? `runNode:${t.runId || '?'}/${t.id}` : `${t.type}:${t.id}`;
+        console.log(`target=${targetStr}`);
+      }
+      if (result.reason) console.log(`reason=${result.reason}`);
+      if (result.stopReason) console.log(`stopReason=${result.stopReason}`);
+      console.log(`command=${result.command}`);
+    }
+    process.exit(0);
+  }
+
+  if (cmd === 'explain') {
+    const workDir = positional[1];
+    if (!workDir) fail('Missing explain work-dir');
+    const result = explainWork(workDir);
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      const c = result.closure || {};
+      console.log(`work=${result.workId} status=${result.status} complete=${result.complete}`);
+      console.log(`closure: terminalTaskEow=${c.terminalTaskEowCount ?? 0}/${c.terminalTaskCount ?? 0} runTerminalEow=${c.runTerminalEowCount ?? 0}/${c.runTerminalNodeCount ?? 0} blockers=${c.openBlockerCount ?? 0} waiting=${c.waitingDelegationCount ?? 0}`);
+      if (result.complete) {
+        console.log('All branches closed by EoW. Work is complete.');
+      } else {
+        const n = result.next;
+        console.log(`next: action=${n.action}${n.stopReason ? ` stopReason=${n.stopReason}` : ''}${n.target ? ` target=${n.target.type}:${n.target.runId ? n.target.runId + '/' : ''}${n.target.id}` : ''}`);
+        if (n.reason) console.log(`reason: ${n.reason}`);
+        console.log(`command: ${n.command}`);
+        if (result.openReasons.length > 0) {
+          console.log('open reasons:');
+          for (const r of result.openReasons) console.log(`- ${r}`);
+        }
+      }
+      if (result.validationErrors.length > 0) {
+        console.log('validation errors:');
+        for (const e of result.validationErrors) console.log(`- ${e}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (cmd === 'close') {
+    const workDir = positional[1];
+    const targetId = positional[2];
+    if (!workDir) fail('Missing close work-dir');
+    if (!targetId) fail('Missing close target id');
+    const reason = flags.reason && flags.reason !== true ? String(flags.reason) : null;
+    const result = closeTarget(workDir, targetId, { reason });
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      const t = result.target;
+      const targetStr = t.type === 'runNode' ? `runNode ${t.runId}/${t.id}` : `task ${t.id} (version ${t.taskGroupVersionId})`;
+      console.log(`closed ${targetStr} via EoW '${result.eowId}' (reason=${result.reason})`);
+      console.log(result.eowPath);
+    }
+    process.exit(0);
   }
 
   if (cmd === 'unblock-check') {

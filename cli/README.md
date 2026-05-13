@@ -1,8 +1,8 @@
 # TaskOps CLI
 
-**Agentic work needs an execution graph, not a TODO list.**
+**TaskOps is a work-truth protocol, not just a task manager.**
 
-TaskOps is a markdown-first CLI for human + AI work where plans, execution logs, blockers, delegation, and closure evidence must stay inspectable and versionable.
+It exists to keep human + AI work *honest*: agents must not silently stop, pretend work is done, or continue executing a wrong plan. Plans, execution logs, blockers, delegation, and closure evidence stay inspectable and versionable in plain markdown.
 
 It separates two truths:
 
@@ -88,6 +88,9 @@ taskops validate <path>
 taskops summary <path> [--write]
 taskops show <path> [--json]
 taskops classify-runnable <work-dir> <task-id> [--json]
+taskops next <work-dir> [--json]
+taskops explain <work-dir> [--json]
+taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
 taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -96,6 +99,20 @@ taskops vault-init <vault-dir> [--repo-url <url>] [--branch main] [--auto-sync t
 taskops git-status <vault-dir>
 taskops git-sync <vault-dir> [--message <msg>] [--branch <branch>]
 taskops watch-sync <vault-dir> [--message <msg>] [--debounce-ms <ms>] [--branch <branch>]
+```
+
+## Honest-action commands
+
+These three read-only/guarded commands are the "honest loop" surface. They never lie about progress:
+
+- `taskops next <work-dir> [--json]` — return the one next honest action: `execute`, `decompose`, `explore`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. The output also includes the target task or run node and a recommended command. It does not mutate state.
+- `taskops explain <work-dir> [--json]` — explain why the work is or is not done. Reports the closure summary, the next honest action, and the concrete reasons the work is still open (missing terminal EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors). It does not mutate state.
+- `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. Refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied (in which case the task status is also flipped to `done` so closure counts stay honest). Refuses to close a run node that is not `done`/`cancelled` unless an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied; refuses delegated/waiting nodes unless one of `manual_verified|cancelled|superseded` is given. On success it writes an EoW file (and a `closes_with` run edge for run nodes).
+
+```bash
+taskops next ./my-work --json
+taskops explain ./my-work
+taskops close ./my-work task-foo --reason manual_verified
 ```
 
 ## Run a TaskOps work

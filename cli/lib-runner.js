@@ -252,7 +252,7 @@ export function recheckBlockedTasks(workDir, { dryRun = false } = {}) {
   return { projectDir, checked, unblocked, stillBlocked, dryRun };
 }
 
-function pickNextAction(parsed) {
+export function pickNextAction(parsed) {
   for (const runNode of parsed.runNodes.values()) {
     const pause = runNodePause(runNode);
     switch (pause?.reason) {
@@ -864,6 +864,309 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   return {
     taskId: task.id, runNodeId, kind: 'explore', status: 'completed', executor,
     artifactPath: result.artifactPath || null, message: result.message || null,
+  };
+}
+
+const ACTION_BY_STOP_REASON = Object.freeze({
+  [STOP_REASONS.ALL_CLOSED]: 'done',
+  [STOP_REASONS.NO_RUNNABLE]: 'no_runnable',
+  [STOP_REASONS.BLOCKED_ONLY]: 'blocked',
+  [STOP_REASONS.WAITING]: 'wait',
+  [STOP_REASONS.DELEGATION_PENDING]: 'delegation_pending',
+});
+
+function commandForAction(action, workDir) {
+  switch (action) {
+    case 'execute':
+    case 'decompose':
+    case 'explore':
+      return `taskops run ${workDir} --executor openclaw-agent --max-steps 1`;
+    case 'blocked':
+      return `taskops unblock-check ${workDir} --json  # resolve blockers or supply input`;
+    case 'wait':
+      return `# resolve the waiting task/run node, then re-run taskops next`;
+    case 'delegation_pending':
+      return `# resolve the pending delegation in the run graph, then re-run taskops next`;
+    case 'done':
+      return `# all branches closed by EoW; no further action required`;
+    default:
+      return `taskops explain ${workDir}  # inspect why no action is available`;
+  }
+}
+
+function shapeNextAction(next, workDir, parsed = null) {
+  if (parsed?.closure?.complete === true) {
+    return {
+      action: 'done',
+      target: null,
+      reason: 'All terminal task/run EoW coverage is met and no waiting/blocked work remains.',
+      stopReason: STOP_REASONS.ALL_CLOSED,
+      command: commandForAction('done', workDir),
+    };
+  }
+  if (next.kind === 'execute' || next.kind === 'decompose' || next.kind === 'explore') {
+    const task = next.task;
+    const action = next.kind;
+    return {
+      action,
+      target: {
+        type: 'task',
+        id: task.id,
+        taskGroupId: task.taskGroupId,
+        taskGroupVersionId: task.taskGroupVersionId,
+        path: task.path,
+      },
+      reason: next.classification?.reason || null,
+      stopReason: null,
+      command: commandForAction(action, workDir),
+    };
+  }
+  const action = ACTION_BY_STOP_REASON[next.reason] || 'no_runnable';
+  return {
+    action,
+    target: next.source
+      ? { type: next.source.type, runId: next.source.runId || null, id: next.source.id }
+      : null,
+    reason: next.detail || null,
+    stopReason: next.reason || null,
+    command: commandForAction(action, workDir),
+  };
+}
+
+function resolveSingleProject(workDir) {
+  if (!workDir) throw new Error('Missing TaskOps work directory');
+  const workRoot = resolve(workDir);
+  const projects = discoverProjects(workRoot);
+  if (projects.length !== 1) {
+    throw new Error(`Expected exactly 1 TaskOps work under ${workDir}, found ${projects.length}`);
+  }
+  return projects[0];
+}
+
+export function computeNextAction(workDir) {
+  const projectDir = resolveSingleProject(workDir);
+  const parsed = parseProject(projectDir);
+  const next = pickNextAction(parsed);
+  const shaped = shapeNextAction(next, workDir, parsed);
+  return {
+    workId: parsed.project.id,
+    projectDir,
+    ...shaped,
+    closure: parsed.closure,
+    validationErrors: parsed.errors,
+  };
+}
+
+function countOpenTasksByReadiness(parsed) {
+  const counts = { runnable: 0, needs_decomposition: 0, needs_exploration: 0, blocked: 0, waiting: 0 };
+  for (const task of parsed.tasks.values()) {
+    if (['done', 'cancelled'].includes(task.status)) continue;
+    if (task.status === 'waiting') {
+      counts.waiting += 1;
+      continue;
+    }
+    const c = classifyTaskReadiness(task);
+    if (counts[c.runReadiness] != null) counts[c.runReadiness] += 1;
+  }
+  return counts;
+}
+
+export function explainWork(workDir) {
+  const projectDir = resolveSingleProject(workDir);
+  const parsed = parseProject(projectDir);
+  const next = pickNextAction(parsed);
+  const shaped = shapeNextAction(next, workDir, parsed);
+  const closure = parsed.closure || {};
+  const complete = closure.complete === true;
+  const reasons = [];
+  const readinessCounts = complete
+    ? { runnable: 0, needs_decomposition: 0, needs_exploration: 0, blocked: 0, waiting: 0 }
+    : countOpenTasksByReadiness(parsed);
+  if (!complete) {
+    if (parsed.errors.length > 0) reasons.push(`work has ${parsed.errors.length} validation error(s); cannot trust closure`);
+    if ((closure.openTerminalTaskCount || 0) > 0) reasons.push(`${closure.openTerminalTaskCount} terminal task(s) missing EoW`);
+    if ((closure.openRunTerminalNodeCount || 0) > 0) reasons.push(`${closure.openRunTerminalNodeCount} run terminal node(s) missing EoW`);
+    if ((closure.openBlockerCount || 0) > 0) reasons.push(`${closure.openBlockerCount} blocked task(s) or run node(s)`);
+    if ((closure.waitingDelegationCount || 0) > 0) reasons.push(`${closure.waitingDelegationCount} waiting/delegated run node(s)`);
+    if (readinessCounts.waiting > 0) reasons.push(`${readinessCounts.waiting} task(s) waiting for external input`);
+    if (readinessCounts.runnable > 0) reasons.push(`${readinessCounts.runnable} runnable task(s) remain`);
+    if (readinessCounts.needs_decomposition > 0) reasons.push(`${readinessCounts.needs_decomposition} task(s) need decomposition`);
+    if (readinessCounts.needs_exploration > 0) reasons.push(`${readinessCounts.needs_exploration} task(s) need exploration`);
+  }
+  return {
+    workId: parsed.project.id,
+    projectDir,
+    status: parsed.project.status,
+    complete,
+    closure,
+    next: shaped,
+    openReasons: reasons,
+    readinessCounts,
+    validationErrors: parsed.errors,
+    warnings: parsed.warnings,
+  };
+}
+
+function findCloseTarget(parsed, targetId) {
+  const taskMatches = [...parsed.tasks.values()].filter((t) => t.id === targetId);
+  const runNodeMatches = [...parsed.runNodes.values()].filter((n) => n.id === targetId);
+  const totalMatches = taskMatches.length + runNodeMatches.length;
+  if (totalMatches === 0) {
+    throw new Error(`No task or run node found with id '${targetId}' in work ${parsed.project.id}`);
+  }
+  if (totalMatches > 1) {
+    const taskIds = taskMatches.map((t) => `${t.taskGroupVersionId}:${t.id}`).join(', ');
+    const nodeIds = runNodeMatches.map((n) => `${n.runId}:${n.id}`).join(', ');
+    throw new Error(`Id '${targetId}' is ambiguous; tasks=[${taskIds}] runNodes=[${nodeIds}]`);
+  }
+  if (taskMatches.length === 1) return { type: 'task', task: taskMatches[0] };
+  return { type: 'runNode', runNode: runNodeMatches[0] };
+}
+
+const RUN_NODE_OVERRIDE_REASONS = new Set(['manual_verified', 'manual_close', 'failure', 'superseded', 'cancelled']);
+const DELEGATION_OVERRIDE_REASONS = new Set(['manual_verified', 'cancelled', 'superseded']);
+
+export function closeTarget(workDir, targetId, { reason = null } = {}) {
+  if (!targetId) throw new Error('Missing close target id');
+  const projectDir = resolveSingleProject(workDir);
+  const parsed = parseProject(projectDir);
+  if (parsed.errors.length > 0) {
+    throw new Error(`TaskOps work has validation errors; refuse to close until resolved:\n- ${parsed.errors.join('\n- ')}`);
+  }
+  const target = findCloseTarget(parsed, targetId);
+  const declaredAt = isoNow();
+  const declaredReason = reason && String(reason).trim().length > 0 ? String(reason).trim() : 'manual_close';
+
+  if (target.type === 'task') {
+    const task = target.task;
+    const existing = [...parsed.eowNodes.values()].find((e) => e.graphType === 'task' && e.attachedToId === task.id && e.taskGroupVersionId === task.taskGroupVersionId);
+    if (existing) throw new Error(`Task '${task.id}' (version ${task.taskGroupVersionId}) already closed by EoW '${existing.id}'`);
+
+    if (task.childTaskGroupId) {
+      const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
+      const selectedPair = (activeSnapshot?.selectedVersions || []).find((p) => p && p.taskGroupId === task.childTaskGroupId);
+      if (selectedPair) {
+        const childVersion = parsed.versions.get(selectedPair.versionId);
+        if (childVersion) {
+          const openChildren = childVersion.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
+          if (openChildren.length > 0) {
+            throw new Error(`Task '${task.id}' has ${openChildren.length} open child task(s) in selected version '${selectedPair.versionId}'; close children before closing parent`);
+          }
+          const selectedTgIds = new Set((activeSnapshot.selectedVersions || []).map((p) => p && p.taskGroupId));
+          const unclosedTerminals = childVersion.tasks.filter((t) => {
+            const branchContinues = t.childTaskGroupId && selectedTgIds.has(t.childTaskGroupId);
+            if (branchContinues) return false;
+            return !parsed.eowNodes ? true : ![...parsed.eowNodes.values()].some((e) => e.graphType === 'task' && e.attachedToId === t.id && e.taskGroupVersionId === childVersion.id);
+          });
+          if (unclosedTerminals.length > 0) {
+            throw new Error(`Task '${task.id}' has ${unclosedTerminals.length} child terminal task(s) without EoW (e.g. '${unclosedTerminals[0].id}'); close children first`);
+          }
+        }
+      }
+    }
+
+    if (task.status !== 'done' && declaredReason !== 'manual_verified') {
+      throw new Error(`Task '${task.id}' status is '${task.status}'; refuse to close. Mark the task done first, or pass --reason manual_verified to attest closure.`);
+    }
+
+    const statusFlipped = task.status !== 'done' && declaredReason === 'manual_verified';
+    if (statusFlipped) {
+      rewriteFrontmatter(task.path, (fm) => {
+        fm.status = 'done';
+        fm.runReadinessReason = sanitizeFmScalar(`Closed by taskops close --reason manual_verified at ${declaredAt}.`);
+        return fm;
+      });
+    }
+
+    const eowId = `eow-${task.id}`;
+    const versionDir = dirname(dirname(task.path));
+    const eowDir = join(versionDir, 'eow');
+    ensureDir(eowDir);
+    const eowPath = join(eowDir, `${eowId}.md`);
+    if (existsSync(eowPath)) throw new Error(`Refusing to overwrite existing EoW file at ${eowPath}`);
+    const eowFm = {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: eowId,
+      graphType: 'task',
+      attachedToType: 'task',
+      attachedToId: task.id,
+      taskGroupVersionId: task.taskGroupVersionId,
+      reason: sanitizeFmScalar(declaredReason),
+      declaredBy: 'taskops-close',
+      declaredAt,
+      createdAt: declaredAt,
+      status: 'done',
+    };
+    writeFileSync(eowPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`, 'utf8');
+    return {
+      workId: parsed.project.id,
+      projectDir,
+      target: { type: 'task', id: task.id, taskGroupId: task.taskGroupId, taskGroupVersionId: task.taskGroupVersionId },
+      eowId,
+      eowPath,
+      reason: declaredReason,
+      statusFlipped,
+      closed: true,
+    };
+  }
+
+  const node = target.runNode;
+  const existing = [...parsed.eowNodes.values()].find((e) => e.graphType === 'run' && e.runId === node.runId && e.attachedToId === node.id);
+  if (existing) throw new Error(`Run node '${node.runId}/${node.id}' already closed by EoW '${existing.id}'`);
+
+  const statusOk = ['done', 'cancelled'].includes(node.status);
+  if (!statusOk && !RUN_NODE_OVERRIDE_REASONS.has(declaredReason)) {
+    throw new Error(`Run node '${node.runId}/${node.id}' status is '${node.status}'; refuse to close. Use --reason failure|superseded|cancelled|manual_verified to attest closure.`);
+  }
+  if (node.type === 'delegate' && node.status === 'waiting' && !DELEGATION_OVERRIDE_REASONS.has(declaredReason)) {
+    throw new Error(`Run node '${node.runId}/${node.id}' is a pending delegation (status=waiting); use --reason manual_verified|cancelled|superseded to attest closure.`);
+  }
+
+  const runDir = join(projectDir, 'runs', node.runId);
+  const eowId = `eow-${node.id}`;
+  const eowPath = join(runDir, 'nodes', `${eowId}.md`);
+  if (existsSync(eowPath)) throw new Error(`Refusing to overwrite existing EoW file at ${eowPath}`);
+  const eowFm = {
+    taskOpsVersion: 'v1',
+    entityType: 'eow',
+    id: eowId,
+    runId: node.runId,
+    graphType: 'run',
+    attachedToType: 'runNode',
+    attachedToId: node.id,
+    reason: sanitizeFmScalar(declaredReason),
+    declaredBy: 'taskops-close',
+    declaredAt,
+    createdAt: declaredAt,
+    status: 'done',
+  };
+  writeFileSync(eowPath, fmBlock(eowFm) + `# EoW: ${node.id}\n`, 'utf8');
+  const edgeId = `edge-${node.id}-to-eow`;
+  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
+  if (!existsSync(edgePath)) {
+    const edgeFm = {
+      taskOpsVersion: 'v1',
+      entityType: 'runEdge',
+      id: edgeId,
+      runId: node.runId,
+      fromRunNodeId: node.id,
+      toRunNodeId: eowId,
+      edgeType: 'closes_with',
+      createdAt: declaredAt,
+      status: 'done',
+    };
+    writeFileSync(edgePath, fmBlock(edgeFm) + `# Run edge: ${node.id} closes with EoW\n`, 'utf8');
+  }
+  return {
+    workId: parsed.project.id,
+    projectDir,
+    target: { type: 'runNode', runId: node.runId, id: node.id },
+    eowId,
+    eowPath,
+    edgePath,
+    reason: declaredReason,
+    closed: true,
   };
 }
 

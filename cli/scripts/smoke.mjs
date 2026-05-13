@@ -600,5 +600,165 @@ if (blockerRunOut.stopReason !== 'max_steps' || blockerRunOut.stepsRun !== 1 || 
   process.exit(1);
 }
 
+// ---- next / explain / close honest-loop commands ----
+const honestDir = join(tempRoot, 'runner-honest-loop');
+run(['init', honestDir, '--id', 'runner-honest', '--title', 'Runner honest', '--objective', 'Cover taskops next/explain/close', '--language', 'en']);
+const honestSpecPath = join(tempRoot, 'runner-honest-spec.json');
+writeFileSync(honestSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Honest loop fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-honest-run',
+      title: 'Runnable task',
+      objective: 'Provide a deterministic next=execute pick.',
+      responsibility: 'Own the runnable step.',
+      completionCriteria: 'Task marked done with EoW.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Objective, responsibility, and completion criteria are present.',
+      understandingLevel: 'known'
+    },
+    {
+      id: 'task-honest-blocked',
+      title: 'Blocked sibling',
+      objective: 'Stay blocked so close --reason manual_verified can attest.',
+      responsibility: 'Owner is waiting on external input.',
+      completionCriteria: 'External input arrives.',
+      order: 2,
+      status: 'blocked',
+      runReadiness: 'blocked',
+      runReadinessReason: 'Synthetic blocker for honest-loop smoke.',
+      understandingLevel: 'partial'
+    }
+  ]
+}, null, 2));
+run(['decompose', honestDir, '--task-group-id', 'tg-root', '--spec', honestSpecPath]);
+const honestSnapshotPath = join(honestDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(honestSnapshotPath, readFileSync(honestSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+
+const nextBefore = JSON.parse(run(['next', honestDir, '--json']).stdout);
+if (nextBefore.action !== 'execute' || nextBefore.target?.id !== 'task-honest-run') {
+  console.error('Expected taskops next to recommend executing task-honest-run');
+  console.error(nextBefore);
+  process.exit(1);
+}
+if (!nextBefore.command || !nextBefore.command.includes('taskops run')) {
+  console.error('Expected next command to include taskops run');
+  console.error(nextBefore);
+  process.exit(1);
+}
+
+const explainBefore = JSON.parse(run(['explain', honestDir, '--json']).stdout);
+if (explainBefore.complete !== false || explainBefore.next.action !== 'execute') {
+  console.error('Expected explain to report not-complete and next=execute');
+  console.error(explainBefore);
+  process.exit(1);
+}
+if (!explainBefore.openReasons.some((r) => r.includes('runnable')) || !explainBefore.openReasons.some((r) => r.includes('blocked'))) {
+  console.error('Expected open reasons to mention runnable and blocked tasks');
+  console.error(explainBefore);
+  process.exit(1);
+}
+
+const closeMissingReason = spawnSync('node', [cli, 'close', honestDir, 'task-honest-blocked', '--json'], { encoding: 'utf8' });
+if (closeMissingReason.status === 0) {
+  console.error('Expected close on blocked task without --reason manual_verified to fail');
+  console.error(closeMissingReason.stdout);
+  process.exit(1);
+}
+if (!/refuse to close|status is/.test(closeMissingReason.stderr)) {
+  console.error('Expected close failure message to explain refusal reason');
+  console.error(closeMissingReason.stderr);
+  process.exit(1);
+}
+
+const closeOk = JSON.parse(run(['close', honestDir, 'task-honest-blocked', '--reason', 'manual_verified', '--json']).stdout);
+if (closeOk.closed !== true || closeOk.target.type !== 'task' || closeOk.target.id !== 'task-honest-blocked' || closeOk.eowId !== 'eow-task-honest-blocked') {
+  console.error('Expected manual_verified close to write EoW for task-honest-blocked');
+  console.error(closeOk);
+  process.exit(1);
+}
+const honestBlockedEow = readFileSync(closeOk.eowPath, 'utf8');
+if (!honestBlockedEow.includes('reason: manual_verified') || !honestBlockedEow.includes('declaredBy: taskops-close')) {
+  console.error('Manual-verified EoW file missing expected frontmatter');
+  console.error(honestBlockedEow);
+  process.exit(1);
+}
+
+const closeAgain = spawnSync('node', [cli, 'close', honestDir, 'task-honest-blocked', '--reason', 'manual_verified', '--json'], { encoding: 'utf8' });
+if (closeAgain.status === 0 || !/already closed/.test(closeAgain.stderr)) {
+  console.error('Expected re-close to fail with already-closed message');
+  console.error(closeAgain.stdout, closeAgain.stderr);
+  process.exit(1);
+}
+
+// Run the remaining runnable task to fully close the work; then expect next=done.
+const honestRunOut = JSON.parse(run(['run', honestDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
+if (honestRunOut.tasks[0]?.taskId !== 'task-honest-run' || honestRunOut.tasks[0]?.status !== 'completed') {
+  console.error('Expected runner to complete task-honest-run');
+  console.error(honestRunOut);
+  process.exit(1);
+}
+run(['validate', honestDir]);
+const nextAfter = JSON.parse(run(['next', honestDir, '--json']).stdout);
+if (nextAfter.action !== 'done' || nextAfter.stopReason !== 'all_closed') {
+  console.error('Expected next to report done/all_closed after full closure');
+  console.error(nextAfter);
+  process.exit(1);
+}
+const explainAfter = JSON.parse(run(['explain', honestDir, '--json']).stdout);
+if (explainAfter.complete !== true || explainAfter.next.action !== 'done' || explainAfter.openReasons.length !== 0) {
+  console.error('Expected explain to report complete=true, next=done, and no open reasons after closure');
+  console.error(explainAfter);
+  process.exit(1);
+}
+
+// ---- close a run node by id with reason override ----
+const closeRunNodeDir = join(tempRoot, 'runner-close-run-node');
+run(['init', closeRunNodeDir, '--id', 'runner-close-run-node', '--title', 'Close run node', '--objective', 'Cover run-node close with reason override', '--language', 'en']);
+// Manually write a non-done run node that is not yet closed by EoW.
+const manualNodePath = join(closeRunNodeDir, 'runs', 'run-main', 'nodes', 'run-node-manual.md');
+writeFileSync(manualNodePath, `---\ntaskOpsVersion: v1\nentityType: runNode\nid: run-node-manual\nrunId: run-main\ntype: implementation\ntitle: Manual node\nstatus: cancelled\ncreatedAt: 2026-05-12T00:00:00Z\n---\n# Manual node\n`, 'utf8');
+const closeRunNodeOk = JSON.parse(run(['close', closeRunNodeDir, 'run-node-manual', '--reason', 'superseded', '--json']).stdout);
+if (closeRunNodeOk.target.type !== 'runNode' || closeRunNodeOk.target.runId !== 'run-main' || closeRunNodeOk.target.id !== 'run-node-manual') {
+  console.error('Expected run-node close target metadata');
+  console.error(closeRunNodeOk);
+  process.exit(1);
+}
+const runEowBody = readFileSync(closeRunNodeOk.eowPath, 'utf8');
+if (!runEowBody.includes('reason: superseded') || !runEowBody.includes('graphType: run')) {
+  console.error('Run-node EoW file missing expected frontmatter');
+  console.error(runEowBody);
+  process.exit(1);
+}
+const runEdgeBody = readFileSync(closeRunNodeOk.edgePath, 'utf8');
+if (!runEdgeBody.includes('edgeType: closes_with') || !runEdgeBody.includes('toRunNodeId: eow-run-node-manual')) {
+  console.error('Run-node close did not write expected closes_with edge');
+  console.error(runEdgeBody);
+  process.exit(1);
+}
+run(['validate', closeRunNodeDir]);
+
+// Refuse to close a pending delegation without an attestation reason.
+const delegateCloseDir = join(tempRoot, 'runner-close-delegate');
+run(['init', delegateCloseDir, '--id', 'runner-close-delegate', '--title', 'Close delegate', '--objective', 'Verify delegate close refusal', '--language', 'en']);
+writeFileSync(join(delegateCloseDir, 'runs', 'run-main', 'nodes', 'run-node-delegate-pending.md'), `---\ntaskOpsVersion: v1\nentityType: runNode\nid: run-node-delegate-pending\nrunId: run-main\ntype: delegate\ntitle: Pending delegate\nstatus: waiting\ndelegateeType: human\ndelegateeRef: stakeholder\nexpectedOutput: Approval or revision.\nrequestedAt: 2026-05-12T00:00:00Z\ncreatedAt: 2026-05-12T00:00:00Z\n---\n# Pending delegate\n`, 'utf8');
+const delegateCloseFail = spawnSync('node', [cli, 'close', delegateCloseDir, 'run-node-delegate-pending', '--json'], { encoding: 'utf8' });
+if (delegateCloseFail.status === 0 || !/pending delegation/.test(delegateCloseFail.stderr)) {
+  console.error('Expected delegate close without override reason to fail');
+  console.error(delegateCloseFail.stdout, delegateCloseFail.stderr);
+  process.exit(1);
+}
+const delegateCloseOk = JSON.parse(run(['close', delegateCloseDir, 'run-node-delegate-pending', '--reason', 'cancelled', '--json']).stdout);
+if (delegateCloseOk.target.id !== 'run-node-delegate-pending' || delegateCloseOk.reason !== 'cancelled') {
+  console.error('Expected delegate close to succeed with --reason cancelled');
+  console.error(delegateCloseOk);
+  process.exit(1);
+}
+
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK: taskops CLI smoke passed');
