@@ -127,6 +127,10 @@ Additionally, the runner pauses immediately when it encounters a `status: waitin
 
 Dry-run decomposition synthesizes a single `runReadiness: blocked` placeholder child marked `Synthetic dry-run placeholder. A human must supply real inputs before this becomes runnable.` so it cannot be mistaken for real progress. Dry-run exploration writes a deterministic reflection artifact with the same caveat.
 
+### Optional self-delegate loopback
+
+Pass `--loopback self --max-loopbacks <n>` (default `n=3`) to let the runner auto-resolve *self-delegate* run nodes (`delegateeType: self`, `delegateeRef: self`, or `delegateeRef: <work-id>`) instead of stopping with `delegation_pending`. For each pending self-delegate the runner opens a `type: loopback` resolution node (`run-node-loopback-<delegate-id>[-<n>]`), writes a `loopback` edge to it, executes the loopback (dry-run synthesises an artifact; `openclaw-agent` dispatches a fresh single-step agent), then closes the loopback (EoW reason `loopback_recorded`) and the original delegate (EoW reason `self_loopback_resolved`, with `resolvedBy: self_loopback` and `resolvedByRunNodeId` on the delegate). Each loopback counts against `--max-steps` *and* the loopback budget. Non-self delegates still stop with `delegation_pending`. Default `--loopback none` keeps the pre-existing pause behaviour.
+
 ## Terminal stop reasons
 
 `taskops run` reports one of these when it cannot start a new step:
@@ -135,4 +139,15 @@ Dry-run decomposition synthesizes a single `runReadiness: blocked` placeholder c
 - `no_runnable` — nothing is actionable but the work is not yet closed (terminal EoW coverage incomplete or otherwise inconsistent). Inspect rather than treat as success.
 - `blocked_only`, `waiting`, `delegation_pending` — open work parked on blockers/wait/delegation; resolve before continuing.
 - `max_steps`, `deadline_reached` — safety caps stopped the run before further work could begin and take precedence over `all_closed` / `no_runnable`.
+- `max_loopbacks` — the `--max-loopbacks` budget is exhausted while a self-delegate is still pending; raise the budget, resolve manually, or invoke `taskops run` again to spend more loopbacks.
 - `task_failed`, `validation_failed` — executor failure or mid-run re-parse error.
+
+## Restarting from a task
+
+`taskops restart <work-dir> --from <task-id> --instruction "<text>" [--reason <text>] [--instruction-file <path>] [--json]` rolls the active selected version forward to a new version that re-executes from `<task-id>`. Use it instead of editing `status: done` back to `pending`:
+
+- Upstream tasks (`order < target.order`) keep their status; done leaves get a fresh EoW with `reason: preserved_upstream_after_restart`. Each preserved task carries `preservedUpstream: true` and `preservedFromVersionId`.
+- The target task is reset to `pending` and gains `restartInstruction`, optional `restartReason`, `restartedFromVersionId`, and `restartedAt`.
+- Downstream tasks (`order >= target.order`, excluding the target) are reset to `pending`.
+- The prior version is rewritten with `selected: false` and `supersededByVersionId`. The active snapshot's `selectedVersions` is repointed at the new version and the parent task group's `activeVersionId` follows if it pointed at the prior. Historical run nodes/EoWs/edges remain unchanged.
+- Restart refuses if the project has validation errors or if `<task-id>` is missing from / ambiguous across selected versions.

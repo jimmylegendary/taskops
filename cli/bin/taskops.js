@@ -9,6 +9,7 @@ import {
   initProject,
   initVaultRepo,
   parseProject,
+  restartFromTask,
   summarizeProject,
   syncVaultRepo,
   watchAndSyncVault,
@@ -31,7 +32,8 @@ Usage:
   taskops explain <work-dir> [--json]
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
-  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+  taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
   taskops git-status <vault-dir>
@@ -284,6 +286,8 @@ try {
       maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
       until: flags.until && flags.until !== true ? String(flags.until) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
+      loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
+      maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
     });
     if (flags.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -291,6 +295,9 @@ try {
       console.log(`workId=${result.workId} runId=${result.runId} executor=${result.executor} stopReason=${result.stopReason} stepsRun=${result.stepsRun}`);
       if (result.maxSteps != null) console.log(`maxSteps=${result.maxSteps}`);
       if (result.until) console.log(`until=${result.until}`);
+      if (result.loopbackPolicy && result.loopbackPolicy !== 'none') {
+        console.log(`loopbackPolicy=${result.loopbackPolicy} loopbacksUsed=${result.loopbacksUsed}/${result.maxLoopbacks}`);
+      }
       if (result.stopDetail) console.log(`stopDetail=${result.stopDetail}`);
       console.log(`events=${result.eventsPath}`);
       for (const t of result.actions || result.tasks || []) {
@@ -300,6 +307,25 @@ try {
       }
     }
     process.exit(result.stopReason === 'task_failed' || result.stopReason === 'validation_failed' ? 1 : 0);
+  }
+
+  if (cmd === 'restart') {
+    const workDir = positional[1];
+    if (!workDir) fail('Missing restart work-dir');
+    const fromTaskId = requireFlag(flags, 'from');
+    const instruction = flags.instruction && flags.instruction !== true ? String(flags.instruction) : null;
+    const instructionFile = flags['instruction-file'] && flags['instruction-file'] !== true ? String(flags['instruction-file']) : null;
+    if (!instruction && !instructionFile) fail('Missing --instruction or --instruction-file');
+    const reason = flags.reason && flags.reason !== true ? String(flags.reason) : null;
+    const result = restartFromTask(workDir, { fromTaskId, instruction, instructionFile, reason });
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`workId=${result.workId} taskGroup=${result.taskGroupId} from=${result.fromVersionId} to=${result.toVersionId} fromTask=${result.fromTaskId}`);
+      console.log(`preservedTasks=${result.preservedTaskCount} resetTasks=${result.resetTaskCount} snapshot=${result.snapshotId}`);
+      if (result.reason) console.log(`reason=${result.reason}`);
+      console.log(`newVersionDir=${result.newVersionDir}`);
+    }
+    process.exit(0);
   }
 
   if (cmd === 'decompose' || cmd === 'refactor') {

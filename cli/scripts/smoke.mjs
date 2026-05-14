@@ -760,5 +760,253 @@ if (delegateCloseOk.target.id !== 'run-node-delegate-pending' || delegateCloseOk
   process.exit(1);
 }
 
+// ---- loopback policy: self-delegate auto-resolves within budget ----
+const loopbackOkDir = join(tempRoot, 'runner-loopback-ok');
+run(['init', loopbackOkDir, '--id', 'runner-loopback-ok', '--title', 'Loopback ok', '--objective', 'Verify self-delegate loopback resolves within budget', '--language', 'en']);
+writeFileSync(join(loopbackOkDir, 'runs', 'run-main', 'nodes', 'run-node-self-delegate.md'), `---
+taskOpsVersion: v1
+entityType: runNode
+id: run-node-self-delegate
+runId: run-main
+type: delegate
+title: Self delegate awaiting loopback
+status: waiting
+delegateeType: self
+delegateeRef: self
+request: Resolve via self-loopback.
+expectedOutput: Loopback artifact attached.
+requestedAt: 2026-05-12T00:00:00Z
+createdAt: 2026-05-12T00:00:00Z
+---
+# Self delegate
+`, 'utf8');
+const loopbackOkOut = JSON.parse(run(['run', loopbackOkDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '2', '--max-steps', '5', '--json']).stdout);
+if (loopbackOkOut.loopbacksUsed !== 1 || loopbackOkOut.loopbackPolicy !== 'self') {
+  console.error('Expected loopbacksUsed=1 with loopbackPolicy=self');
+  console.error(loopbackOkOut);
+  process.exit(1);
+}
+if (!loopbackOkOut.actions.some((a) => a.kind === 'loopback' && a.status === 'completed' && a.delegateRunNodeId === 'run-node-self-delegate')) {
+  console.error('Expected a completed loopback action for run-node-self-delegate');
+  console.error(loopbackOkOut.actions);
+  process.exit(1);
+}
+const loopbackArtifactPath = join(loopbackOkDir, 'runs', 'run-main', 'artifacts', 'run-node-loopback-run-node-self-delegate.md');
+const loopbackArtifactBody = readFileSync(loopbackArtifactPath, 'utf8');
+if (!loopbackArtifactBody.includes('Self-loopback resolution artifact for run-node-self-delegate')) {
+  console.error('Expected dry-run loopback artifact to mention the delegate id');
+  console.error(loopbackArtifactBody);
+  process.exit(1);
+}
+const loopbackDelegateBody = readFileSync(join(loopbackOkDir, 'runs', 'run-main', 'nodes', 'run-node-self-delegate.md'), 'utf8');
+if (!loopbackDelegateBody.includes('status: done') || !loopbackDelegateBody.includes('resolvedBy: self_loopback')) {
+  console.error('Self-delegate node must close with resolvedBy=self_loopback after loopback');
+  console.error(loopbackDelegateBody);
+  process.exit(1);
+}
+const loopbackEdgePath = join(loopbackOkDir, 'runs', 'run-main', 'edges', 'edge-run-node-self-delegate-loopback-1.md');
+const loopbackEdgeBody = readFileSync(loopbackEdgePath, 'utf8');
+if (!loopbackEdgeBody.includes('edgeType: loopback') || !loopbackEdgeBody.includes('toRunNodeId: run-node-loopback-run-node-self-delegate')) {
+  console.error('Expected loopback edge from delegate to resolution node');
+  console.error(loopbackEdgeBody);
+  process.exit(1);
+}
+run(['validate', loopbackOkDir]);
+
+// ---- loopback policy: budget exhausted yields max_loopbacks ----
+const loopbackBudgetDir = join(tempRoot, 'runner-loopback-budget');
+run(['init', loopbackBudgetDir, '--id', 'runner-loopback-budget', '--title', 'Loopback budget', '--objective', 'Verify loopback budget enforcement', '--language', 'en']);
+writeFileSync(join(loopbackBudgetDir, 'runs', 'run-main', 'nodes', 'run-node-self-delegate.md'), `---
+taskOpsVersion: v1
+entityType: runNode
+id: run-node-self-delegate
+runId: run-main
+type: delegate
+title: Self delegate awaiting loopback
+status: waiting
+delegateeType: self
+delegateeRef: self
+request: Resolve via self-loopback.
+expectedOutput: Loopback artifact attached.
+requestedAt: 2026-05-12T00:00:00Z
+createdAt: 2026-05-12T00:00:00Z
+---
+# Self delegate
+`, 'utf8');
+const loopbackBudgetOut = JSON.parse(run(['run', loopbackBudgetDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '0', '--json']).stdout);
+if (loopbackBudgetOut.stopReason !== 'max_loopbacks') {
+  console.error('Expected stopReason=max_loopbacks when --max-loopbacks=0 with pending self delegate');
+  console.error(loopbackBudgetOut);
+  process.exit(1);
+}
+
+// ---- loopback policy: non-self delegate still stops with delegation_pending ----
+const loopbackNonSelfDir = join(tempRoot, 'runner-loopback-nonself');
+run(['init', loopbackNonSelfDir, '--id', 'runner-loopback-nonself', '--title', 'Loopback nonself', '--objective', 'Verify non-self delegate is unaffected by --loopback self', '--language', 'en']);
+writeFileSync(join(loopbackNonSelfDir, 'runs', 'run-main', 'nodes', 'run-node-human-review.md'), `---
+taskOpsVersion: v1
+entityType: runNode
+id: run-node-human-review
+runId: run-main
+type: delegate
+title: Human review
+status: waiting
+delegateeType: human
+delegateeRef: stakeholder
+request: Review the proposed change.
+expectedOutput: Approval or requested revision.
+requestedAt: 2026-05-12T00:00:00Z
+createdAt: 2026-05-12T00:00:00Z
+---
+# Human review
+`, 'utf8');
+const loopbackNonSelfOut = JSON.parse(run(['run', loopbackNonSelfDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '3', '--json']).stdout);
+if (loopbackNonSelfOut.stopReason !== 'delegation_pending' || loopbackNonSelfOut.loopbacksUsed !== 0) {
+  console.error('Expected non-self delegate to still stop with delegation_pending under --loopback self');
+  console.error(loopbackNonSelfOut);
+  process.exit(1);
+}
+
+// ---- restart: rebuild active version, mark downstream pending, preserve upstream done ----
+const restartDir = join(tempRoot, 'runner-restart');
+run(['init', restartDir, '--id', 'runner-restart', '--title', 'Restart fixture', '--objective', 'Verify restart from task', '--language', 'en']);
+const restartSpecPath = join(tempRoot, 'restart-spec.json');
+writeFileSync(restartSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Restart fixture initial decomposition',
+  selected: true,
+  tasks: [
+    { id: 'task-upstream', title: 'Upstream done', objective: 'Already complete.', responsibility: 'Owner finished it.', completionCriteria: 'Marked done.', order: 1, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' },
+    { id: 'task-target', title: 'Restart target', objective: 'This task is the restart point.', responsibility: 'Re-do this task with new instruction.', completionCriteria: 'Re-execute.', order: 2, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' },
+    { id: 'task-downstream', title: 'Downstream pending', objective: 'Depends on restart target.', responsibility: 'Re-run after restart.', completionCriteria: 'Re-execute.', order: 3, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' },
+  ],
+}, null, 2));
+run(['decompose', restartDir, '--task-group-id', 'tg-root', '--spec', restartSpecPath]);
+const restartSnapshotPath = join(restartDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(restartSnapshotPath, readFileSync(restartSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+// Seed an EoW only for the upstream task so the preservation EoW has a source reference.
+// Skip target/downstream EoWs so the restarted v3 runner can re-write its own EoWs without
+// colliding with historical EoW IDs from v2.
+writeFileSync(join(restartDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-upstream.md'), `---\ntaskOpsVersion: v1\nentityType: eow\nid: eow-task-upstream\ngraphType: task\nattachedToType: task\nattachedToId: task-upstream\nreason: smoke_seed\ndeclaredBy: smoke\ndeclaredAt: 2026-05-12T00:00:00Z\ncreatedAt: 2026-05-12T00:00:00Z\nstatus: done\ntaskGroupVersionId: tgv-root-v2\n---\n# EoW: task-upstream\n`, 'utf8');
+run(['validate', restartDir]);
+const restartOut = JSON.parse(run(['restart', restartDir, '--from', 'task-target', '--instruction', 'Re-do task-target with updated context', '--reason', 'smoke_restart', '--json']).stdout);
+if (restartOut.fromVersionId !== 'tgv-root-v2' || restartOut.toVersionId !== 'tgv-root-v3' || restartOut.fromTaskId !== 'task-target') {
+  console.error('Expected restart to bump tgv-root-v2 -> tgv-root-v3');
+  console.error(restartOut);
+  process.exit(1);
+}
+if (restartOut.preservedTaskCount !== 1 || restartOut.resetTaskCount !== 1) {
+  console.error('Expected 1 preserved upstream task and 1 reset downstream task');
+  console.error(restartOut);
+  process.exit(1);
+}
+const newVersionTasksDir = join(restartDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks');
+const upstreamAfter = readFileSync(join(newVersionTasksDir, 'task-upstream.md'), 'utf8');
+if (!upstreamAfter.includes('status: done') || !upstreamAfter.includes('preservedUpstream: true') || !upstreamAfter.includes('preservedFromVersionId: tgv-root-v2')) {
+  console.error('Upstream task must remain done with preservedUpstream metadata');
+  console.error(upstreamAfter);
+  process.exit(1);
+}
+const targetAfter = readFileSync(join(newVersionTasksDir, 'task-target.md'), 'utf8');
+if (!targetAfter.includes('status: pending') || !targetAfter.includes('restartInstruction: Re-do task-target with updated context') || !targetAfter.includes('restartReason: smoke_restart') || !targetAfter.includes('restartedFromVersionId: tgv-root-v2')) {
+  console.error('Target task must be pending with restart metadata');
+  console.error(targetAfter);
+  process.exit(1);
+}
+const downstreamAfter = readFileSync(join(newVersionTasksDir, 'task-downstream.md'), 'utf8');
+if (!downstreamAfter.includes('status: pending')) {
+  console.error('Downstream task must be reset to pending');
+  console.error(downstreamAfter);
+  process.exit(1);
+}
+const newVersionEowDir = join(restartDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'eow');
+const upstreamEow = readFileSync(join(newVersionEowDir, 'eow-task-upstream-tgv-root-v3.md'), 'utf8');
+if (!upstreamEow.includes('reason: preserved_upstream_after_restart') || !upstreamEow.includes('preservedFromVersionId: tgv-root-v2')) {
+  console.error('Preservation EoW must use preserved_upstream_after_restart reason');
+  console.error(upstreamEow);
+  process.exit(1);
+}
+const sourceVersionAfter = readFileSync(join(restartDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'index.md'), 'utf8');
+if (!sourceVersionAfter.includes('selected: false') || !sourceVersionAfter.includes('supersededByVersionId: tgv-root-v3')) {
+  console.error('Source version must be marked selected=false and supersededByVersionId');
+  console.error(sourceVersionAfter);
+  process.exit(1);
+}
+const newVersionIndex = readFileSync(join(restartDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'index.md'), 'utf8');
+if (!newVersionIndex.includes('selected: true') || !newVersionIndex.includes('supersedesVersionId: tgv-root-v2') || !newVersionIndex.includes('restartedFromVersionId: tgv-root-v2')) {
+  console.error('New version index must mark selected, supersedes, and restart metadata');
+  console.error(newVersionIndex);
+  process.exit(1);
+}
+const restartSnapshotAfter = readFileSync(restartSnapshotPath, 'utf8');
+if (!restartSnapshotAfter.includes('versionId: tgv-root-v3') || restartSnapshotAfter.includes('versionId: tgv-root-v2')) {
+  console.error('Active snapshot must point at tgv-root-v3 and no longer at tgv-root-v2');
+  console.error(restartSnapshotAfter);
+  process.exit(1);
+}
+const restartWorkLog = readFileSync(join(restartDir, 'work-log.md'), 'utf8');
+if (!restartWorkLog.includes('restart from task=task-target')) {
+  console.error('work-log.md must record the restart event');
+  console.error(restartWorkLog);
+  process.exit(1);
+}
+run(['validate', restartDir]);
+const restartRunOut = JSON.parse(run(['run', restartDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
+const restartActions = restartRunOut.actions || restartRunOut.tasks || [];
+const restartTaskIds = restartActions.map((a) => a.taskId);
+if (!restartTaskIds.includes('task-target') || !restartTaskIds.includes('task-downstream') || restartTaskIds.includes('task-upstream')) {
+  console.error('Restart runner must re-execute target+downstream but not upstream');
+  console.error(restartActions);
+  process.exit(1);
+}
+
+// ---- restart input validation: missing instruction and missing task ----
+const restartFailMissingInstr = spawnSync('node', [cli, 'restart', restartDir, '--from', 'task-target', '--json'], { encoding: 'utf8' });
+if (restartFailMissingInstr.status === 0 || !/instruction/i.test(restartFailMissingInstr.stderr)) {
+  console.error('Expected restart without --instruction to fail');
+  console.error(restartFailMissingInstr.stdout, restartFailMissingInstr.stderr);
+  process.exit(1);
+}
+const restartFailMissingTask = spawnSync('node', [cli, 'restart', restartDir, '--from', 'task-nonexistent', '--instruction', 'whatever', '--json'], { encoding: 'utf8' });
+if (restartFailMissingTask.status === 0 || !/not found/i.test(restartFailMissingTask.stderr)) {
+  console.error('Expected restart with unknown --from to fail');
+  console.error(restartFailMissingTask.stdout, restartFailMissingTask.stderr);
+  process.exit(1);
+}
+
+// ---- restart instruction-file: multiline prompts must not corrupt frontmatter ----
+const restartFileDir = join(tempRoot, 'runner-restart-instruction-file');
+run(['init', restartFileDir, '--id', 'runner-restart-instruction-file', '--title', 'Restart instruction file fixture', '--objective', 'Verify multiline instruction-file restart', '--language', 'en']);
+const restartFileSpecPath = join(tempRoot, 'restart-file-spec.json');
+writeFileSync(restartFileSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Restart instruction file fixture initial decomposition',
+  selected: true,
+  tasks: [
+    { id: 'task-before', title: 'Before', objective: 'Already complete.', responsibility: 'Keep this done.', completionCriteria: 'Done.', order: 1, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' },
+    { id: 'task-restart-file', title: 'Restart from file', objective: 'Restart using file instruction.', responsibility: 'Re-do from file prompt.', completionCriteria: 'Pending after restart.', order: 2, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' },
+  ],
+}, null, 2));
+run(['decompose', restartFileDir, '--task-group-id', 'tg-root', '--spec', restartFileSpecPath]);
+const restartFileSnapshotPath = join(restartFileDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(restartFileSnapshotPath, readFileSync(restartFileSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const multilineInstructionPath = join(tempRoot, 'restart-multiline-instruction.md');
+writeFileSync(multilineInstructionPath, 'Line one: preserve context\n- bullet A\n- bullet B\nFinal line.\n', 'utf8');
+const restartFileOut = JSON.parse(run(['restart', restartFileDir, '--from', 'task-restart-file', '--instruction-file', multilineInstructionPath, '--reason', 'multiline_file', '--json']).stdout);
+if (restartFileOut.toVersionId !== 'tgv-root-v3' || restartFileOut.instructionLength <= 'Line one'.length) {
+  console.error('Expected instruction-file restart to create tgv-root-v3 with non-trivial instruction length');
+  console.error(restartFileOut);
+  process.exit(1);
+}
+const restartFileTaskBody = readFileSync(join(restartFileDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-restart-file.md'), 'utf8');
+if (!restartFileTaskBody.includes('restartInstruction: Line one: preserve context - bullet A - bullet B Final line.')) {
+  console.error('Multiline instruction-file content must be safely serialized as a single frontmatter scalar');
+  console.error(restartFileTaskBody);
+  process.exit(1);
+}
+run(['validate', restartFileDir]);
+
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK: taskops CLI smoke passed');

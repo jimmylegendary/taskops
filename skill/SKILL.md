@@ -74,7 +74,8 @@ taskops git-sync <vault-dir> --message <message>
 taskops watch-sync <vault-dir> --debounce-ms 5000
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
-taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--json]
+taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 ```
 
 ## Honest-loop commands
@@ -101,9 +102,11 @@ These three commands are the small surface area that keeps long-running agents h
 - `--max-steps <n>` bounds the total number of actions (execute + decompose + explore). `--until <iso-timestamp>` bounds wall-clock work. Both are optional and **combine with OR semantics**: stop before a new step if either limit is reached.
 - If neither `--max-steps` nor `--until` is supplied, the runner defaults to `--max-steps 1` — exactly one step, then stop.
 - When the user says something like "before tomorrow 9am" or "by EOD", convert the requested deadline to an explicit ISO-8601 timestamp **with timezone** before passing it as `--until`. Do not pass natural-language deadlines.
-- Stop reasons reported back: `all_closed`, `no_runnable`, `blocked_only`, `waiting`, `delegation_pending`, `max_steps`, `deadline_reached`, `task_failed`, `validation_failed`. `all_closed` means the selected work is fully closed by task + run EoW with no waiting/delegated/blocked work; `no_runnable` means nothing actionable but the work is not yet closed. Always surface the reason to the user.
+- Stop reasons reported back: `all_closed`, `no_runnable`, `blocked_only`, `waiting`, `delegation_pending`, `max_steps`, `deadline_reached`, `max_loopbacks`, `task_failed`, `validation_failed`. `all_closed` means the selected work is fully closed by task + run EoW with no waiting/delegated/blocked work; `no_runnable` means nothing actionable but the work is not yet closed. Always surface the reason to the user.
 - The runner appends to `runs/<run-id>/events.jsonl` and `runs/<run-id>/run-log.md`, and holds a `.taskops-runner.lock` directory inside the work root while running. Do not launch a second runner against the same work until the lock is gone.
 - Do **not** instruct the executing agent to call `taskops run` again — it runs one task. Recursion is the orchestrator's job, not the worker's.
+- `--loopback none` (default) keeps the cautious behaviour: every pending `type: delegate` stops the runner. Pass `--loopback self` to let the runner auto-resolve *self-delegates* (`delegateeType: self`, `delegateeRef: self`, or `delegateeRef: <work-id>`) by opening a `type: loopback` resolution node, executing the loopback once, writing a `loopback` edge, and closing both the loopback and the original delegate (`reason: self_loopback_resolved`, `resolvedBy: self_loopback`). Non-self delegates are still surfaced as `delegation_pending`. Each loopback counts against `--max-steps` and a separate `--max-loopbacks` budget (default `3`); exceeding it stops with `max_loopbacks` and leaves the delegate open. The executing agent inside a loopback must still not call `taskops run` recursively — orchestration stays at the runner.
+- `taskops restart <work-dir> --from <task-id> --instruction "<text>" [--reason <text>] [--instruction-file <path>] [--json]` rolls the active version of the containing task group forward to a new version, marks the prior version `selected: false` and `supersededByVersionId`, points the active snapshot at the new version, and updates the task group's `activeVersionId`. Upstream tasks (`order < target.order`) keep their status and gain `preservedUpstream: true` with a fresh `preserved_upstream_after_restart` EoW when they were done leaves. The target task is reset to `pending` with `restartInstruction`, optional `restartReason`, `restartedFromVersionId`, and `restartedAt`. Downstream tasks (`order >= target.order`, excluding the target) are reset to `pending`. Historical runs/run nodes/EoWs are not modified — they remain as evidence. Use this instead of editing tasks by hand when an upstream change invalidates a task and its downstream.
 
 ## Git-backed vault rule
 

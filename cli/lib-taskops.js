@@ -808,6 +808,12 @@ export function writeSummary(parsed, fileName = 'summary.md') {
 
 function isoNow() { return new Date().toISOString(); }
 
+function fmScalar(value) {
+  if (value == null) return '';
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+  return String(value).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export function fmBlock(data) {
   const lines = ['---'];
   const emit = (key, value, indent = '') => {
@@ -819,16 +825,16 @@ export function fmBlock(data) {
           if (entries.length === 0) lines.push(`${indent}  - {}`);
           else {
             const [firstK, firstV] = entries[0];
-            lines.push(`${indent}  - ${firstK}: ${firstV}`);
-            for (const [k, v] of entries.slice(1)) lines.push(`${indent}    ${k}: ${v}`);
+            lines.push(`${indent}  - ${firstK}: ${fmScalar(firstV)}`);
+            for (const [k, v] of entries.slice(1)) lines.push(`${indent}    ${k}: ${fmScalar(v)}`);
           }
         } else {
-          lines.push(`${indent}  - ${item}`);
+          lines.push(`${indent}  - ${fmScalar(item)}`);
         }
       }
       return;
     }
-    lines.push(`${indent}${key}: ${value}`);
+    lines.push(`${indent}${key}: ${fmScalar(value)}`);
   };
   for (const [k,v] of Object.entries(data)) emit(k,v);
   lines.push('---', '');
@@ -1062,23 +1068,227 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   const versionFm = { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: versionId, taskGroupId, version: spec.version ?? versionId, summary: spec.summary, createdAt: now, status: spec.status ?? 'active' };
   if (supersedesVersionId) versionFm.supersedesVersionId = supersedesVersionId;
   if (spec.selected === true) versionFm.selected = true;
+  for (const key of ['restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
+    if (spec[key] !== undefined && spec[key] !== null && spec[key] !== '') versionFm[key] = spec[key];
+  }
   writeFileSync(join(versionDir, 'index.md'), fmBlock(versionFm) + `# ${spec.summary}\n`, 'utf8');
-  writeFileSync(join(versionDir, 'decomposition-log.md'), `# Decomposition log\n\n- ${t.versionCreatedFromSpec}\n`, 'utf8');
+  const logSeedLine = spec.logSeedLine || t.versionCreatedFromSpec;
+  writeFileSync(join(versionDir, 'decomposition-log.md'), `# Decomposition log\n\n- ${logSeedLine}\n`, 'utf8');
   (spec.tasks || []).forEach((task, i) => {
     const fm = {
       taskOpsVersion: 'v1', entityType: 'task', id: task.id, taskGroupId, taskGroupVersionId: versionId,
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId']) {
-      if (task[key] !== undefined && task[key] !== null) fm[key] = task[key];
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
+      if (task[key] !== undefined && task[key] !== null && task[key] !== '') fm[key] = task[key];
     }
     if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');
   });
+  for (const eow of spec.eows || []) {
+    if (!eow || !eow.id) continue;
+    const eowFm = {
+      taskOpsVersion: 'v1', entityType: 'eow', id: eow.id,
+      graphType: eow.graphType || 'task',
+      attachedToType: eow.attachedToType || 'task',
+      attachedToId: eow.attachedToId,
+      reason: eow.reason || 'preserved_upstream_after_restart',
+      declaredBy: eow.declaredBy || 'taskops-restart',
+      declaredAt: eow.declaredAt || now,
+      createdAt: eow.createdAt || now,
+      status: eow.status || 'done',
+      taskGroupVersionId: versionId,
+    };
+    for (const key of ['preservedFromVersionId', 'preservedFromEowId']) {
+      if (eow[key] !== undefined && eow[key] !== null && eow[key] !== '') eowFm[key] = eow[key];
+    }
+    writeFileSync(join(versionDir, 'eow', `${eow.id}.md`), fmBlock(eowFm) + `# EoW: ${eow.attachedToId}\n`, 'utf8');
+  }
   return versionDir;
+}
+
+function rewriteFrontmatterInPlace(filePath, updater) {
+  const fm = parseMarkdownFile(filePath);
+  const body = readBody(filePath);
+  const next = updater({ ...fm }) ?? fm;
+  const text = fmBlock(next) + (body ? body + '\n' : '');
+  writeFileSync(filePath, text, 'utf8');
+}
+
+function deriveRestartVersionId(taskGroup, sourceVersionId) {
+  const existingIds = new Set(taskGroup.versions.map((v) => v.id));
+  const versionMatch = /^(.*-v)(\d+)$/.exec(sourceVersionId);
+  if (versionMatch) {
+    let n = Number(versionMatch[2]) + 1;
+    while (existingIds.has(`${versionMatch[1]}${n}`)) n += 1;
+    return `${versionMatch[1]}${n}`;
+  }
+  let n = 1;
+  while (existingIds.has(`${sourceVersionId}-restart-${n}`)) n += 1;
+  return `${sourceVersionId}-restart-${n}`;
+}
+
+export function restartFromTask(workDir, { fromTaskId, instruction = null, instructionFile = null, reason = null } = {}) {
+  if (!fromTaskId) throw new Error('Missing required fromTaskId');
+  const projectDir = resolve(workDir);
+  let instructionText = instruction == null ? '' : String(instruction).trim();
+  if (!instructionText && instructionFile) {
+    instructionText = readFileSync(resolve(instructionFile), 'utf8').trim();
+  }
+  if (!instructionText) throw new Error('Missing --instruction or --instruction-file content');
+
+  const parsed = parseProject(projectDir);
+  if (parsed.errors.length > 0) {
+    throw new Error(`Cannot restart: project has validation errors:\n- ${parsed.errors.join('\n- ')}`);
+  }
+
+  const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
+  if (!activeSnapshot) throw new Error('Cannot restart: project has no active snapshot');
+  const selectedPairs = Array.isArray(activeSnapshot.selectedVersions) ? activeSnapshot.selectedVersions : [];
+
+  const matches = [];
+  for (const pair of selectedPairs) {
+    const v = parsed.versions.get(pair.versionId);
+    if (!v) continue;
+    for (const task of v.tasks) {
+      if (task.id === fromTaskId) matches.push({ pair, version: v, task });
+    }
+  }
+  if (matches.length === 0) throw new Error(`Task '${fromTaskId}' not found in active snapshot's selected versions`);
+  if (matches.length > 1) {
+    const detail = matches.map((m) => `${m.pair.taskGroupId}/${m.version.id}`).join(', ');
+    throw new Error(`Task id '${fromTaskId}' is ambiguous across selected versions: ${detail}`);
+  }
+  const { pair: targetPair, version: sourceVersion, task: targetTask } = matches[0];
+  const taskGroup = parsed.taskGroups.get(sourceVersion.taskGroupId);
+  if (!taskGroup) throw new Error(`Task group '${sourceVersion.taskGroupId}' not found`);
+
+  const newVersionId = deriveRestartVersionId(taskGroup, sourceVersion.id);
+  const now = isoNow();
+
+  const targetOrder = targetTask.order ?? 0;
+  const orderedTasks = [...sourceVersion.tasks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  const preserveKeys = ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId'];
+
+  const specTasks = orderedTasks.map((task) => {
+    const cloned = { id: task.id, title: task.title, objective: task.objective, responsibility: task.responsibility, completionCriteria: task.completionCriteria, order: task.order };
+    for (const key of preserveKeys) {
+      if (task[key] !== undefined && task[key] !== null) cloned[key] = task[key];
+    }
+    if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
+    if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
+    const order = task.order ?? 0;
+    if (task.id === fromTaskId) {
+      cloned.status = 'pending';
+      cloned.restartInstruction = instructionText;
+      if (reason) cloned.restartReason = reason;
+      cloned.restartedFromVersionId = sourceVersion.id;
+      cloned.restartedFromTaskId = task.id;
+      cloned.restartedAt = now;
+    } else if (order < targetOrder) {
+      cloned.status = task.status ?? 'pending';
+      cloned.preservedUpstream = true;
+      cloned.preservedFromVersionId = sourceVersion.id;
+      cloned.preservedFromTaskId = task.id;
+    } else {
+      cloned.status = 'pending';
+    }
+    return cloned;
+  });
+
+  const specEows = [];
+  for (const task of orderedTasks) {
+    const order = task.order ?? 0;
+    if (order >= targetOrder) continue;
+    if ((task.status ?? 'pending') !== 'done') continue;
+    if (task.childTaskGroupId) continue;
+    const sourceEowDir = join(sourceVersion.path, 'eow');
+    const sourceEowPath = join(sourceEowDir, `eow-${task.id}.md`);
+    let preservedFromEowId = null;
+    if (existsSync(sourceEowPath)) {
+      const eowFm = parseMarkdownFile(sourceEowPath);
+      preservedFromEowId = eowFm.id || `eow-${task.id}`;
+    }
+    specEows.push({
+      id: `eow-${task.id}-${newVersionId}`,
+      graphType: 'task',
+      attachedToType: 'task',
+      attachedToId: task.id,
+      reason: 'preserved_upstream_after_restart',
+      declaredBy: 'taskops-restart',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+      preservedFromVersionId: sourceVersion.id,
+      preservedFromEowId,
+    });
+  }
+
+  const summary = `Restart from task '${fromTaskId}'${reason ? ` (${reason})` : ''}`;
+  const spec = {
+    versionId: newVersionId,
+    version: newVersionId,
+    summary,
+    selected: true,
+    tasks: specTasks,
+    eows: specEows,
+    restartedFromVersionId: sourceVersion.id,
+    restartedFromTaskId: fromTaskId,
+    restartInstruction: instructionText,
+    restartReason: reason || null,
+    restartedAt: now,
+    logSeedLine: `Restart from task '${fromTaskId}' supersedes version ${sourceVersion.id}.`,
+  };
+
+  const newVersionDir = writeVersionFromSpec(projectDir, taskGroup.id, spec, { supersedesVersionId: sourceVersion.id });
+
+  rewriteFrontmatterInPlace(join(sourceVersion.path, 'index.md'), (fm) => {
+    fm.selected = false;
+    fm.supersededByVersionId = newVersionId;
+    fm.supersededAt = now;
+    fm.supersededReason = reason || 'restart';
+    return fm;
+  });
+
+  rewriteFrontmatterInPlace(join(taskGroup.path, 'index.md'), (fm) => {
+    if (fm.activeVersionId === sourceVersion.id) fm.activeVersionId = newVersionId;
+    return fm;
+  });
+
+  rewriteFrontmatterInPlace(activeSnapshot.path, (fm) => {
+    const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
+    fm.selectedVersions = list.map((p) => {
+      if (!p || typeof p !== 'object') return p;
+      if (p.taskGroupId === targetPair.taskGroupId && p.versionId === sourceVersion.id) {
+        return { taskGroupId: p.taskGroupId, versionId: newVersionId };
+      }
+      return p;
+    });
+    return fm;
+  });
+
+  const workLogPath = join(projectDir, 'work-log.md');
+  const logLine = `- ${now} restart from task=${fromTaskId} taskGroup=${taskGroup.id} from=${sourceVersion.id} to=${newVersionId}${reason ? ` reason="${reason}"` : ''}\n`;
+  if (existsSync(workLogPath)) writeFileSync(workLogPath, readFileSync(workLogPath, 'utf8') + logLine, 'utf8');
+  else writeFileSync(workLogPath, `# Work log\n\n${logLine}`, 'utf8');
+
+  return {
+    workId: parsed.project.id,
+    taskGroupId: taskGroup.id,
+    fromVersionId: sourceVersion.id,
+    toVersionId: newVersionId,
+    fromTaskId,
+    reason: reason || null,
+    instructionLength: instructionText.length,
+    preservedTaskCount: specTasks.filter((t) => t.preservedUpstream === true).length,
+    resetTaskCount: specTasks.filter((t) => t.id !== fromTaskId && !t.preservedUpstream).length,
+    newVersionDir,
+    snapshotId: activeSnapshot.id,
+  };
 }
 
 export function watchAndSyncVault(vaultDir, { debounceMs = 5000, message = 'TaskOps watch-sync', branch = null } = {}) {
