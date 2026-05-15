@@ -760,53 +760,53 @@ if (delegateCloseOk.target.id !== 'run-node-delegate-pending' || delegateCloseOk
   process.exit(1);
 }
 
-// ---- loopback policy: self-delegate auto-resolves within budget ----
+// ---- loopback policy: any pending delegation auto-resolves within budget and records executor ----
 const loopbackOkDir = join(tempRoot, 'runner-loopback-ok');
-run(['init', loopbackOkDir, '--id', 'runner-loopback-ok', '--title', 'Loopback ok', '--objective', 'Verify self-delegate loopback resolves within budget', '--language', 'en']);
-writeFileSync(join(loopbackOkDir, 'runs', 'run-main', 'nodes', 'run-node-self-delegate.md'), `---
+run(['init', loopbackOkDir, '--id', 'runner-loopback-ok', '--title', 'Loopback ok', '--objective', 'Verify loopback resolves a waiting delegation within budget', '--language', 'en']);
+writeFileSync(join(loopbackOkDir, 'runs', 'run-main', 'nodes', 'run-node-human-delegate.md'), `---
 taskOpsVersion: v1
 entityType: runNode
-id: run-node-self-delegate
+id: run-node-human-delegate
 runId: run-main
 type: delegate
-title: Self delegate awaiting loopback
+title: Human delegate awaiting loopback
 status: waiting
-delegateeType: self
-delegateeRef: self
-request: Resolve via self-loopback.
+delegateeType: human
+delegateeRef: stakeholder
+request: Review and decide via loopback.
 expectedOutput: Loopback artifact attached.
 requestedAt: 2026-05-12T00:00:00Z
 createdAt: 2026-05-12T00:00:00Z
 ---
-# Self delegate
+# Human delegate
 `, 'utf8');
-const loopbackOkOut = JSON.parse(run(['run', loopbackOkDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '2', '--max-steps', '5', '--json']).stdout);
-if (loopbackOkOut.loopbacksUsed !== 1 || loopbackOkOut.loopbackPolicy !== 'self') {
-  console.error('Expected loopbacksUsed=1 with loopbackPolicy=self');
+const loopbackOkOut = JSON.parse(run(['run', loopbackOkDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '2', '--max-steps', '5', '--actor', 'Nova', '--json']).stdout);
+if (loopbackOkOut.loopbacksUsed !== 1 || loopbackOkOut.loopbackPolicy !== 'self' || loopbackOkOut.actorName !== 'Nova') {
+  console.error('Expected loopbacksUsed=1 with loopbackPolicy=self and actorName=Nova');
   console.error(loopbackOkOut);
   process.exit(1);
 }
-if (!loopbackOkOut.actions.some((a) => a.kind === 'loopback' && a.status === 'completed' && a.delegateRunNodeId === 'run-node-self-delegate')) {
-  console.error('Expected a completed loopback action for run-node-self-delegate');
+if (!loopbackOkOut.actions.some((a) => a.kind === 'loopback' && a.status === 'completed' && a.delegateRunNodeId === 'run-node-human-delegate' && a.executedBy === 'Nova' && a.executionMode === 'loopback')) {
+  console.error('Expected a completed loopback action for run-node-human-delegate executed by Nova');
   console.error(loopbackOkOut.actions);
   process.exit(1);
 }
-const loopbackArtifactPath = join(loopbackOkDir, 'runs', 'run-main', 'artifacts', 'run-node-loopback-run-node-self-delegate.md');
+const loopbackArtifactPath = join(loopbackOkDir, 'runs', 'run-main', 'artifacts', 'run-node-loopback-run-node-human-delegate.md');
 const loopbackArtifactBody = readFileSync(loopbackArtifactPath, 'utf8');
-if (!loopbackArtifactBody.includes('Self-loopback resolution artifact for run-node-self-delegate')) {
-  console.error('Expected dry-run loopback artifact to mention the delegate id');
+if (!loopbackArtifactBody.includes('Loopback resolution artifact for run-node-human-delegate') || !loopbackArtifactBody.includes('- actualExecutor: Nova')) {
+  console.error('Expected dry-run loopback artifact to mention the delegate id and actual executor');
   console.error(loopbackArtifactBody);
   process.exit(1);
 }
-const loopbackDelegateBody = readFileSync(join(loopbackOkDir, 'runs', 'run-main', 'nodes', 'run-node-self-delegate.md'), 'utf8');
-if (!loopbackDelegateBody.includes('status: done') || !loopbackDelegateBody.includes('resolvedBy: self_loopback')) {
-  console.error('Self-delegate node must close with resolvedBy=self_loopback after loopback');
+const loopbackDelegateBody = readFileSync(join(loopbackOkDir, 'runs', 'run-main', 'nodes', 'run-node-human-delegate.md'), 'utf8');
+if (!loopbackDelegateBody.includes('status: done') || !loopbackDelegateBody.includes('resolvedBy: loopback') || !loopbackDelegateBody.includes('executionMode: loopback') || !loopbackDelegateBody.includes('executedBy: Nova')) {
+  console.error('Delegate node must close with loopback execution audit fields after loopback');
   console.error(loopbackDelegateBody);
   process.exit(1);
 }
-const loopbackEdgePath = join(loopbackOkDir, 'runs', 'run-main', 'edges', 'edge-run-node-self-delegate-loopback-1.md');
+const loopbackEdgePath = join(loopbackOkDir, 'runs', 'run-main', 'edges', 'edge-run-node-human-delegate-loopback-1.md');
 const loopbackEdgeBody = readFileSync(loopbackEdgePath, 'utf8');
-if (!loopbackEdgeBody.includes('edgeType: loopback') || !loopbackEdgeBody.includes('toRunNodeId: run-node-loopback-run-node-self-delegate')) {
+if (!loopbackEdgeBody.includes('edgeType: loopback') || !loopbackEdgeBody.includes('toRunNodeId: run-node-loopback-run-node-human-delegate')) {
   console.error('Expected loopback edge from delegate to resolution node');
   console.error(loopbackEdgeBody);
   process.exit(1);
@@ -840,10 +840,10 @@ if (loopbackBudgetOut.stopReason !== 'max_loopbacks') {
   process.exit(1);
 }
 
-// ---- loopback policy: non-self delegate still stops with delegation_pending ----
-const loopbackNonSelfDir = join(tempRoot, 'runner-loopback-nonself');
-run(['init', loopbackNonSelfDir, '--id', 'runner-loopback-nonself', '--title', 'Loopback nonself', '--objective', 'Verify non-self delegate is unaffected by --loopback self', '--language', 'en']);
-writeFileSync(join(loopbackNonSelfDir, 'runs', 'run-main', 'nodes', 'run-node-human-review.md'), `---
+// ---- loopback default: without loopback, any delegate still stops with delegation_pending ----
+const loopbackDefaultStopDir = join(tempRoot, 'runner-loopback-default-stop');
+run(['init', loopbackDefaultStopDir, '--id', 'runner-loopback-default-stop', '--title', 'Loopback default stop', '--objective', 'Verify default mode surfaces delegation instead of auto-resolving', '--language', 'en']);
+writeFileSync(join(loopbackDefaultStopDir, 'runs', 'run-main', 'nodes', 'run-node-human-review.md'), `---
 taskOpsVersion: v1
 entityType: runNode
 id: run-node-human-review
@@ -860,10 +860,10 @@ createdAt: 2026-05-12T00:00:00Z
 ---
 # Human review
 `, 'utf8');
-const loopbackNonSelfOut = JSON.parse(run(['run', loopbackNonSelfDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '3', '--json']).stdout);
-if (loopbackNonSelfOut.stopReason !== 'delegation_pending' || loopbackNonSelfOut.loopbacksUsed !== 0) {
-  console.error('Expected non-self delegate to still stop with delegation_pending under --loopback self');
-  console.error(loopbackNonSelfOut);
+const loopbackDefaultStopOut = JSON.parse(run(['run', loopbackDefaultStopDir, '--executor', 'dry-run', '--json']).stdout);
+if (loopbackDefaultStopOut.stopReason !== 'delegation_pending' || loopbackDefaultStopOut.loopbacksUsed !== 0) {
+  console.error('Expected default loopback=none to stop with delegation_pending');
+  console.error(loopbackDefaultStopOut);
   process.exit(1);
 }
 

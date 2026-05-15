@@ -125,9 +125,9 @@ The runner rechecks `blockedBy` references before each selection pass. A `blocke
 
 The runner pauses immediately on a `status: waiting` task or non-delegate run node, or on a `type: delegate` run node that is not yet `done`/`cancelled`. Delegate type wins over generic waiting, so `type: delegate` + `status: waiting` reports `delegation_pending`.
 
-### Optional self-delegate loopback
+### Optional loopback mode
 
-When invoked with `--loopback self`, the runner treats *self-delegates* (`delegateeType: self`, `delegateeRef: self`, or `delegateeRef: <work-id>`) as resolvable inline instead of stopping with `delegation_pending`. For each such pending delegate it opens a `type: loopback` resolution node (`run-node-loopback-<delegate-id>[-<n>]`), writes a `loopback` edge from the delegate to the resolution, executes the loopback (dry-run synthesises an artifact; `openclaw-agent` dispatches a fresh single-step agent invocation with a no-recursive-runner prompt), then closes the loopback node (EoW reason `loopback_recorded`) and the original delegate (EoW reason `self_loopback_resolved`, with `resolvedBy: self_loopback` and `resolvedByRunNodeId` on the delegate). Each loopback counts against `--max-steps` *and* a separate `--max-loopbacks` budget (default `3`). Non-self delegates are unaffected. Default policy `--loopback none` preserves the pre-existing pause behaviour.
+When invoked with `--loopback self`, the runner treats pending `type: delegate` nodes as resolvable inline instead of stopping with `delegation_pending`: the runner takes the waiting delegation back and executes it itself. For each pending delegate it opens a `type: loopback` resolution node (`run-node-loopback-<delegate-id>[-<n>]`), writes a `loopback` edge from the delegate to the resolution, executes the loopback (dry-run synthesises an artifact; `openclaw-agent` dispatches a fresh single-step agent invocation with a no-recursive-runner prompt), then closes the loopback node (EoW reason `loopback_recorded`) and the original delegate (EoW reason `loopback_resolved`). The original delegate records `executionMode: loopback`, `executedBy: <actor>`, `executedAt`, `resolvedBy: loopback`, and `resolvedByRunNodeId`; pass `--actor <name>` to control the audit-trail executor name. Each loopback counts against `--max-steps` *and* a separate `--max-loopbacks` budget (default `3`). Default policy `--loopback none` preserves the pre-existing pause behaviour.
 
 ## Terminal stop reasons
 
@@ -138,7 +138,7 @@ When the runner cannot start a new step, it reports one of the following:
 - `blocked_only` — open tasks remain but every one is `blocked`.
 - `waiting` / `delegation_pending` — a task or run node is parked waiting on something external.
 - `max_steps` / `deadline_reached` — safety caps stopped the run before further work could begin. They take precedence over `all_closed` / `no_runnable`.
-- `max_loopbacks` — the `--max-loopbacks` budget is exhausted while a self-delegate is still pending. Resolve the delegate, raise the budget, or invoke `taskops run` again to spend more loopbacks.
+- `max_loopbacks` — the `--max-loopbacks` budget is exhausted while a delegate is still pending. Resolve the delegate, raise the budget, or invoke `taskops run` again to spend more loopbacks.
 - `task_failed` / `validation_failed` — the executor failed or a mid-run re-parse found errors.
 
 ## Restarting a task

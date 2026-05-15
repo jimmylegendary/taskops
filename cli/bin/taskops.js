@@ -32,7 +32,7 @@ Usage:
   taskops explain <work-dir> [--json]
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
-  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -288,6 +288,7 @@ try {
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
+      actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
     });
     if (flags.json) {
       console.log(JSON.stringify(result, null, 2));

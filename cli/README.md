@@ -92,7 +92,7 @@ taskops next <work-dir> [--json]
 taskops explain <work-dir> [--json]
 taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
 taskops unblock-check <work-dir> [--dry-run] [--json]
-taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -167,22 +167,24 @@ The runner:
 - `--executor dry-run` (default) — no external process. Synthesises a successful result and mutates the markdown graph. For decomposition steps it writes a deterministic child task group/version with a single blocked placeholder task asking for human input. For exploration steps it writes a deterministic reflection artifact under `runs/<run-id>/artifacts/`. Intended for smoke tests, dress rehearsals, and skill reviews. **It does not perform real work.** Pass `--executor openclaw-agent` to dispatch a real run.
 - `--executor openclaw-agent` — spawns `openclaw agent --agent <agent-id> --message <prompt> --json [--timeout <seconds>]`. The prompt is tailored to the picked action — execute, decompose, or explore — and instructs the agent not to recursively invoke `taskops run`. After the agent returns the runner verifies that the expected artifact (the executed task's outcome, the decomposition version index, or the exploration artifact) was authored before marking the step done. Default `--agent` is `main`.
 
-### Self-delegate loopback
+### Loopback mode
 
 `--loopback none` (default) preserves the cautious behaviour: any pending `type: delegate` run node stops the runner with `delegation_pending`.
 
-`--loopback self` opts into automatic resolution of *self-delegate* run nodes — nodes whose `delegateeType: self`, `delegateeRef: self`, or `delegateeRef: <work-id>`. When the runner reaches one of these it:
+`--loopback self` opts into automatic resolution of pending delegation run nodes by having the runner take the waiting delegation back and execute it itself. When the runner reaches a pending `type: delegate` node it:
 
 1. Creates a `type: loopback` run node under the same run (`run-node-loopback-<delegate-id>[-<n>]`).
 2. Writes a `loopback` edge from the delegate node to the loopback resolution node.
 3. Generates a loopback artifact under `runs/<run-id>/artifacts/<loopback-node-id>.md`. The `dry-run` executor writes a synthetic artifact; `openclaw-agent` dispatches a fresh agent invocation with a prompt that forbids calling `taskops run` recursively. Each loopback executor invocation is a single, fresh process — there is no nested runner inside the running agent.
-4. On success, closes both the loopback resolution node (EoW reason `loopback_recorded`) and the original delegate (EoW reason `self_loopback_resolved`, with `resolvedBy: self_loopback` and `resolvedByRunNodeId` on the delegate frontmatter).
+4. On success, closes both the loopback resolution node (EoW reason `loopback_recorded`) and the original delegate (EoW reason `loopback_resolved`). The original delegate records `executionMode: loopback`, `executedBy: <actor>`, `executedAt`, `resolvedBy: loopback`, and `resolvedByRunNodeId`.
 
-Each loopback counts both against `--max-steps` and a separate `--max-loopbacks` budget (default `3`). When the budget is exhausted the runner stops with `max_loopbacks` and leaves the delegate open for explicit follow-up. Non-self delegates are unaffected — `--loopback self` still stops on human/agent delegations with `delegation_pending`.
+The default actor is the OpenClaw `--agent` id for `openclaw-agent` runs, or `taskops-runner` for dry runs. Pass `--actor <name>` when the caller wants a human-readable executor name such as `Nova` in the audit trail.
+
+Each loopback counts both against `--max-steps` and a separate `--max-loopbacks` budget (default `3`). When the budget is exhausted the runner stops with `max_loopbacks` and leaves the delegate open for explicit follow-up.
 
 ```bash
-# auto-resolve up to 2 self-delegate loops within the same runner invocation
-taskops run ./my-work --executor dry-run --loopback self --max-loopbacks 2 --json
+# auto-resolve up to 2 waiting delegations within the same runner invocation and record Nova as executor
+taskops run ./my-work --executor dry-run --loopback self --max-loopbacks 2 --actor Nova --json
 ```
 
 ## Restart from a specific task

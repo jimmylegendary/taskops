@@ -1,0 +1,158 @@
+{
+  "generatedAt": "2026-05-15T04:27:26.267Z",
+  "tempRoot": "/tmp/taskops-workflow-e2e-AskXCE",
+  "summary": {
+    "passed": 5,
+    "total": 5,
+    "allPassed": true
+  },
+  "testCases": [
+    {
+      "id": "TC01",
+      "feature": "1. request-to-completion autonomous decomposition",
+      "expectedResult": {
+        "stopReason": "all_closed",
+        "requiredActions": [
+          "decompose:completed:task-plan",
+          "execute:completed:task-child-execute"
+        ],
+        "closure": {
+          "complete": true,
+          "waitingDelegations": 0,
+          "openBlockers": 0
+        },
+        "evidence": "Runner should decompose parent, extend snapshot, execute child, and close work."
+      },
+      "actualResult": {
+        "stopReason": "all_closed",
+        "actions": [
+          "decompose:completed:task-plan",
+          "execute:completed:task-child-execute"
+        ],
+        "closure": {
+          "complete": true,
+          "waitingDelegations": 0,
+          "openBlockers": 0
+        },
+        "eventsPath": "/tmp/taskops-workflow-e2e-AskXCE/tc-autonomous-decomposition/runs/run-main/events.jsonl"
+      },
+      "pass": true
+    },
+    {
+      "id": "TC02",
+      "feature": "2. work record inspection and explanation",
+      "expectedResult": {
+        "runLogContains": [
+          "runner_started",
+          "task_started",
+          "task_completed",
+          "all_closed"
+        ],
+        "eventsContain": [
+          "decomposition_completed",
+          "task_completed"
+        ],
+        "explainComplete": true,
+        "evidence": "Work history should be inspectable/explainable after execution."
+      },
+      "actualResult": {
+        "runLogContains": [
+          "runner_started",
+          "task_started",
+          "task_completed",
+          "all_closed"
+        ],
+        "eventsContain": [
+          "decomposition_completed",
+          "task_completed"
+        ],
+        "explainComplete": true,
+        "explainStatus": "complete"
+      },
+      "pass": true
+    },
+    {
+      "id": "TC03",
+      "feature": "3. immediate delegation request in normal mode",
+      "expectedResult": {
+        "loopbackPolicy": "none",
+        "stopReason": "delegation_pending",
+        "stepsRun": 0,
+        "source": {
+          "type": "runNode",
+          "id": "run-node-human-decision"
+        },
+        "evidence": "Normal mode must pause and surface a request when human delegation is pending."
+      },
+      "actualResult": {
+        "loopbackPolicy": "none",
+        "stopReason": "delegation_pending",
+        "stepsRun": 0,
+        "source": {
+          "type": "runNode",
+          "runId": "run-main",
+          "id": "run-node-human-decision"
+        }
+      },
+      "pass": true
+    },
+    {
+      "id": "TC04",
+      "feature": "4. loopback mode executes waiting delegation as self and records executor",
+      "expectedResult": {
+        "loopbackPolicy": "self",
+        "stopReason": "no_runnable",
+        "loopbacksUsed": 1,
+        "action": {
+          "kind": "loopback",
+          "status": "completed",
+          "executedBy": "Nova",
+          "executionMode": "loopback"
+        },
+        "delegateFrontmatter": [
+          "status: done",
+          "resolvedBy: loopback",
+          "executionMode: loopback",
+          "executedBy: Nova"
+        ],
+        "evidence": "Loopback mode should take a waiting delegation, execute it itself, and record who executed it."
+      },
+      "actualResult": {
+        "loopbackPolicy": "self",
+        "stopReason": "no_runnable",
+        "loopbacksUsed": 1,
+        "action": {
+          "kind": "loopback",
+          "status": "completed",
+          "executedBy": "Nova",
+          "executionMode": "loopback"
+        },
+        "delegateFrontmatter": [
+          "status: done",
+          "resolvedBy: loopback",
+          "executionMode: loopback",
+          "executedBy: Nova"
+        ]
+      },
+      "pass": true
+    },
+    {
+      "id": "TC05",
+      "feature": "5. final completion report signal",
+      "expectedResult": {
+        "complete": true,
+        "status": "complete",
+        "nextAction": "done",
+        "reportableStopReason": "all_closed",
+        "evidence": "A completed work can be reported with complete=true/status=complete and all_closed stop reason."
+      },
+      "actualResult": {
+        "complete": true,
+        "status": "complete",
+        "nextAction": "done",
+        "reportableStopReason": "all_closed"
+      },
+      "pass": true
+    }
+  ]
+}
