@@ -93,6 +93,11 @@ taskops explain <work-dir> [--json]
 taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
 taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
+taskops queue sync <work-dir> [--json]
+taskops queue list <work-dir> [--json]
+taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
+taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
+taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -115,6 +120,30 @@ taskops next ./my-work --json
 taskops explain ./my-work
 taskops close ./my-work task-foo --reason manual_verified
 ```
+
+## Queue projection
+
+`taskops queue sync <work-dir>` creates or refreshes `.taskops/queue.sqlite` from the canonical markdown state. The database is a rebuildable projection for future leasing, heartbeats, and wake adapters; it is not the source of truth.
+
+```bash
+taskops queue sync ./my-work --json
+taskops queue list ./my-work
+taskops queue claim ./my-work --runner-id local-worker --ttl-seconds 300 --json
+taskops queue heartbeat ./my-work lease-... --json
+taskops queue release ./my-work lease-... --status done --json
+```
+
+This surface uses Node's built-in `node:sqlite` module, so it requires a Node runtime that provides that module. Other TaskOps commands remain independent of the queue projection.
+
+The initial queue surface is intentionally read-only relative to markdown:
+
+- `queue sync` parses and validates the work tree, then projects selected snapshot tasks into `queue_items`.
+- `queue list` reads the current projection.
+- `queue claim` creates one active lease for the next runnable/projectable item; another claim cannot receive the same item until that lease expires or is released.
+- `queue heartbeat` extends an active lease.
+- `queue release` marks an active lease `done`, `failed`, or `cancelled`.
+- Deleting `.taskops/queue.sqlite` and rerunning `queue sync` should rebuild the projection from markdown.
+- Existing execution remains under `taskops run`; queue leases and agent wake adapters are later layers.
 
 ## Run a TaskOps work
 

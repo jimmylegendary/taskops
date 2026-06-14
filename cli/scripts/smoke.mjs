@@ -164,6 +164,54 @@ run(['decompose', runnerWorkDir, '--task-group-id', 'tg-root', '--spec', runnerS
 const runnerSnapshotPath = join(runnerWorkDir, 'snapshots', 'snapshot-root-v1.md');
 writeFileSync(runnerSnapshotPath, readFileSync(runnerSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
 
+const taskFirstBeforeQueueSync = readFileSync(join(runnerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-first.md'), 'utf8');
+const queueSyncOut = JSON.parse(run(['queue', 'sync', runnerWorkDir, '--json']).stdout);
+if (queueSyncOut.workId !== 'runner-work' || queueSyncOut.synced !== 2 || queueSyncOut.rows.length !== 2) {
+  console.error('queue sync should project the two selected runner tasks');
+  console.error(queueSyncOut);
+  process.exit(1);
+}
+if (!queueSyncOut.rows.every((row) => row.status === 'pending' && row.readiness === 'runnable')) {
+  console.error('queue sync rows should preserve pending runnable task state');
+  console.error(queueSyncOut.rows);
+  process.exit(1);
+}
+const queueListOut = JSON.parse(run(['queue', 'list', runnerWorkDir, '--json']).stdout);
+if (queueListOut.rows.length !== 2 || queueListOut.rows[0].md_fingerprint.length !== 64) {
+  console.error('queue list should read the persisted projection with fingerprints');
+  console.error(queueListOut);
+  process.exit(1);
+}
+const firstLeaseOut = JSON.parse(run(['queue', 'claim', runnerWorkDir, '--runner-id', 'smoke-a', '--ttl-seconds', '60', '--json']).stdout);
+if (!firstLeaseOut.claimed || firstLeaseOut.lease.queue_item_id !== 'tgv-root-v2:task-first' || firstLeaseOut.lease.runner_id !== 'smoke-a') {
+  console.error('queue claim should lease the deterministic first runnable item');
+  console.error(firstLeaseOut);
+  process.exit(1);
+}
+const secondLeaseOut = JSON.parse(run(['queue', 'claim', runnerWorkDir, '--runner-id', 'smoke-b', '--ttl-seconds', '60', '--json']).stdout);
+if (!secondLeaseOut.claimed || secondLeaseOut.lease.queue_item_id !== 'tgv-root-v2:task-second') {
+  console.error('second queue claim should skip the actively leased first item');
+  console.error(secondLeaseOut);
+  process.exit(1);
+}
+const heartbeatOut = JSON.parse(run(['queue', 'heartbeat', runnerWorkDir, firstLeaseOut.lease.id, '--ttl-seconds', '120', '--json']).stdout);
+if (heartbeatOut.lease.id !== firstLeaseOut.lease.id || heartbeatOut.lease.status !== 'active') {
+  console.error('queue heartbeat should preserve an active lease');
+  console.error(heartbeatOut);
+  process.exit(1);
+}
+const releaseOut = JSON.parse(run(['queue', 'release', runnerWorkDir, firstLeaseOut.lease.id, '--status', 'done', '--json']).stdout);
+if (releaseOut.lease.id !== firstLeaseOut.lease.id || releaseOut.lease.status !== 'done') {
+  console.error('queue release should mark the active lease done');
+  console.error(releaseOut);
+  process.exit(1);
+}
+const taskFirstAfterQueueSync = readFileSync(join(runnerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-first.md'), 'utf8');
+if (taskFirstBeforeQueueSync !== taskFirstAfterQueueSync) {
+  console.error('queue sync must not mutate markdown task files');
+  process.exit(1);
+}
+
 const pastDeadline = new Date(Date.now() - 60_000).toISOString();
 const pastDeadlineOut = JSON.parse(run(['run', runnerWorkDir, '--executor', 'dry-run', '--until', pastDeadline, '--json']).stdout);
 if (pastDeadlineOut.stopReason !== 'deadline_reached' || pastDeadlineOut.stepsRun !== 0 || pastDeadlineOut.tasks.length !== 0) {

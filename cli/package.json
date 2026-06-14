@@ -16,6 +16,7 @@
     "bin",
     "lib-taskops.js",
     "lib-runner.js",
+    "lib-queue.js",
     "README.md",
     "scripts/smoke.mjs",
     "scripts/workflow-e2e.mjs"

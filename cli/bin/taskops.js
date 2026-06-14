@@ -33,6 +33,11 @@ Usage:
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
+  taskops queue sync <work-dir> [--json]
+  taskops queue list <work-dir> [--json]
+  taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
+  taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
+  taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -308,6 +313,50 @@ try {
       }
     }
     process.exit(result.stopReason === 'task_failed' || result.stopReason === 'validation_failed' ? 1 : 0);
+  }
+
+  if (cmd === 'queue') {
+    const { claimQueueItem, heartbeatLease, listQueueProjection, releaseLease, syncQueueProjection } = await import('../lib-queue.js');
+    const subcmd = positional[1];
+    const workDir = positional[2];
+    if (!subcmd) fail('Missing queue subcommand: sync, list, claim, heartbeat, or release');
+    if (!workDir) fail(`Missing queue ${subcmd} work-dir`);
+    let result;
+    if (subcmd === 'sync') result = syncQueueProjection(workDir);
+    else if (subcmd === 'list') result = listQueueProjection(workDir);
+    else if (subcmd === 'claim') {
+      result = claimQueueItem(workDir, {
+        runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
+        ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? Number(flags['ttl-seconds']) : null,
+      });
+    } else if (subcmd === 'heartbeat') {
+      const leaseId = positional[3];
+      if (!leaseId) fail('Missing queue heartbeat lease-id');
+      result = heartbeatLease(workDir, leaseId, {
+        ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? Number(flags['ttl-seconds']) : null,
+      });
+    } else if (subcmd === 'release') {
+      const leaseId = positional[3];
+      if (!leaseId) fail('Missing queue release lease-id');
+      result = releaseLease(workDir, leaseId, {
+        status: flags.status && flags.status !== true ? String(flags.status) : 'done',
+      });
+    }
+    else fail(`Unknown queue subcommand: ${subcmd}`);
+
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else if (Array.isArray(result.rows)) {
+      console.log(`workId=${result.workId} db=${result.dbPath} rows=${result.rows.length}`);
+      for (const row of result.rows) {
+        const blocked = row.blocked_reason ? ` blockedReason=${row.blocked_reason}` : '';
+        console.log(`- ${row.id} task=${row.task_id} status=${row.status} readiness=${row.readiness} priority=${row.priority}${blocked}`);
+      }
+    } else if (result.lease) {
+      console.log(`workId=${result.workId} db=${result.dbPath} lease=${result.lease.id} status=${result.lease.status} queueItem=${result.lease.queue_item_id}`);
+    } else {
+      console.log(`workId=${result.workId} db=${result.dbPath} claimed=false`);
+    }
+    process.exit(0);
   }
 
   if (cmd === 'restart') {
