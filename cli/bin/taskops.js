@@ -38,6 +38,8 @@ Usage:
   taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
   taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
   taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
+  taskops queue reports <work-dir> [--json]
+  taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -316,14 +318,15 @@ try {
   }
 
   if (cmd === 'queue') {
-    const { claimQueueItem, heartbeatLease, listQueueProjection, releaseLease, syncQueueProjection } = await import('../lib-queue.js');
+    const { claimQueueItem, heartbeatLease, listProgressReports, listQueueProjection, releaseLease, syncQueueProjection } = await import('../lib-queue.js');
     const subcmd = positional[1];
     const workDir = positional[2];
-    if (!subcmd) fail('Missing queue subcommand: sync, list, claim, heartbeat, or release');
+    if (!subcmd) fail('Missing queue subcommand: sync, list, claim, heartbeat, release, or reports');
     if (!workDir) fail(`Missing queue ${subcmd} work-dir`);
     let result;
     if (subcmd === 'sync') result = syncQueueProjection(workDir);
     else if (subcmd === 'list') result = listQueueProjection(workDir);
+    else if (subcmd === 'reports') result = listProgressReports(workDir);
     else if (subcmd === 'claim') {
       result = claimQueueItem(workDir, {
         runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
@@ -351,12 +354,46 @@ try {
         const blocked = row.blocked_reason ? ` blockedReason=${row.blocked_reason}` : '';
         console.log(`- ${row.id} task=${row.task_id} status=${row.status} readiness=${row.readiness} priority=${row.priority}${blocked}`);
       }
+    } else if (Array.isArray(result.reports)) {
+      console.log(`workId=${result.workId} db=${result.dbPath} reports=${result.reports.length}`);
+      for (const report of result.reports) {
+        console.log(`- ${report.id} wave=${report.wave_id} task=${report.task_id || '-'} status=${report.status} sink=${report.report_sink}`);
+      }
     } else if (result.lease) {
       console.log(`workId=${result.workId} db=${result.dbPath} lease=${result.lease.id} status=${result.lease.status} queueItem=${result.lease.queue_item_id}`);
     } else {
       console.log(`workId=${result.workId} db=${result.dbPath} claimed=false`);
     }
     process.exit(0);
+  }
+
+  if (cmd === 'runner') {
+    const { runQueueOnce } = await import('../lib-orchestrator.js');
+    const subcmd = positional[1];
+    const workDir = positional[2];
+    if (subcmd !== 'once') fail('Missing or unknown runner subcommand: once');
+    if (!workDir) fail('Missing runner once work-dir');
+    const result = runQueueOnce(workDir, {
+      runtimeAdapter: flags.runtime && flags.runtime !== true ? String(flags.runtime) : null,
+      runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
+      ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? Number(flags['ttl-seconds']) : null,
+      reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
+      masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
+      agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+      runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
+      timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
+      actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
+      waveId: flags['wave-id'] && flags['wave-id'] !== true ? String(flags['wave-id']) : null,
+    });
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else if (!result.claimed) {
+      console.log(`workId=${result.workId} claimed=false stopReason=${result.stopReason}`);
+    } else {
+      console.log(`workId=${result.workId} wave=${result.waveId} queueItem=${result.queueItem.id} runtime=${result.runtimeAdapter} release=${result.releaseStatus}`);
+      console.log(`stopReason=${result.runResult.stopReason} stepsRun=${result.runResult.stepsRun}`);
+      if (result.report) console.log(`report=${result.report.id} sink=${result.report.report_sink}`);
+    }
+    process.exit(result.releaseStatus === 'failed' ? 1 : 0);
   }
 
   if (cmd === 'restart') {

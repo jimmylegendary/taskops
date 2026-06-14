@@ -98,6 +98,8 @@ taskops queue list <work-dir> [--json]
 taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
 taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
+taskops queue reports <work-dir> [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -142,8 +144,36 @@ The initial queue surface is intentionally read-only relative to markdown:
 - `queue claim` creates one active lease for the next runnable/projectable item; another claim cannot receive the same item until that lease expires or is released.
 - `queue heartbeat` extends an active lease.
 - `queue release` marks an active lease `done`, `failed`, or `cancelled`.
+- `queue reports` lists progress report ledger rows written by queue-backed runner commands.
 - Deleting `.taskops/queue.sqlite` and rerunning `queue sync` should rebuild the projection from markdown.
-- Existing execution remains under `taskops run`; queue leases and agent wake adapters are later layers.
+- Existing single-step execution remains under `taskops run`; `taskops runner once` is the first queue-backed orchestration primitive.
+
+## Queue-backed runner
+
+`taskops runner once <work-dir>` claims one executable queue item, runs exactly that claimed task through a runtime adapter, releases the lease, refreshes the queue projection, and writes a progress report ledger row when reporting is enabled.
+
+```bash
+taskops runner once ./my-work \
+  --runtime dry-run \
+  --runner-id local-runner \
+  --report-sink ledger \
+  --master-session-key agent:main:webchat:channel:taskops-control \
+  --json
+```
+
+This command is intentionally small: it runs one claimed queue item and stops. A future long-running `taskops runner watch`/`taskopsd` can loop over the same primitive.
+
+Adapter boundary:
+
+- `--runtime dry-run` maps to the existing safe synthetic executor and is used by smoke tests.
+- `--runtime openclaw-cli` maps to the existing `openclaw agent --json` executor.
+- The runner core is not OpenClaw-specific; future runtime adapters should fit behind the same claim/run/wait/release/report boundary.
+
+Report boundary:
+
+- `--report-sink ledger` writes a durable progress report row to `.taskops/queue.sqlite`.
+- `--report-sink none` suppresses progress report rows.
+- Future report sinks should include OpenClaw `chat.inject`, terminal/stdout, and dashboard/webhook sinks without changing TaskOps graph semantics.
 
 ## Run a TaskOps work
 

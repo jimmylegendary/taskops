@@ -17,6 +17,7 @@ const projectDir = join(tempRoot, 'demo-project');
 const vaultDir = join(tempRoot, 'vault');
 const remoteBareDir = join(tempRoot, 'vault-remote.git');
 const runnerWorkDir = join(tempRoot, 'runner-work');
+const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -255,6 +256,93 @@ if (!runnerSummary.includes('task task-first [done; runnable]') || !runnerSummar
   console.error(runnerSummary);
   process.exit(1);
 }
+
+run(['init', orchestratorWorkDir, '--id', 'orchestrator-work', '--title', 'Orchestrator Work', '--objective', 'Smoke test queue-backed orchestration', '--language', 'en']);
+const orchestratorSpecPath = join(tempRoot, 'orchestrator-spec.json');
+writeFileSync(orchestratorSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Orchestrator-ready decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-first',
+      title: 'First orchestrator task',
+      objective: 'Remain pending while an active lease protects this task.',
+      responsibility: 'Prove the queue-backed runner respects active leases.',
+      completionCriteria: 'This task is not executed when a different queue item is claimed.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready, but intentionally pre-leased by the smoke test.',
+      understandingLevel: 'known',
+      order: 1
+    },
+    {
+      id: 'task-second',
+      title: 'Second orchestrator task',
+      objective: 'Be executed by taskops runner once after the first task is pre-leased.',
+      responsibility: 'Prove queue claim controls the executed task.',
+      completionCriteria: 'This task is marked done and receives EoW while task-first stays pending.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready and not pre-leased.',
+      understandingLevel: 'known',
+      order: 2
+    }
+  ]
+}, null, 2));
+run(['decompose', orchestratorWorkDir, '--task-group-id', 'tg-root', '--spec', orchestratorSpecPath]);
+const orchestratorSnapshotPath = join(orchestratorWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(orchestratorSnapshotPath, readFileSync(orchestratorSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const protectedLease = JSON.parse(run(['queue', 'claim', orchestratorWorkDir, '--runner-id', 'protector', '--ttl-seconds', '300', '--json']).stdout);
+if (!protectedLease.claimed || protectedLease.lease.queue_item_id !== 'tgv-root-v2:task-first') {
+  console.error('Expected pre-lease to protect task-first');
+  console.error(protectedLease);
+  process.exit(1);
+}
+const orchestratorOut = JSON.parse(run([
+  'runner', 'once', orchestratorWorkDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'orchestrator-smoke',
+  '--report-sink', 'ledger',
+  '--master-session-key', 'agent:main:webchat:channel:taskops-smoke',
+  '--wave-id', 'wave-smoke-1',
+  '--json'
+]).stdout);
+if (!orchestratorOut.claimed || orchestratorOut.queueItem.id !== 'tgv-root-v2:task-second' || orchestratorOut.releaseStatus !== 'done') {
+  console.error('queue-backed runner should claim and complete task-second while task-first is leased');
+  console.error(orchestratorOut);
+  process.exit(1);
+}
+if (orchestratorOut.runResult.tasks[0].taskId !== 'task-second') {
+  console.error('queue-backed runner executed a task other than the claimed queue item');
+  console.error(orchestratorOut.runResult);
+  process.exit(1);
+}
+const orchestratorFirstTask = readFileSync(join(orchestratorWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-first.md'), 'utf8');
+const orchestratorSecondTask = readFileSync(join(orchestratorWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-second.md'), 'utf8');
+if (!orchestratorFirstTask.includes('status: pending') || orchestratorFirstTask.includes('runRefs:')) {
+  console.error('task-first should remain untouched because its active lease was held by another runner');
+  console.error(orchestratorFirstTask);
+  process.exit(1);
+}
+if (!orchestratorSecondTask.includes('status: done') || !orchestratorSecondTask.includes('runRefs:')) {
+  console.error('task-second should be completed by queue-backed runner once');
+  console.error(orchestratorSecondTask);
+  process.exit(1);
+}
+const reportsOut = JSON.parse(run(['queue', 'reports', orchestratorWorkDir, '--json']).stdout);
+if (reportsOut.reports.length !== 1 || reportsOut.reports[0].wave_id !== 'wave-smoke-1' || reportsOut.reports[0].master_session_key !== 'agent:main:webchat:channel:taskops-smoke') {
+  console.error('queue-backed runner should write exactly one master-session progress report ledger row');
+  console.error(reportsOut);
+  process.exit(1);
+}
+if (!reportsOut.reports[0].message.includes('queueItem: tgv-root-v2:task-second') || !reportsOut.reports[0].message.includes('completed: execute:task-second')) {
+  console.error('progress report should summarize the claimed task and completed action');
+  console.error(reportsOut.reports[0]);
+  process.exit(1);
+}
+run(['validate', orchestratorWorkDir]);
 
 if (sanitizeFmScalar('one\nline\r\nthree\ttab').includes('\n')) {
   console.error('sanitizeFmScalar must strip newlines and tabs');

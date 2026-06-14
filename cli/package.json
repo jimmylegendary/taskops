@@ -17,6 +17,7 @@
     "lib-taskops.js",
     "lib-runner.js",
     "lib-queue.js",
+    "lib-orchestrator.js",
     "README.md",
     "scripts/smoke.mjs",
     "scripts/workflow-e2e.mjs"

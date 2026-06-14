@@ -28,7 +28,7 @@ function taskFingerprint(task) {
   }));
 }
 
-function openQueueDb(projectDir) {
+export function openQueueDb(projectDir) {
   const dbPath = join(projectDir, QUEUE_DB_RELATIVE_PATH);
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
@@ -57,6 +57,37 @@ function openQueueDb(projectDir) {
       expires_at TEXT NOT NULL,
       attempt INTEGER NOT NULL DEFAULT 1,
       FOREIGN KEY(queue_item_id) REFERENCES queue_items(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS runner_attempts (
+      id TEXT PRIMARY KEY,
+      queue_item_id TEXT NOT NULL,
+      lease_id TEXT,
+      runner_id TEXT NOT NULL,
+      runtime_adapter TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      run_id TEXT,
+      stop_reason TEXT,
+      error_summary TEXT,
+      FOREIGN KEY(queue_item_id) REFERENCES queue_items(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS progress_reports (
+      id TEXT PRIMARY KEY,
+      work_root TEXT NOT NULL,
+      work_id TEXT NOT NULL,
+      queue_item_id TEXT,
+      task_id TEXT,
+      wave_id TEXT NOT NULL,
+      master_session_key TEXT,
+      report_sink TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      delivered_at TEXT,
+      error_summary TEXT
     );
   `);
   return { db, dbPath };
@@ -349,4 +380,134 @@ export function releaseLease(workDir, leaseId, { status = 'done' } = {}) {
   const lease = readLease(db, leaseId);
   db.close();
   return { projectDir, workId: parsed.project.id, dbPath, lease };
+}
+
+export function insertRunnerAttempt(workDir, attempt) {
+  const { projectDir, parsed } = parseSingleProject(workDir);
+  const { db, dbPath } = openQueueDb(projectDir);
+  const now = isoNow();
+  const row = {
+    id: attempt.id || `attempt-${randomUUID()}`,
+    queue_item_id: attempt.queueItemId,
+    lease_id: attempt.leaseId || null,
+    runner_id: attempt.runnerId || 'taskops-runner',
+    runtime_adapter: attempt.runtimeAdapter || 'dry-run',
+    status: attempt.status || 'running',
+    started_at: attempt.startedAt || now,
+    finished_at: attempt.finishedAt || null,
+    run_id: attempt.runId || null,
+    stop_reason: attempt.stopReason || null,
+    error_summary: attempt.errorSummary || null,
+  };
+  db.prepare(`
+    INSERT INTO runner_attempts (
+      id, queue_item_id, lease_id, runner_id, runtime_adapter, status,
+      started_at, finished_at, run_id, stop_reason, error_summary
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    row.id,
+    row.queue_item_id,
+    row.lease_id,
+    row.runner_id,
+    row.runtime_adapter,
+    row.status,
+    row.started_at,
+    row.finished_at,
+    row.run_id,
+    row.stop_reason,
+    row.error_summary,
+  );
+  db.close();
+  return { projectDir, workId: parsed.project.id, dbPath, attempt: row };
+}
+
+export function updateRunnerAttempt(workDir, attemptId, patch = {}) {
+  const { projectDir, parsed } = parseSingleProject(workDir);
+  const { db, dbPath } = openQueueDb(projectDir);
+  const current = db.prepare(`
+    SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, status,
+           started_at, finished_at, run_id, stop_reason, error_summary
+    FROM runner_attempts
+    WHERE id = ?
+  `).get(attemptId);
+  if (!current) {
+    db.close();
+    throw new Error(`Runner attempt not found: ${attemptId}`);
+  }
+  const row = {
+    status: patch.status || current.status,
+    finished_at: patch.finishedAt === undefined ? current.finished_at : patch.finishedAt,
+    run_id: patch.runId === undefined ? current.run_id : patch.runId,
+    stop_reason: patch.stopReason === undefined ? current.stop_reason : patch.stopReason,
+    error_summary: patch.errorSummary === undefined ? current.error_summary : patch.errorSummary,
+  };
+  db.prepare(`
+    UPDATE runner_attempts
+    SET status = ?, finished_at = ?, run_id = ?, stop_reason = ?, error_summary = ?
+    WHERE id = ?
+  `).run(row.status, row.finished_at, row.run_id, row.stop_reason, row.error_summary, attemptId);
+  const updated = db.prepare(`
+    SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, status,
+           started_at, finished_at, run_id, stop_reason, error_summary
+    FROM runner_attempts
+    WHERE id = ?
+  `).get(attemptId);
+  db.close();
+  return { projectDir, workId: parsed.project.id, dbPath, attempt: updated };
+}
+
+export function insertProgressReport(workDir, report) {
+  const { projectDir, parsed } = parseSingleProject(workDir);
+  const { db, dbPath } = openQueueDb(projectDir);
+  const now = isoNow();
+  const row = {
+    id: report.id || `report-${randomUUID()}`,
+    work_root: projectDir,
+    work_id: parsed.project.id,
+    queue_item_id: report.queueItemId || null,
+    task_id: report.taskId || null,
+    wave_id: report.waveId || 'wave-unknown',
+    master_session_key: report.masterSessionKey || null,
+    report_sink: report.reportSink || 'ledger',
+    status: report.status || 'delivered',
+    message: String(report.message || ''),
+    created_at: report.createdAt || now,
+    delivered_at: report.deliveredAt || (report.status === 'failed' ? null : now),
+    error_summary: report.errorSummary || null,
+  };
+  db.prepare(`
+    INSERT INTO progress_reports (
+      id, work_root, work_id, queue_item_id, task_id, wave_id,
+      master_session_key, report_sink, status, message, created_at, delivered_at, error_summary
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    row.id,
+    row.work_root,
+    row.work_id,
+    row.queue_item_id,
+    row.task_id,
+    row.wave_id,
+    row.master_session_key,
+    row.report_sink,
+    row.status,
+    row.message,
+    row.created_at,
+    row.delivered_at,
+    row.error_summary,
+  );
+  db.close();
+  return { projectDir, workId: parsed.project.id, dbPath, report: row };
+}
+
+export function listProgressReports(workDir) {
+  const { projectDir, parsed } = parseSingleProject(workDir);
+  const { db, dbPath } = openQueueDb(projectDir);
+  const reports = db.prepare(`
+    SELECT id, work_root, work_id, queue_item_id, task_id, wave_id,
+           master_session_key, report_sink, status, message, created_at, delivered_at, error_summary
+    FROM progress_reports
+    ORDER BY created_at ASC, id ASC
+  `).all();
+  db.close();
+  return { projectDir, workId: parsed.project.id, dbPath, reports };
 }

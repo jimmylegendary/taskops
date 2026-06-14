@@ -255,7 +255,24 @@ export function recheckBlockedTasks(workDir, { dryRun = false } = {}) {
   return { projectDir, checked, unblocked, stillBlocked, dryRun };
 }
 
-export function pickNextAction(parsed) {
+function findTargetTask(parsed, target = {}) {
+  const taskId = target?.taskId;
+  if (!taskId) return null;
+  const matches = [...parsed.tasks.values()].filter((task) => (
+    task.id === taskId
+    && (!target.taskGroupVersionId || task.taskGroupVersionId === target.taskGroupVersionId)
+  ));
+  if (matches.length !== 1) {
+    return {
+      error: matches.length === 0
+        ? `Target task '${target.taskGroupVersionId ? `${target.taskGroupVersionId}:` : ''}${taskId}' not found.`
+        : `Target task '${taskId}' is ambiguous; provide taskGroupVersionId.`,
+    };
+  }
+  return { task: matches[0] };
+}
+
+export function pickNextAction(parsed, target = {}) {
   for (const runNode of parsed.runNodes.values()) {
     const pause = runNodePause(runNode);
     switch (pause?.reason) {
@@ -276,6 +293,50 @@ export function pickNextAction(parsed) {
       default:
         break;
     }
+  }
+
+  if (target?.taskId) {
+    const found = findTargetTask(parsed, target);
+    if (found?.error) {
+      return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE, detail: found.error };
+    }
+    const task = found.task;
+    if (['done', 'cancelled'].includes(task.status)) {
+      return {
+        kind: 'stop',
+        reason: STOP_REASONS.NO_RUNNABLE,
+        detail: `Target task ${task.taskGroupVersionId}:${task.id} is already ${task.status}.`,
+        source: { type: 'task', id: task.id },
+      };
+    }
+    const pause = taskPause(task);
+    if (pause?.reason) {
+      return {
+        kind: 'stop',
+        reason: pause.reason,
+        detail: pause.detail,
+        source: { type: 'task', id: task.id },
+      };
+    }
+    const classification = classifyTaskReadiness(task);
+    if (classification.runReadiness === 'blocked') {
+      return {
+        kind: 'stop',
+        reason: STOP_REASONS.BLOCKED_ONLY,
+        detail: classification.reason || `Target task ${task.taskGroupVersionId}:${task.id} is blocked.`,
+        source: { type: 'task', id: task.id },
+      };
+    }
+    const action = ACTION_BY_READINESS[classification.runReadiness];
+    if (!action) {
+      return {
+        kind: 'stop',
+        reason: STOP_REASONS.NO_RUNNABLE,
+        detail: `Target task ${task.taskGroupVersionId}:${task.id} has unsupported readiness ${classification.runReadiness}.`,
+        source: { type: 'task', id: task.id },
+      };
+    }
+    return { kind: action, task, classification };
   }
 
   const candidates = collectTaskCandidates(parsed);
@@ -1432,6 +1493,8 @@ export function runTaskOps(workDir, options = {}) {
   const actorName = options.actor && String(options.actor).trim()
     ? String(options.actor).trim()
     : (executor === 'openclaw-agent' ? agentId : 'taskops-runner');
+  const targetTaskId = options.targetTaskId || null;
+  const targetTaskGroupVersionId = options.targetTaskGroupVersionId || null;
 
   const lockDir = join(projectDir, RUNNER_LOCK_DIR);
   try {
@@ -1489,7 +1552,10 @@ export function runTaskOps(workDir, options = {}) {
         break;
       }
 
-      const next = pickNextAction(parsed);
+      const next = pickNextAction(parsed, {
+        taskId: targetTaskId,
+        taskGroupVersionId: targetTaskGroupVersionId,
+      });
       if (next.kind === 'stop') {
         if (
           next.reason === STOP_REASONS.DELEGATION_PENDING
