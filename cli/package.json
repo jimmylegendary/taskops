@@ -45,6 +45,6 @@
     "url": "https://github.com/jimmylegendary/taskops/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

@@ -135,7 +135,7 @@ taskops queue heartbeat ./my-work lease-... --json
 taskops queue release ./my-work lease-... --status done --json
 ```
 
-This surface uses Node's built-in `node:sqlite` module, so it requires a Node runtime that provides that module. Other TaskOps commands remain independent of the queue projection.
+This surface uses Node's built-in `node:sqlite` module, so it requires Node 22 or newer. Other TaskOps commands remain independent of the queue projection.
 
 The initial queue surface is intentionally read-only relative to markdown:
 
