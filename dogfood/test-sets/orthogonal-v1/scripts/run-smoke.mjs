@@ -6,6 +6,14 @@ const [root, tmpRoot] = process.argv.slice(2);
 if (!root || !tmpRoot) throw new Error('usage: run-smoke.mjs <testset-root> <tmp-root>');
 const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
 const results = [];
+
+function resolveSmokeUntil(c) {
+  if (c.expectedStop === 'deadline_reached') return c.until;
+  const parsed = Date.parse(c.until);
+  if (Number.isNaN(parsed) || parsed > Date.now()) return c.until;
+  return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+}
+
 for (const c of manifest.cases) {
   const src = join(root, 'works', c.id);
   const dst = join(tmpRoot, c.id);
@@ -18,7 +26,8 @@ for (const c of manifest.cases) {
     throw new Error(`validate failed for ${c.id}: ${validate.stderr || validate.stdout}`);
   }
 
-  const run = spawnSync('taskops', ['run', dst, '--executor', 'dry-run', '--max-steps', String(c.maxSteps), '--until', c.until, '--json'], { encoding: 'utf8' });
+  const runUntil = resolveSmokeUntil(c);
+  const run = spawnSync('taskops', ['run', dst, '--executor', 'dry-run', '--max-steps', String(c.maxSteps), '--until', runUntil, '--json'], { encoding: 'utf8' });
   if (run.status !== 0) {
     throw new Error(`run command failed for ${c.id}: ${run.stderr || run.stdout}`);
   }
@@ -26,7 +35,7 @@ for (const c of manifest.cases) {
   const actions = (out.actions || out.tasks || []).map((a) => a.kind || 'execute');
   const okStop = out.stopReason === c.expectedStop;
   const okActions = JSON.stringify(actions) === JSON.stringify(c.expectedActions);
-  results.push({ id: c.id, stopReason: out.stopReason, expectedStop: c.expectedStop, stepsRun: out.stepsRun, actions, expectedActions: c.expectedActions, okStop, okActions });
+  results.push({ id: c.id, until: runUntil, stopReason: out.stopReason, expectedStop: c.expectedStop, stepsRun: out.stepsRun, actions, expectedActions: c.expectedActions, okStop, okActions });
   if (!okStop || !okActions) {
     throw new Error(`unexpected result for ${c.id}: ${JSON.stringify(results.at(-1), null, 2)}`);
   }
