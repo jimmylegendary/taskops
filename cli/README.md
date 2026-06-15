@@ -99,8 +99,8 @@ taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-att
 taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
-taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -198,8 +198,9 @@ Adapter boundary:
 Report boundary:
 
 - `--report-sink ledger` writes a durable progress report row to `.taskops/queue.sqlite`.
+- `--report-sink openclaw-chat-inject` sends the same progress message to `--master-session-key` through `openclaw gateway call chat.inject`, then records delivery success or failure in the SQLite report ledger.
 - `--report-sink none` suppresses progress report rows.
-- Future report sinks should include OpenClaw `chat.inject`, terminal/stdout, and dashboard/webhook sinks without changing TaskOps graph semantics.
+- Future report sinks should include terminal/stdout and dashboard/webhook sinks without changing TaskOps graph semantics.
 
 ## Run a TaskOps work
 

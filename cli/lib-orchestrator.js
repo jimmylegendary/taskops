@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   claimQueueItem,
   insertProgressReport,
@@ -86,8 +87,8 @@ function executorForRuntime(runtimeAdapter) {
 
 function normalizeReportSink(value) {
   const sink = value == null || value === '' ? 'ledger' : String(value).trim();
-  if (!['none', 'ledger'].includes(sink)) {
-    throw new Error(`Invalid report sink '${value}'. Use none or ledger.`);
+  if (!['none', 'ledger', 'openclaw-chat-inject'].includes(sink)) {
+    throw new Error(`Invalid report sink '${value}'. Use none, ledger, or openclaw-chat-inject.`);
   }
   return sink;
 }
@@ -115,6 +116,63 @@ function buildProgressMessage({ workId, waveId, item, runResult, releaseStatus }
     `completed: ${completed}`,
     `failed: ${failed}`,
   ].join('\n');
+}
+
+function injectOpenClawChatReport({ masterSessionKey, message, label, timeoutMs = 10000 }) {
+  if (!masterSessionKey) {
+    return { ok: false, errorSummary: 'openclaw-chat-inject report sink requires --master-session-key' };
+  }
+  const params = {
+    sessionKey: masterSessionKey,
+    message,
+    label: label || 'TaskOps progress',
+  };
+  const result = spawnSync('openclaw', [
+    'gateway', 'call', 'chat.inject',
+    '--params', JSON.stringify(params),
+    '--json',
+    '--timeout', String(timeoutMs),
+  ], { encoding: 'utf8', timeout: timeoutMs + 1000 });
+  const stdout = (result.stdout || '').trim();
+  const stderr = (result.stderr || '').trim();
+  if (result.error) return { ok: false, errorSummary: result.error.message, stdout, stderr };
+  if (result.status !== 0) return { ok: false, errorSummary: stderr || stdout || `openclaw gateway call exited with status ${result.status}`, stdout, stderr };
+  return { ok: true, stdout, stderr };
+}
+
+function writeProgressReport(workDir, {
+  item,
+  target,
+  waveId,
+  masterSessionKey,
+  reportSink,
+  message,
+  errorSummary,
+}) {
+  if (reportSink === 'none') return null;
+  let status = errorSummary ? 'failed' : 'delivered';
+  let deliveryError = errorSummary || null;
+  if (reportSink === 'openclaw-chat-inject') {
+    const delivered = injectOpenClawChatReport({
+      masterSessionKey,
+      message,
+      label: `TaskOps ${waveId}`,
+    });
+    if (!delivered.ok) {
+      status = 'failed';
+      deliveryError = delivered.errorSummary || 'openclaw-chat-inject delivery failed';
+    }
+  }
+  return insertProgressReport(workDir, {
+    queueItemId: item.id,
+    taskId: target.taskId,
+    waveId,
+    masterSessionKey: masterSessionKey || null,
+    reportSink,
+    status,
+    message,
+    errorSummary: deliveryError,
+  }).report;
 }
 
 export function runQueueOnce(workDir, options = {}) {
@@ -196,18 +254,18 @@ export function runQueueOnce(workDir, options = {}) {
   }
 
   if (reportSink !== 'none') {
-    report = insertProgressReport(workDir, {
-      queueItemId: item.id,
-      taskId: target.taskId,
+    const message = errorSummary
+        ? `TaskOps ${waveId} (${claim.workId})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\nerror: ${errorSummary}`
+        : buildProgressMessage({ workId: claim.workId, waveId, item, runResult, releaseStatus });
+    report = writeProgressReport(workDir, {
+      item,
+      target,
       waveId,
       masterSessionKey: options.masterSessionKey || null,
       reportSink,
-      status: errorSummary ? 'failed' : 'delivered',
-      message: errorSummary
-        ? `TaskOps ${waveId} (${claim.workId})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\nerror: ${errorSummary}`
-        : buildProgressMessage({ workId: claim.workId, waveId, item, runResult, releaseStatus }),
+      message,
       errorSummary,
-    }).report;
+    });
   }
 
   return {

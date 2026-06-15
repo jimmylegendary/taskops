@@ -20,6 +20,7 @@ const runnerWorkDir = join(tempRoot, 'runner-work');
 const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
 const watchWorkDir = join(tempRoot, 'watch-work');
 const retryWorkDir = join(tempRoot, 'retry-work');
+const reportSinkWorkDir = join(tempRoot, 'report-sink-work');
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -505,6 +506,52 @@ if (!retryClaimReset.claimed || retryClaimReset.item.id !== 'tgv-root-v2:task-re
 }
 run(['queue', 'release', retryWorkDir, retryClaimReset.lease.id, '--status', 'cancelled', '--json']);
 run(['validate', retryWorkDir]);
+
+run(['init', reportSinkWorkDir, '--id', 'report-sink-work', '--title', 'Report Sink Work', '--objective', 'Smoke test report sink failure ledger', '--language', 'en']);
+const reportSinkSpecPath = join(tempRoot, 'report-sink-spec.json');
+writeFileSync(reportSinkSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Report sink decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-report-sink',
+      title: 'Report sink task',
+      objective: 'Complete while report delivery fails cleanly.',
+      responsibility: 'Prove OpenClaw chat-inject report sink failures are recorded without corrupting task execution.',
+      completionCriteria: 'Task closes, and the report ledger row records the missing master-session-key failure.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready for dry-run execution.',
+      understandingLevel: 'known',
+      order: 1
+    }
+  ]
+}, null, 2));
+run(['decompose', reportSinkWorkDir, '--task-group-id', 'tg-root', '--spec', reportSinkSpecPath]);
+const reportSinkSnapshotPath = join(reportSinkWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(reportSinkSnapshotPath, readFileSync(reportSinkSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const reportSinkOut = JSON.parse(run([
+  'runner', 'once', reportSinkWorkDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'report-sink-smoke',
+  '--report-sink', 'openclaw-chat-inject',
+  '--wave-id', 'report-sink-smoke-1',
+  '--json'
+]).stdout);
+if (reportSinkOut.releaseStatus !== 'done' || reportSinkOut.report?.status !== 'failed' || !reportSinkOut.report.error_summary.includes('master-session-key')) {
+  console.error('openclaw-chat-inject report sink should fail cleanly without master-session-key while task execution succeeds');
+  console.error(reportSinkOut);
+  process.exit(1);
+}
+const reportSinkReportsOut = JSON.parse(run(['queue', 'reports', reportSinkWorkDir, '--json']).stdout);
+if (reportSinkReportsOut.reports.length !== 1 || reportSinkReportsOut.reports[0].report_sink !== 'openclaw-chat-inject' || reportSinkReportsOut.reports[0].status !== 'failed') {
+  console.error('report sink failure should be recorded in the progress report ledger');
+  console.error(reportSinkReportsOut);
+  process.exit(1);
+}
+run(['validate', reportSinkWorkDir]);
 
 if (sanitizeFmScalar('one\nline\r\nthree\ttab').includes('\n')) {
   console.error('sanitizeFmScalar must strip newlines and tabs');
