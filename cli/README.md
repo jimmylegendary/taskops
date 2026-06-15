@@ -100,6 +100,7 @@ taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
 taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -146,7 +147,7 @@ The initial queue surface is intentionally read-only relative to markdown:
 - `queue release` marks an active lease `done`, `failed`, or `cancelled`.
 - `queue reports` lists progress report ledger rows written by queue-backed runner commands.
 - Deleting `.taskops/queue.sqlite` and rerunning `queue sync` should rebuild the projection from markdown.
-- Existing single-step execution remains under `taskops run`; `taskops runner once` is the first queue-backed orchestration primitive.
+- Existing single-step execution remains under `taskops run`; `taskops runner once` is the one-wave primitive and `taskops runner watch` is the long-lived local loop over that primitive.
 
 ## Queue-backed runner
 
@@ -161,7 +162,30 @@ taskops runner once ./my-work \
   --json
 ```
 
-This command is intentionally small: it runs one claimed queue item and stops. A future long-running `taskops runner watch`/`taskopsd` can loop over the same primitive.
+This command is intentionally small: it runs one claimed queue item and stops.
+
+`taskops runner watch <work-dir>` is the long-lived local runner. It repeatedly calls the same claim/run/release/report primitive, exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached.
+
+```bash
+taskops runner watch ./my-work \
+  --runtime openclaw-cli \
+  --runner-id taskopsd-main \
+  --report-sink ledger \
+  --master-session-key agent:main:webchat:channel:taskops-control
+```
+
+For smoke tests or bounded local runs, cap it:
+
+```bash
+taskops runner watch ./my-work \
+  --runtime dry-run \
+  --max-waves 5 \
+  --max-idle-cycles 1 \
+  --poll-interval-ms 100 \
+  --json
+```
+
+Watch mode stops on the first failed wave by default. Use `--continue-on-failure` only when another guard, such as a future max-attempt policy, prevents retry loops. SQLite does not call OpenClaw by itself; the watch process is the always-on execution subject, and `.taskops/queue.sqlite` is the durable queue/lease/report ledger it watches.
 
 Adapter boundary:
 

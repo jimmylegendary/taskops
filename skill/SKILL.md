@@ -19,8 +19,7 @@ Canonical state lives in markdown files arranged around:
 - `runs/<run-id>/`
 - non-canonical `derived/`
 
-Do **not** treat `graph.json` as durable canonical state.
-That older path is legacy source material only.
+Do **not** treat `.taskops/queue.sqlite`, `graph.json`, or generated canvases as durable semantic truth. SQLite is an execution projection/ledger, not the task graph source of truth.
 
 ## Read these first
 
@@ -42,6 +41,7 @@ That older path is legacy source material only.
 - Task↔run traceability is bidirectional: task `runRefs` plus run-node `sourceTaskId` / `sourceTaskGroupVersionId`
 - Delegation/waiting belongs in the run graph as `type: delegate` / `status: waiting` with delegatee, request, expected output, and optional timeout metadata
 - Markdown is canonical; canvas/views are derived
+- SQLite queue state is a rebuildable execution projection plus lease/report ledger
 - Shared status vocabulary: `pending | active | done | blocked | waiting | cancelled`
 - Before execution, classify task run readiness as `runnable | needs_decomposition | needs_exploration | blocked`
 - Use `needs_exploration` when the objective is meaningful but the system does not yet know enough to decompose honestly; exploratory runs may search, try, debug, prototype, and reflect to learn constraints for the next graph update
@@ -75,6 +75,14 @@ taskops watch-sync <vault-dir> --debounce-ms 5000
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+taskops queue sync <work-dir> [--json]
+taskops queue list <work-dir> [--json]
+taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
+taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
+taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
+taskops queue reports <work-dir> [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 ```
 
@@ -107,6 +115,22 @@ These three commands are the small surface area that keeps long-running agents h
 - Do **not** instruct the executing agent to call `taskops run` again — it runs one task. Recursion is the orchestrator's job, not the worker's.
 - `--loopback none` (default) keeps the cautious behaviour: every pending `type: delegate` stops the runner. Pass `--loopback self` to let the runner auto-resolve *self-delegates* (`delegateeType: self`, `delegateeRef: self`, or `delegateeRef: <work-id>`) by opening a `type: loopback` resolution node, executing the loopback once, writing a `loopback` edge, and closing both the loopback and the original delegate (`reason: self_loopback_resolved`, `resolvedBy: self_loopback`). Non-self delegates are still surfaced as `delegation_pending`. Each loopback counts against `--max-steps` and a separate `--max-loopbacks` budget (default `3`); exceeding it stops with `max_loopbacks` and leaves the delegate open. The executing agent inside a loopback must still not call `taskops run` recursively — orchestration stays at the runner.
 - `taskops restart <work-dir> --from <task-id> --instruction "<text>" [--reason <text>] [--instruction-file <path>] [--json]` rolls the active version of the containing task group forward to a new version, marks the prior version `selected: false` and `supersededByVersionId`, points the active snapshot at the new version, and updates the task group's `activeVersionId`. Upstream tasks (`order < target.order`) keep their status and gain `preservedUpstream: true` with a fresh `preserved_upstream_after_restart` EoW when they were done leaves. The target task is reset to `pending` with `restartInstruction`, optional `restartReason`, `restartedFromVersionId`, and `restartedAt`. Downstream tasks (`order >= target.order`, excluding the target) are reset to `pending`. Historical runs/run nodes/EoWs are not modified — they remain as evidence. Use this instead of editing tasks by hand when an upstream change invalidates a task and its downstream.
+
+## Queue projection and watch runner
+
+`taskops queue sync <work-dir>` creates or refreshes `.taskops/queue.sqlite` from the canonical markdown state. The database is rebuildable projection state for queue items, leases, attempts, and progress reports. Deleting it and syncing again must not destroy semantic truth.
+
+`taskops runner once <work-dir>` claims one executable queue item, runs exactly that claimed task through a runtime adapter, releases the lease, refreshes the queue projection, and optionally writes a progress report ledger row.
+
+`taskops runner watch <work-dir>` is the local always-on primitive. It loops over `runner once`, waits when no queue item is currently claimable, and exits with `all_closed` when TaskOps closure says the work is complete. Bounds such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, and `--until` are for tests, controlled sessions, and supervised deployments.
+
+Important boundary:
+
+- SQLite does not call OpenClaw and does not execute triggers by itself.
+- The watch runner is the process that stays alive and invokes the runtime adapter.
+- `--runtime openclaw-cli` maps to same-host `openclaw agent --json`.
+- Watch mode stops on the first failed wave by default to avoid retry loops. Use `--continue-on-failure` only with a separate retry/attempt guard.
+- `--report-sink ledger` records progress in `.taskops/queue.sqlite`; future sinks can deliver to a master OpenClaw session or dashboard without changing TaskOps graph truth.
 
 ## Git-backed vault rule
 

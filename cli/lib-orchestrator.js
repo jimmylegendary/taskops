@@ -8,10 +8,45 @@ import {
   syncQueueProjection,
   updateRunnerAttempt,
 } from './lib-queue.js';
-import { runTaskOps } from './lib-runner.js';
+import { explainWork, runTaskOps } from './lib-runner.js';
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+function sleepMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.floor(ms));
+}
+
+function optionalPositiveInteger(value, name) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid ${name}: ${value}`);
+  return Math.floor(n);
+}
+
+function optionalPositiveNumber(value, name) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid ${name}: ${value}`);
+  return n;
+}
+
+function normalizeUntil(value) {
+  if (value == null || value === '') return null;
+  const parsed = Date.parse(String(value));
+  if (Number.isNaN(parsed)) throw new Error(`Invalid --until '${value}'; expected an ISO-8601 timestamp or Date-parseable string`);
+  return parsed;
+}
+
+function normalizeBool(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new Error(`Invalid boolean value: ${value}`);
 }
 
 function parseQueueItemId(id) {
@@ -180,6 +215,127 @@ export function runQueueOnce(workDir, options = {}) {
     runResult,
     errorSummary,
     report,
+  };
+}
+
+export function runQueueWatch(workDir, options = {}) {
+  const runtimeAdapter = normalizeRuntimeAdapter(options.runtimeAdapter || options.runtime);
+  const reportSink = normalizeReportSink(options.reportSink || options.report);
+  const runnerId = options.runnerId || `taskops-runner-${process.pid}`;
+  const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
+  const pollIntervalMs = optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms') ?? 5000;
+  const maxWaves = optionalPositiveInteger(options.maxWaves, 'max waves');
+  const maxIdleCycles = optionalPositiveInteger(options.maxIdleCycles, 'max idle cycles');
+  const idleExitAfterSeconds = optionalPositiveNumber(options.idleExitAfterSeconds, 'idle exit seconds');
+  const until = normalizeUntil(options.until);
+  const stopOnFailure = normalizeBool(options.stopOnFailure, true);
+  const watchId = options.watchId || `watch-${randomUUID()}`;
+  const startedAt = isoNow();
+  let claimedWaves = 0;
+  let idleCycles = 0;
+  let firstIdleAt = null;
+  let stopReason = null;
+  let stopDetail = null;
+  let finalExplain = null;
+  const waves = [];
+
+  while (true) {
+    if (until != null && Date.now() >= until) {
+      stopReason = 'deadline_reached';
+      break;
+    }
+    if (maxWaves != null && claimedWaves >= maxWaves) {
+      stopReason = 'max_waves';
+      stopDetail = `Reached max waves ${claimedWaves}/${maxWaves}.`;
+      break;
+    }
+
+    const waveId = `${watchId}-wave-${claimedWaves + 1}`;
+    const result = runQueueOnce(workDir, {
+      runtimeAdapter,
+      runnerId,
+      ttlSeconds,
+      reportSink,
+      masterSessionKey: options.masterSessionKey || null,
+      agent: options.agent || null,
+      runId: options.runId || null,
+      timeout: options.timeout || null,
+      actor: options.actor || runnerId,
+      waveId,
+    });
+
+    if (result.claimed) {
+      claimedWaves += 1;
+      idleCycles = 0;
+      firstIdleAt = null;
+      waves.push(result);
+      if (result.releaseStatus === 'failed' && stopOnFailure) {
+        stopReason = 'wave_failed';
+        stopDetail = result.errorSummary || result.runResult?.stopDetail || result.runResult?.stopReason || 'Runner wave failed.';
+        break;
+      }
+      continue;
+    }
+
+    idleCycles += 1;
+    if (!firstIdleAt) firstIdleAt = Date.now();
+
+    finalExplain = explainWork(workDir);
+    if (finalExplain.complete) {
+      stopReason = 'all_closed';
+      break;
+    }
+
+    if (maxIdleCycles != null && idleCycles >= maxIdleCycles) {
+      stopReason = 'idle_cycles';
+      stopDetail = `No claimable queue item after ${idleCycles} idle cycle(s).`;
+      break;
+    }
+
+    if (idleExitAfterSeconds != null && firstIdleAt != null) {
+      const idleMs = Date.now() - firstIdleAt;
+      if (idleMs >= idleExitAfterSeconds * 1000) {
+        stopReason = 'idle_timeout';
+        stopDetail = `No claimable queue item for ${idleExitAfterSeconds} second(s).`;
+        break;
+      }
+    }
+
+    sleepMs(pollIntervalMs);
+  }
+
+  const stoppedAt = isoNow();
+  if (!finalExplain) {
+    try {
+      finalExplain = explainWork(workDir);
+    } catch (error) {
+      finalExplain = {
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  return {
+    projectDir: waves[0]?.projectDir || finalExplain.projectDir || null,
+    workId: waves[0]?.workId || finalExplain.workId || null,
+    dbPath: waves[0]?.dbPath || finalExplain.dbPath || null,
+    watchId,
+    runnerId,
+    runtimeAdapter,
+    reportSink,
+    startedAt,
+    stoppedAt,
+    stopReason: stopReason || 'stopped',
+    stopDetail,
+    claimedWaves,
+    idleCycles,
+    maxWaves,
+    maxIdleCycles,
+    idleExitAfterSeconds,
+    pollIntervalMs,
+    stopOnFailure,
+    finalExplain,
+    waves,
   };
 }
 

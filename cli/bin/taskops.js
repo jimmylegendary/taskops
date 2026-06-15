@@ -40,6 +40,7 @@ Usage:
   taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
   taskops queue reports <work-dir> [--json]
   taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
+  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -368,12 +369,12 @@ try {
   }
 
   if (cmd === 'runner') {
-    const { runQueueOnce } = await import('../lib-orchestrator.js');
+    const { runQueueOnce, runQueueWatch } = await import('../lib-orchestrator.js');
     const subcmd = positional[1];
     const workDir = positional[2];
-    if (subcmd !== 'once') fail('Missing or unknown runner subcommand: once');
-    if (!workDir) fail('Missing runner once work-dir');
-    const result = runQueueOnce(workDir, {
+    if (!['once', 'watch'].includes(subcmd)) fail('Missing or unknown runner subcommand: once or watch');
+    if (!workDir) fail(`Missing runner ${subcmd} work-dir`);
+    const commonOptions = {
       runtimeAdapter: flags.runtime && flags.runtime !== true ? String(flags.runtime) : null,
       runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
       ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? Number(flags['ttl-seconds']) : null,
@@ -383,17 +384,43 @@ try {
       runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
-      waveId: flags['wave-id'] && flags['wave-id'] !== true ? String(flags['wave-id']) : null,
+    };
+    if (subcmd === 'once') {
+      const result = runQueueOnce(workDir, {
+        ...commonOptions,
+        waveId: flags['wave-id'] && flags['wave-id'] !== true ? String(flags['wave-id']) : null,
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else if (!result.claimed) {
+        console.log(`workId=${result.workId} claimed=false stopReason=${result.stopReason}`);
+      } else {
+        console.log(`workId=${result.workId} wave=${result.waveId} queueItem=${result.queueItem.id} runtime=${result.runtimeAdapter} release=${result.releaseStatus}`);
+        console.log(`stopReason=${result.runResult.stopReason} stepsRun=${result.runResult.stepsRun}`);
+        if (result.report) console.log(`report=${result.report.id} sink=${result.report.report_sink}`);
+      }
+      process.exit(result.releaseStatus === 'failed' ? 1 : 0);
+    }
+    const result = runQueueWatch(workDir, {
+      ...commonOptions,
+      watchId: flags['watch-id'] && flags['watch-id'] !== true ? String(flags['watch-id']) : null,
+      pollIntervalMs: flags['poll-interval-ms'] != null && flags['poll-interval-ms'] !== true ? flags['poll-interval-ms'] : null,
+      maxWaves: flags['max-waves'] != null && flags['max-waves'] !== true ? flags['max-waves'] : null,
+      maxIdleCycles: flags['max-idle-cycles'] != null && flags['max-idle-cycles'] !== true ? flags['max-idle-cycles'] : null,
+      idleExitAfterSeconds: flags['idle-exit-after-seconds'] != null && flags['idle-exit-after-seconds'] !== true ? flags['idle-exit-after-seconds'] : null,
+      until: flags.until && flags.until !== true ? String(flags.until) : null,
+      stopOnFailure: flags['continue-on-failure'] === true ? false : true,
     });
     if (flags.json) console.log(JSON.stringify(result, null, 2));
-    else if (!result.claimed) {
-      console.log(`workId=${result.workId} claimed=false stopReason=${result.stopReason}`);
-    } else {
-      console.log(`workId=${result.workId} wave=${result.waveId} queueItem=${result.queueItem.id} runtime=${result.runtimeAdapter} release=${result.releaseStatus}`);
-      console.log(`stopReason=${result.runResult.stopReason} stepsRun=${result.runResult.stepsRun}`);
-      if (result.report) console.log(`report=${result.report.id} sink=${result.report.report_sink}`);
+    else {
+      console.log(`workId=${result.workId} watchId=${result.watchId} runtime=${result.runtimeAdapter} stopReason=${result.stopReason} waves=${result.claimedWaves}`);
+      if (result.stopDetail) console.log(`stopDetail=${result.stopDetail}`);
+      for (const wave of result.waves) {
+        const queueItem = wave.queueItem?.id || '-';
+        const stopReason = wave.runResult?.stopReason || '-';
+        console.log(`- ${wave.waveId} queueItem=${queueItem} release=${wave.releaseStatus} stopReason=${stopReason}`);
+      }
     }
-    process.exit(result.releaseStatus === 'failed' ? 1 : 0);
+    process.exit(result.stopReason === 'wave_failed' ? 1 : 0);
   }
 
   if (cmd === 'restart') {

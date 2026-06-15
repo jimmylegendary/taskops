@@ -18,6 +18,7 @@ const vaultDir = join(tempRoot, 'vault');
 const remoteBareDir = join(tempRoot, 'vault-remote.git');
 const runnerWorkDir = join(tempRoot, 'runner-work');
 const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
+const watchWorkDir = join(tempRoot, 'watch-work');
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -343,6 +344,79 @@ if (!reportsOut.reports[0].message.includes('queueItem: tgv-root-v2:task-second'
   process.exit(1);
 }
 run(['validate', orchestratorWorkDir]);
+
+run(['init', watchWorkDir, '--id', 'watch-work', '--title', 'Watch Work', '--objective', 'Smoke test queue-backed watch runner', '--language', 'en']);
+const watchSpecPath = join(tempRoot, 'watch-spec.json');
+writeFileSync(watchSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Watch-runner decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-watch-first',
+      title: 'First watch task',
+      objective: 'Be executed by the first watch wave.',
+      responsibility: 'Prove watch mode drains the first queue item.',
+      completionCriteria: 'This task is marked done and receives TaskOps run and task EoW.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready for dry-run watch execution.',
+      understandingLevel: 'known',
+      order: 1
+    },
+    {
+      id: 'task-watch-second',
+      title: 'Second watch task',
+      objective: 'Be executed by the second watch wave.',
+      responsibility: 'Prove watch mode loops after a successful first claim.',
+      completionCriteria: 'This task is marked done and the watch exits all_closed after queue drain.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready for dry-run watch execution.',
+      understandingLevel: 'known',
+      order: 2
+    }
+  ]
+}, null, 2));
+run(['decompose', watchWorkDir, '--task-group-id', 'tg-root', '--spec', watchSpecPath]);
+const watchSnapshotPath = join(watchWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(watchSnapshotPath, readFileSync(watchSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const watchOut = JSON.parse(run([
+  'runner', 'watch', watchWorkDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'watch-smoke',
+  '--report-sink', 'ledger',
+  '--master-session-key', 'agent:main:webchat:channel:taskops-watch-smoke',
+  '--watch-id', 'watch-smoke-1',
+  '--poll-interval-ms', '1',
+  '--max-waves', '5',
+  '--json'
+]).stdout);
+if (watchOut.stopReason !== 'all_closed' || watchOut.claimedWaves !== 2 || watchOut.waves.length !== 2) {
+  console.error('runner watch should drain two tasks and stop all_closed');
+  console.error(watchOut);
+  process.exit(1);
+}
+if (watchOut.waves[0].queueItem.id !== 'tgv-root-v2:task-watch-first' || watchOut.waves[1].queueItem.id !== 'tgv-root-v2:task-watch-second') {
+  console.error('runner watch should claim queue items in deterministic order');
+  console.error(watchOut.waves.map((wave) => wave.queueItem.id));
+  process.exit(1);
+}
+const watchFirstTask = readFileSync(join(watchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-watch-first.md'), 'utf8');
+const watchSecondTask = readFileSync(join(watchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-watch-second.md'), 'utf8');
+if (!watchFirstTask.includes('status: done') || !watchSecondTask.includes('status: done')) {
+  console.error('runner watch should mark both tasks done');
+  console.error({ watchFirstTask, watchSecondTask });
+  process.exit(1);
+}
+const watchReportsOut = JSON.parse(run(['queue', 'reports', watchWorkDir, '--json']).stdout);
+if (watchReportsOut.reports.length !== 2 || !watchReportsOut.reports.every((report) => report.master_session_key === 'agent:main:webchat:channel:taskops-watch-smoke')) {
+  console.error('runner watch should write one progress ledger row per claimed wave');
+  console.error(watchReportsOut);
+  process.exit(1);
+}
+run(['validate', watchWorkDir]);
 
 if (sanitizeFmScalar('one\nline\r\nthree\ttab').includes('\n')) {
   console.error('sanitizeFmScalar must strip newlines and tabs');
