@@ -1,7 +1,7 @@
 {
   "id": "taskops-obsidian",
   "name": "TaskOps Explorer",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "minAppVersion": "1.4.0",
   "description": "Tree-first explorer plus semantic canvas export for md-first TaskOps projects.",
   "author": "TaskOps",
