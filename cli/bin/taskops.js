@@ -35,12 +35,12 @@ Usage:
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
   taskops queue sync <work-dir> [--json]
   taskops queue list <work-dir> [--json]
-  taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
+  taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
   taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
   taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
   taskops queue reports <work-dir> [--json]
-  taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
-  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
+  taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
+  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -332,6 +332,7 @@ try {
       result = claimQueueItem(workDir, {
         runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
         ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? Number(flags['ttl-seconds']) : null,
+        maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
       });
     } else if (subcmd === 'heartbeat') {
       const leaseId = positional[3];
@@ -353,7 +354,8 @@ try {
       console.log(`workId=${result.workId} db=${result.dbPath} rows=${result.rows.length}`);
       for (const row of result.rows) {
         const blocked = row.blocked_reason ? ` blockedReason=${row.blocked_reason}` : '';
-        console.log(`- ${row.id} task=${row.task_id} status=${row.status} readiness=${row.readiness} priority=${row.priority}${blocked}`);
+        const failedAttempts = row.failed_attempts != null ? ` failedAttempts=${row.failed_attempts}` : '';
+        console.log(`- ${row.id} task=${row.task_id} status=${row.status} readiness=${row.readiness} priority=${row.priority}${failedAttempts}${blocked}`);
       }
     } else if (Array.isArray(result.reports)) {
       console.log(`workId=${result.workId} db=${result.dbPath} reports=${result.reports.length}`);
@@ -384,6 +386,7 @@ try {
       runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
+      maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
     };
     if (subcmd === 'once') {
       const result = runQueueOnce(workDir, {

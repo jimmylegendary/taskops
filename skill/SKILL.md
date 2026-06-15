@@ -77,12 +77,12 @@ taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--json]
 taskops queue sync <work-dir> [--json]
 taskops queue list <work-dir> [--json]
-taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
+taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
 taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
-taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 ```
 
@@ -122,14 +122,15 @@ These three commands are the small surface area that keeps long-running agents h
 
 `taskops runner once <work-dir>` claims one executable queue item, runs exactly that claimed task through a runtime adapter, releases the lease, refreshes the queue projection, and optionally writes a progress report ledger row.
 
-`taskops runner watch <work-dir>` is the local always-on primitive. It loops over `runner once`, waits when no queue item is currently claimable, and exits with `all_closed` when TaskOps closure says the work is complete. Bounds such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, and `--until` are for tests, controlled sessions, and supervised deployments.
+`taskops runner watch <work-dir>` is the local always-on primitive. It loops over `runner once`, waits when no queue item is currently claimable, and exits with `all_closed` when TaskOps closure says the work is complete. Bounds such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, and `--until` are for tests, controlled sessions, and supervised deployments. Watch mode defaults to `--max-attempts 3`; pass `--max-attempts 0` only when an external supervisor owns retry safety.
 
 Important boundary:
 
 - SQLite does not call OpenClaw and does not execute triggers by itself.
 - The watch runner is the process that stays alive and invokes the runtime adapter.
 - `--runtime openclaw-cli` maps to same-host `openclaw agent --json`.
-- Watch mode stops on the first failed wave by default to avoid retry loops. Use `--continue-on-failure` only with a separate retry/attempt guard.
+- `--max-attempts <n>` skips queue items whose current markdown fingerprint already has `n` failed runner attempts. Editing the task markdown changes the fingerprint and resets the retry budget.
+- Watch mode stops on the first failed wave by default to avoid retry loops. Use `--continue-on-failure` only with `--max-attempts` or a separate retry/attempt guard.
 - `--report-sink ledger` records progress in `.taskops/queue.sqlite`; future sinks can deliver to a master OpenClaw session or dashboard without changing TaskOps graph truth.
 
 ## Git-backed vault rule

@@ -95,12 +95,12 @@ taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
 taskops queue sync <work-dir> [--json]
 taskops queue list <work-dir> [--json]
-taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--json]
+taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
 taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
-taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -131,7 +131,7 @@ taskops close ./my-work task-foo --reason manual_verified
 ```bash
 taskops queue sync ./my-work --json
 taskops queue list ./my-work
-taskops queue claim ./my-work --runner-id local-worker --ttl-seconds 300 --json
+taskops queue claim ./my-work --runner-id local-worker --ttl-seconds 300 --max-attempts 3 --json
 taskops queue heartbeat ./my-work lease-... --json
 taskops queue release ./my-work lease-... --status done --json
 ```
@@ -143,6 +143,7 @@ The initial queue surface is intentionally read-only relative to markdown:
 - `queue sync` parses and validates the work tree, then projects selected snapshot tasks into `queue_items`.
 - `queue list` reads the current projection.
 - `queue claim` creates one active lease for the next runnable/projectable item; another claim cannot receive the same item until that lease expires or is released.
+- `--max-attempts <n>` skips items whose current markdown fingerprint already has `n` failed runner attempts. Use `0` for unlimited attempts. Editing the task markdown changes the fingerprint and resets the retry budget for that task version.
 - `queue heartbeat` extends an active lease.
 - `queue release` marks an active lease `done`, `failed`, or `cancelled`.
 - `queue reports` lists progress report ledger rows written by queue-backed runner commands.
@@ -164,12 +165,13 @@ taskops runner once ./my-work \
 
 This command is intentionally small: it runs one claimed queue item and stops.
 
-`taskops runner watch <work-dir>` is the long-lived local runner. It repeatedly calls the same claim/run/release/report primitive, exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached.
+`taskops runner watch <work-dir>` is the long-lived local runner. It repeatedly calls the same claim/run/release/report primitive, exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached. Watch mode defaults to `--max-attempts 3`; pass `--max-attempts 0` for unlimited retries.
 
 ```bash
 taskops runner watch ./my-work \
   --runtime openclaw-cli \
   --runner-id taskopsd-main \
+  --max-attempts 3 \
   --report-sink ledger \
   --master-session-key agent:main:webchat:channel:taskops-control
 ```
@@ -185,7 +187,7 @@ taskops runner watch ./my-work \
   --json
 ```
 
-Watch mode stops on the first failed wave by default. Use `--continue-on-failure` only when another guard, such as a future max-attempt policy, prevents retry loops. SQLite does not call OpenClaw by itself; the watch process is the always-on execution subject, and `.taskops/queue.sqlite` is the durable queue/lease/report ledger it watches.
+Watch mode stops on the first failed wave by default. Use `--continue-on-failure` only when `--max-attempts` or another supervisor prevents retry loops. SQLite does not call OpenClaw by itself; the watch process is the always-on execution subject, and `.taskops/queue.sqlite` is the durable queue/lease/report ledger it watches.
 
 Adapter boundary:
 

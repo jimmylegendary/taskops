@@ -19,6 +19,7 @@ const remoteBareDir = join(tempRoot, 'vault-remote.git');
 const runnerWorkDir = join(tempRoot, 'runner-work');
 const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
 const watchWorkDir = join(tempRoot, 'watch-work');
+const retryWorkDir = join(tempRoot, 'retry-work');
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -417,6 +418,93 @@ if (watchReportsOut.reports.length !== 2 || !watchReportsOut.reports.every((repo
   process.exit(1);
 }
 run(['validate', watchWorkDir]);
+
+run(['init', retryWorkDir, '--id', 'retry-work', '--title', 'Retry Work', '--objective', 'Smoke test queue retry caps', '--language', 'en']);
+const retrySpecPath = join(tempRoot, 'retry-spec.json');
+writeFileSync(retrySpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Retry-cap decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-retry',
+      title: 'Retry-capped task',
+      objective: 'Stay pending while a delegation makes execution fail before a step starts.',
+      responsibility: 'Prove max-attempts prevents a watch loop from repeatedly reclaiming the same unchanged task.',
+      completionCriteria: 'The runner stops claiming this task after the configured failed-attempt budget is exhausted.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready, but a run-level delegate intentionally pauses execution.',
+      understandingLevel: 'known',
+      order: 1
+    }
+  ]
+}, null, 2));
+run(['decompose', retryWorkDir, '--task-group-id', 'tg-root', '--spec', retrySpecPath]);
+const retrySnapshotPath = join(retryWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(retrySnapshotPath, readFileSync(retrySnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+writeFileSync(join(retryWorkDir, 'runs', 'run-main', 'nodes', 'run-node-retry-delegate.md'), `---
+taskOpsVersion: v1
+entityType: runNode
+id: run-node-retry-delegate
+runId: run-main
+type: delegate
+title: Retry blocker delegate
+status: waiting
+delegateeType: human
+delegateeRef: stakeholder
+request: Resolve this deliberate retry smoke blocker.
+expectedOutput: A decision that allows the task to proceed.
+requestedAt: 2026-05-12T00:00:00Z
+createdAt: 2026-05-12T00:00:00Z
+---
+# Retry blocker delegate
+`, 'utf8');
+const retryWatchOut = JSON.parse(run([
+  'runner', 'watch', retryWorkDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'retry-smoke',
+  '--report-sink', 'ledger',
+  '--watch-id', 'retry-smoke-1',
+  '--poll-interval-ms', '1',
+  '--max-attempts', '2',
+  '--max-idle-cycles', '1',
+  '--continue-on-failure',
+  '--json'
+]).stdout);
+if (retryWatchOut.stopReason !== 'idle_cycles' || retryWatchOut.claimedWaves !== 2 || retryWatchOut.waves.length !== 2) {
+  console.error('runner watch should stop reclaiming an unchanged failing item after max-attempts=2');
+  console.error(retryWatchOut);
+  process.exit(1);
+}
+if (!retryWatchOut.waves.every((wave) => wave.releaseStatus === 'failed' && wave.runResult.stopReason === 'delegation_pending')) {
+  console.error('retry smoke waves should fail because the delegate is still pending');
+  console.error(retryWatchOut.waves);
+  process.exit(1);
+}
+const retryListOut = JSON.parse(run(['queue', 'list', retryWorkDir, '--json']).stdout);
+if (retryListOut.rows[0].failed_attempts !== 2) {
+  console.error('queue list should expose failed attempts for the current task fingerprint');
+  console.error(retryListOut);
+  process.exit(1);
+}
+const retryClaimBlocked = JSON.parse(run(['queue', 'claim', retryWorkDir, '--runner-id', 'retry-claim', '--max-attempts', '2', '--json']).stdout);
+if (retryClaimBlocked.claimed !== false) {
+  console.error('queue claim should refuse an unchanged item at its max-attempts budget');
+  console.error(retryClaimBlocked);
+  process.exit(1);
+}
+const retryTaskPath = join(retryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-retry.md');
+writeFileSync(retryTaskPath, readFileSync(retryTaskPath, 'utf8') + '\nRetry fingerprint reset note.\n');
+const retryClaimReset = JSON.parse(run(['queue', 'claim', retryWorkDir, '--runner-id', 'retry-claim-reset', '--max-attempts', '2', '--json']).stdout);
+if (!retryClaimReset.claimed || retryClaimReset.item.id !== 'tgv-root-v2:task-retry') {
+  console.error('queue claim should allow retries again after the task markdown fingerprint changes');
+  console.error(retryClaimReset);
+  process.exit(1);
+}
+run(['queue', 'release', retryWorkDir, retryClaimReset.lease.id, '--status', 'cancelled', '--json']);
+run(['validate', retryWorkDir]);
 
 if (sanitizeFmScalar('one\nline\r\nthree\ttab').includes('\n')) {
   console.error('sanitizeFmScalar must strip newlines and tabs');

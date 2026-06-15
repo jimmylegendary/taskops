@@ -65,6 +65,7 @@ export function openQueueDb(projectDir) {
       lease_id TEXT,
       runner_id TEXT NOT NULL,
       runtime_adapter TEXT NOT NULL,
+      md_fingerprint TEXT,
       status TEXT NOT NULL,
       started_at TEXT NOT NULL,
       finished_at TEXT,
@@ -90,7 +91,14 @@ export function openQueueDb(projectDir) {
       error_summary TEXT
     );
   `);
+  ensureColumn(db, 'runner_attempts', 'md_fingerprint', 'TEXT');
   return { db, dbPath };
+}
+
+function ensureColumn(db, table, column, ddl) {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all()
+    .some((row) => row.name === column);
+  if (!existing) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }
 
 function parseSingleProject(workDir) {
@@ -146,7 +154,14 @@ function queueRowFromTask(projectDir, parsed, task, now) {
 function readQueueRows(db) {
   return db.prepare(`
     SELECT id, work_root, task_id, run_id, readiness, status, priority, blocked_reason,
-           md_fingerprint, created_at, updated_at
+           md_fingerprint, created_at, updated_at,
+           (
+             SELECT COUNT(*)
+             FROM runner_attempts ra
+             WHERE ra.queue_item_id = queue_items.id
+               AND ra.status = 'failed'
+               AND COALESCE(ra.md_fingerprint, queue_items.md_fingerprint) = queue_items.md_fingerprint
+           ) AS failed_attempts
     FROM queue_items
     ORDER BY priority DESC, id ASC
   `).all();
@@ -174,6 +189,14 @@ function leaseTtlSeconds(value) {
   const ttl = Number(value);
   if (!Number.isFinite(ttl) || ttl <= 0) throw new Error(`Invalid lease TTL seconds: ${value}`);
   return ttl;
+}
+
+function maxAttemptsValue(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid max attempts: ${value}`);
+  if (n === 0) return null;
+  return Math.floor(n);
 }
 
 function isoPlusSeconds(iso, seconds) {
@@ -255,11 +278,12 @@ export function listQueueProjection(workDir) {
   };
 }
 
-export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds = 300 } = {}) {
+export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds = 300, maxAttempts = null } = {}) {
   const synced = syncQueueProjection(workDir);
   const { db, dbPath } = openQueueDb(synced.projectDir);
   const now = isoNow();
   const ttl = leaseTtlSeconds(ttlSeconds);
+  const maxAttemptsLimit = maxAttemptsValue(maxAttempts);
   let lease = null;
   let item = null;
 
@@ -278,9 +302,19 @@ export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds 
             AND l.status = 'active'
             AND l.expires_at > ?
         )
+        AND (
+          ? IS NULL
+          OR (
+            SELECT COUNT(*)
+            FROM runner_attempts ra
+            WHERE ra.queue_item_id = qi.id
+              AND ra.status = 'failed'
+              AND COALESCE(ra.md_fingerprint, qi.md_fingerprint) = qi.md_fingerprint
+          ) < ?
+        )
       ORDER BY qi.priority DESC, qi.id ASC
       LIMIT 1
-    `).get(now) || null;
+    `).get(now, maxAttemptsLimit, maxAttemptsLimit) || null;
     if (item) {
       const priorAttempt = db.prepare(`
         SELECT COALESCE(MAX(attempt), 0) AS max_attempt
@@ -326,6 +360,7 @@ export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds 
     item,
     lease,
     claimed: Boolean(lease),
+    maxAttempts: maxAttemptsLimit,
   };
 }
 
@@ -386,12 +421,16 @@ export function insertRunnerAttempt(workDir, attempt) {
   const { projectDir, parsed } = parseSingleProject(workDir);
   const { db, dbPath } = openQueueDb(projectDir);
   const now = isoNow();
+  const queueItem = attempt.queueItemId
+    ? db.prepare('SELECT md_fingerprint FROM queue_items WHERE id = ?').get(attempt.queueItemId)
+    : null;
   const row = {
     id: attempt.id || `attempt-${randomUUID()}`,
     queue_item_id: attempt.queueItemId,
     lease_id: attempt.leaseId || null,
     runner_id: attempt.runnerId || 'taskops-runner',
     runtime_adapter: attempt.runtimeAdapter || 'dry-run',
+    md_fingerprint: attempt.mdFingerprint || queueItem?.md_fingerprint || null,
     status: attempt.status || 'running',
     started_at: attempt.startedAt || now,
     finished_at: attempt.finishedAt || null,
@@ -401,15 +440,16 @@ export function insertRunnerAttempt(workDir, attempt) {
   };
   db.prepare(`
     INSERT INTO runner_attempts (
-      id, queue_item_id, lease_id, runner_id, runtime_adapter, status,
-      started_at, finished_at, run_id, stop_reason, error_summary
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint,
+      status, started_at, finished_at, run_id, stop_reason, error_summary
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     row.id,
     row.queue_item_id,
     row.lease_id,
     row.runner_id,
     row.runtime_adapter,
+    row.md_fingerprint,
     row.status,
     row.started_at,
     row.finished_at,
@@ -425,7 +465,7 @@ export function updateRunnerAttempt(workDir, attemptId, patch = {}) {
   const { projectDir, parsed } = parseSingleProject(workDir);
   const { db, dbPath } = openQueueDb(projectDir);
   const current = db.prepare(`
-    SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, status,
+    SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint, status,
            started_at, finished_at, run_id, stop_reason, error_summary
     FROM runner_attempts
     WHERE id = ?
@@ -447,7 +487,7 @@ export function updateRunnerAttempt(workDir, attemptId, patch = {}) {
     WHERE id = ?
   `).run(row.status, row.finished_at, row.run_id, row.stop_reason, row.error_summary, attemptId);
   const updated = db.prepare(`
-    SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, status,
+    SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint, status,
            started_at, finished_at, run_id, stop_reason, error_summary
     FROM runner_attempts
     WHERE id = ?

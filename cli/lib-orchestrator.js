@@ -28,6 +28,13 @@ function optionalPositiveInteger(value, name) {
   return Math.floor(n);
 }
 
+function optionalNonNegativeInteger(value, name) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid ${name}: ${value}`);
+  return Math.floor(n);
+}
+
 function optionalPositiveNumber(value, name) {
   if (value == null || value === '') return null;
   const n = Number(value);
@@ -115,9 +122,10 @@ export function runQueueOnce(workDir, options = {}) {
   const reportSink = normalizeReportSink(options.reportSink || options.report);
   const runnerId = options.runnerId || `taskops-runner-${process.pid}`;
   const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
+  const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts');
   const waveId = options.waveId || `wave-${randomUUID()}`;
 
-  const claim = claimQueueItem(workDir, { runnerId, ttlSeconds });
+  const claim = claimQueueItem(workDir, { runnerId, ttlSeconds, maxAttempts });
   if (!claim.claimed || !claim.item || !claim.lease) {
     return {
       projectDir: claim.projectDir,
@@ -126,6 +134,7 @@ export function runQueueOnce(workDir, options = {}) {
       claimed: false,
       stopReason: 'no_claimable_queue_item',
       waveId,
+      maxAttempts,
     };
   }
 
@@ -211,6 +220,7 @@ export function runQueueOnce(workDir, options = {}) {
     lease,
     attemptId,
     runtimeAdapter,
+    maxAttempts,
     releaseStatus,
     runResult,
     errorSummary,
@@ -223,6 +233,7 @@ export function runQueueWatch(workDir, options = {}) {
   const reportSink = normalizeReportSink(options.reportSink || options.report);
   const runnerId = options.runnerId || `taskops-runner-${process.pid}`;
   const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
+  const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts') ?? 3;
   const pollIntervalMs = optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms') ?? 5000;
   const maxWaves = optionalPositiveInteger(options.maxWaves, 'max waves');
   const maxIdleCycles = optionalPositiveInteger(options.maxIdleCycles, 'max idle cycles');
@@ -261,6 +272,7 @@ export function runQueueWatch(workDir, options = {}) {
       runId: options.runId || null,
       timeout: options.timeout || null,
       actor: options.actor || runnerId,
+      maxAttempts,
       waveId,
     });
 
@@ -331,6 +343,7 @@ export function runQueueWatch(workDir, options = {}) {
     idleCycles,
     maxWaves,
     maxIdleCycles,
+    maxAttempts,
     idleExitAfterSeconds,
     pollIntervalMs,
     stopOnFailure,
