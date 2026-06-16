@@ -1,0 +1,314 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { runQueueWatch } from './lib-orchestrator.js';
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function sleepMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.floor(ms));
+}
+
+function optionalPositiveInteger(value, name, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid ${name}: ${value}`);
+  return Math.floor(n);
+}
+
+function optionalPositiveNumber(value, name, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid ${name}: ${value}`);
+  return n;
+}
+
+function normalizeBool(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new Error(`Invalid boolean value: ${value}`);
+}
+
+function sanitizeName(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  const cleaned = raw.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned || 'default';
+}
+
+function defaultDaemonName(workDir) {
+  const base = basename(resolve(workDir)).toLowerCase();
+  return sanitizeName(base || 'work');
+}
+
+function systemdQuoteArg(value) {
+  const raw = String(value);
+  if (/^[A-Za-z0-9_/:=.,+@%~ -]+$/.test(raw) && !raw.includes(' ')) return raw;
+  return `"${raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function keyValueLine(key, value) {
+  return `${key}=${String(value).replace(/\n/g, ' ')}`;
+}
+
+export function normalizeDaemonOptions(workDir, options = {}) {
+  const name = sanitizeName(options.name || options.daemonName || defaultDaemonName(workDir));
+  const runnerId = options.runnerId || `taskopsd-${name}`;
+  return {
+    workDir: resolve(workDir),
+    name,
+    runnerId,
+    runtimeAdapter: options.runtimeAdapter || options.runtime || 'openclaw-cli',
+    ttlSeconds: optionalPositiveInteger(options.ttlSeconds, 'ttl seconds', 300),
+    maxAttempts: optionalPositiveInteger(options.maxAttempts, 'max attempts', 3),
+    timeout: options.timeout == null || options.timeout === '' ? 300 : Number(options.timeout),
+    reportSink: options.reportSink || 'ledger',
+    masterSessionKey: options.masterSessionKey || null,
+    agent: options.agent || null,
+    pollIntervalMs: optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms', 5000),
+    daemonPollIntervalMs: optionalPositiveInteger(options.daemonPollIntervalMs, 'daemon poll interval ms', 30000),
+    failureBackoffMs: optionalPositiveInteger(options.failureBackoffMs, 'failure backoff ms', 60000),
+    maxDaemonCycles: optionalPositiveInteger(options.maxDaemonCycles, 'max daemon cycles'),
+    maxWaves: optionalPositiveInteger(options.maxWaves, 'max waves'),
+    maxIdleCycles: optionalPositiveInteger(options.maxIdleCycles, 'max idle cycles'),
+    idleExitAfterSeconds: optionalPositiveNumber(options.idleExitAfterSeconds, 'idle exit after seconds'),
+    until: options.until || null,
+    continueOnFailure: normalizeBool(options.continueOnFailure, false),
+    cliPath: options.cliPath || process.argv[1],
+    nodePath: options.nodePath || process.execPath,
+    pathEnv: options.pathEnv || process.env.PATH || '',
+  };
+}
+
+export function serviceName(name) {
+  return `taskopsd-${sanitizeName(name)}.service`;
+}
+
+export function userUnitDir() {
+  return join(homedir(), '.config', 'systemd', 'user');
+}
+
+export function unitPathForName(name) {
+  return join(userUnitDir(), serviceName(name));
+}
+
+function runnerArgs(opts) {
+  const args = [
+    opts.nodePath,
+    opts.cliPath,
+    'daemon',
+    'run',
+    opts.workDir,
+    '--name',
+    opts.name,
+    '--runtime',
+    opts.runtimeAdapter,
+    '--runner-id',
+    opts.runnerId,
+    '--ttl-seconds',
+    String(opts.ttlSeconds),
+    '--max-attempts',
+    String(opts.maxAttempts),
+    '--timeout',
+    String(opts.timeout),
+    '--report-sink',
+    opts.reportSink,
+    '--poll-interval-ms',
+    String(opts.pollIntervalMs),
+    '--daemon-poll-interval-ms',
+    String(opts.daemonPollIntervalMs),
+    '--failure-backoff-ms',
+    String(opts.failureBackoffMs),
+  ];
+  if (opts.masterSessionKey) args.push('--master-session-key', opts.masterSessionKey);
+  if (opts.agent) args.push('--agent', opts.agent);
+  if (opts.maxDaemonCycles != null) args.push('--max-daemon-cycles', String(opts.maxDaemonCycles));
+  if (opts.maxWaves != null) args.push('--max-waves', String(opts.maxWaves));
+  if (opts.maxIdleCycles != null) args.push('--max-idle-cycles', String(opts.maxIdleCycles));
+  if (opts.idleExitAfterSeconds != null) args.push('--idle-exit-after-seconds', String(opts.idleExitAfterSeconds));
+  if (opts.until) args.push('--until', opts.until);
+  if (opts.continueOnFailure) args.push('--continue-on-failure');
+  return args;
+}
+
+export function renderSystemdUnit(workDir, options = {}) {
+  const opts = normalizeDaemonOptions(workDir, options);
+  const execStart = runnerArgs(opts).map(systemdQuoteArg).join(' ');
+  const unit = [
+    '[Unit]',
+    `Description=TaskOps daemon ${opts.name}`,
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=simple',
+    keyValueLine('WorkingDirectory', opts.workDir),
+    keyValueLine('Environment', `PATH=${opts.pathEnv}`),
+    keyValueLine('ExecStart', execStart),
+    'Restart=always',
+    'RestartSec=10',
+    'KillSignal=SIGTERM',
+    'TimeoutStopSec=30',
+    '',
+    '[Install]',
+    'WantedBy=default.target',
+    '',
+  ].join('\n');
+  return {
+    name: opts.name,
+    serviceName: serviceName(opts.name),
+    unitPath: unitPathForName(opts.name),
+    unit,
+    options: opts,
+  };
+}
+
+function systemctl(args, { allowFailure = false } = {}) {
+  const result = spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8' });
+  if (result.status !== 0 && !allowFailure) {
+    const stderr = (result.stderr || '').trim();
+    const stdout = (result.stdout || '').trim();
+    throw new Error(stderr || stdout || `systemctl --user ${args.join(' ')} failed with status ${result.status}`);
+  }
+  return {
+    status: result.status,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+    ok: result.status === 0,
+  };
+}
+
+export function installDaemon(workDir, options = {}) {
+  const rendered = renderSystemdUnit(workDir, options);
+  if (options.dryRun) return { ...rendered, installed: false, dryRun: true };
+  mkdirSync(dirname(rendered.unitPath), { recursive: true });
+  writeFileSync(rendered.unitPath, rendered.unit, 'utf8');
+  const reload = systemctl(['daemon-reload']);
+  let enable = null;
+  let start = null;
+  if (options.enable !== false) enable = systemctl(['enable', rendered.serviceName]);
+  if (options.start === true) start = systemctl(['start', rendered.serviceName]);
+  return {
+    ...rendered,
+    installed: true,
+    dryRun: false,
+    systemd: { reload, enable, start },
+  };
+}
+
+export function uninstallDaemon(name, options = {}) {
+  const safeName = sanitizeName(name);
+  const unitPath = unitPathForName(safeName);
+  const svc = serviceName(safeName);
+  if (options.dryRun) return { name: safeName, serviceName: svc, unitPath, removed: false, dryRun: true };
+  const stop = systemctl(['stop', svc], { allowFailure: true });
+  const disable = systemctl(['disable', svc], { allowFailure: true });
+  if (existsSync(unitPath)) rmSync(unitPath, { force: true });
+  const reload = systemctl(['daemon-reload'], { allowFailure: true });
+  const resetFailed = systemctl(['reset-failed', svc], { allowFailure: true });
+  return { name: safeName, serviceName: svc, unitPath, removed: true, systemd: { stop, disable, reload, resetFailed }, dryRun: Boolean(options.dryRun) };
+}
+
+export function controlDaemon(name, action) {
+  const safeName = sanitizeName(name);
+  const svc = serviceName(safeName);
+  const allowed = new Set(['start', 'stop', 'restart', 'status']);
+  if (!allowed.has(action)) throw new Error(`Invalid daemon action '${action}'`);
+  const args = action === 'status'
+    ? ['status', '--no-pager', svc]
+    : [action, svc];
+  const result = systemctl(args, { allowFailure: action === 'status' });
+  return { name: safeName, serviceName: svc, action, ...result };
+}
+
+export function readDaemonUnit(name) {
+  const safeName = sanitizeName(name);
+  const unitPath = unitPathForName(safeName);
+  return {
+    name: safeName,
+    serviceName: serviceName(safeName),
+    unitPath,
+    exists: existsSync(unitPath),
+    unit: existsSync(unitPath) ? readFileSync(unitPath, 'utf8') : null,
+  };
+}
+
+export function daemonLogs(name, options = {}) {
+  const safeName = sanitizeName(name);
+  const lines = optionalPositiveInteger(options.lines, 'lines', 100);
+  const svc = serviceName(safeName);
+  const result = spawnSync('journalctl', ['--user', '-u', svc, '-n', String(lines), '--no-pager'], { encoding: 'utf8' });
+  return { name: safeName, serviceName: svc, status: result.status, ok: result.status === 0, stdout: result.stdout || '', stderr: result.stderr || '' };
+}
+
+export function runDaemon(workDir, options = {}) {
+  const opts = normalizeDaemonOptions(workDir, options);
+  const cycles = [];
+  let stopRequested = false;
+  const stop = () => {
+    stopRequested = true;
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  let cycle = 0;
+  while (!stopRequested) {
+    cycle += 1;
+    const watchId = `${opts.runnerId}-cycle-${cycle}`;
+    const startedAt = isoNow();
+    let result = null;
+    let error = null;
+    try {
+      result = runQueueWatch(opts.workDir, {
+        runtimeAdapter: opts.runtimeAdapter,
+        runnerId: opts.runnerId,
+        ttlSeconds: opts.ttlSeconds,
+        maxAttempts: opts.maxAttempts,
+        timeout: opts.timeout,
+        reportSink: opts.reportSink,
+        masterSessionKey: opts.masterSessionKey,
+        agent: opts.agent,
+        pollIntervalMs: opts.pollIntervalMs,
+        maxWaves: opts.maxWaves,
+        maxIdleCycles: opts.maxIdleCycles,
+        idleExitAfterSeconds: opts.idleExitAfterSeconds,
+        until: opts.until,
+        watchId,
+        stopOnFailure: !opts.continueOnFailure,
+      });
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    const stoppedAt = isoNow();
+    const entry = {
+      cycle,
+      watchId,
+      startedAt,
+      stoppedAt,
+      stopReason: result?.stopReason || 'daemon_error',
+      stopDetail: result?.stopDetail || error?.message || null,
+      claimedWaves: result?.claimedWaves || 0,
+      idleCycles: result?.idleCycles || 0,
+    };
+    cycles.push(entry);
+    if (options.onCycle) options.onCycle(entry, result);
+    if (opts.maxDaemonCycles != null && cycle >= opts.maxDaemonCycles) break;
+    const delay = ['wave_failed', 'daemon_error'].includes(entry.stopReason) ? opts.failureBackoffMs : opts.daemonPollIntervalMs;
+    sleepMs(delay);
+  }
+
+  return {
+    name: opts.name,
+    runnerId: opts.runnerId,
+    workDir: opts.workDir,
+    stoppedAt: isoNow(),
+    stopRequested,
+    cycles,
+  };
+}

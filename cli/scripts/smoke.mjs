@@ -24,6 +24,7 @@ const watchWorkDir = join(tempRoot, 'watch-work');
 const retryWorkDir = join(tempRoot, 'retry-work');
 const staleRecoveryWorkDir = join(tempRoot, 'stale-recovery-work');
 const reportSinkWorkDir = join(tempRoot, 'report-sink-work');
+const daemonWorkDir = join(tempRoot, 'daemon-work');
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -625,6 +626,101 @@ if (reportSinkReportsOut.reports.length !== 1 || reportSinkReportsOut.reports[0]
   process.exit(1);
 }
 run(['validate', reportSinkWorkDir]);
+
+run(['init', daemonWorkDir, '--id', 'daemon-work', '--title', 'Daemon Work', '--objective', 'Smoke test the taskops daemon supervisor surface', '--language', 'en']);
+const daemonSpecPath = join(tempRoot, 'daemon-spec.json');
+writeFileSync(daemonSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Daemon-ready decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-daemon',
+      title: 'Daemon task',
+      objective: 'Be executed by the foreground daemon loop.',
+      responsibility: 'Prove taskops daemon run supervises runner watch cycles without systemd.',
+      completionCriteria: 'Task closes and the daemon reports one all_closed cycle.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready for dry-run daemon execution.',
+      understandingLevel: 'known',
+      order: 1
+    }
+  ]
+}, null, 2));
+run(['decompose', daemonWorkDir, '--task-group-id', 'tg-root', '--spec', daemonSpecPath]);
+const daemonSnapshotPath = join(daemonWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(daemonSnapshotPath, readFileSync(daemonSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const daemonUnitOut = JSON.parse(run([
+  'daemon', 'unit', daemonWorkDir,
+  '--name', 'daemon-smoke',
+  '--runtime', 'dry-run',
+  '--runner-id', 'daemon-smoke-runner',
+  '--timeout', '10',
+  '--max-attempts', '2',
+  '--report-sink', 'ledger',
+  '--max-daemon-cycles', '1',
+  '--json'
+]).stdout);
+if (daemonUnitOut.serviceName !== 'taskopsd-daemon-smoke.service' || !daemonUnitOut.unit.includes('ExecStart=') || !daemonUnitOut.unit.includes(' daemon run ') || !daemonUnitOut.unit.includes('--runtime dry-run') || !daemonUnitOut.unit.includes('Restart=always')) {
+  console.error('daemon unit should render a user-systemd service around taskops daemon run');
+  console.error(daemonUnitOut);
+  process.exit(1);
+}
+const daemonInstallDryRun = JSON.parse(run([
+  'daemon', 'install', daemonWorkDir,
+  '--name', 'daemon-smoke',
+  '--runtime', 'dry-run',
+  '--dry-run',
+  '--json'
+]).stdout);
+if (daemonInstallDryRun.installed !== false || daemonInstallDryRun.dryRun !== true || !daemonInstallDryRun.unit.includes('Restart=always')) {
+  console.error('daemon install --dry-run should not touch systemd but should return the rendered unit');
+  console.error(daemonInstallDryRun);
+  process.exit(1);
+}
+const daemonRunOut = JSON.parse(run([
+  'daemon', 'run', daemonWorkDir,
+  '--name', 'daemon-smoke',
+  '--runtime', 'dry-run',
+  '--runner-id', 'daemon-smoke-runner',
+  '--report-sink', 'ledger',
+  '--daemon-poll-interval-ms', '1',
+  '--max-daemon-cycles', '1',
+  '--json'
+]).stdout);
+if (daemonRunOut.cycles.length !== 1 || daemonRunOut.cycles[0].stopReason !== 'all_closed' || daemonRunOut.cycles[0].claimedWaves !== 1) {
+  console.error('daemon run should execute a foreground supervise cycle and stop at max-daemon-cycles in smoke');
+  console.error(daemonRunOut);
+  process.exit(1);
+}
+const daemonTaskAfter = readFileSync(join(daemonWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-daemon.md'), 'utf8');
+if (!daemonTaskAfter.includes('status: done') || !daemonTaskAfter.includes('runRefs:')) {
+  console.error('daemon run should close the daemon smoke task through the runner watch cycle');
+  console.error(daemonTaskAfter);
+  process.exit(1);
+}
+const daemonReportsOut = JSON.parse(run(['queue', 'reports', daemonWorkDir, '--json']).stdout);
+if (daemonReportsOut.reports.length !== 1 || daemonReportsOut.reports[0].status !== 'delivered') {
+  console.error('daemon run should preserve runner progress reporting through the ledger sink');
+  console.error(daemonReportsOut);
+  process.exit(1);
+}
+const daemonErrorOut = JSON.parse(run([
+  'daemon', 'run', join(tempRoot, 'missing-daemon-work'),
+  '--name', 'daemon-error-smoke',
+  '--runtime', 'dry-run',
+  '--max-daemon-cycles', '1',
+  '--failure-backoff-ms', '1',
+  '--json'
+]).stdout);
+if (daemonErrorOut.cycles.length !== 1 || daemonErrorOut.cycles[0].stopReason !== 'daemon_error' || !daemonErrorOut.cycles[0].stopDetail) {
+  console.error('daemon run should capture watch-level exceptions as daemon_error cycles instead of crashing');
+  console.error(daemonErrorOut);
+  process.exit(1);
+}
+run(['validate', daemonWorkDir]);
 
 if (sanitizeFmScalar('one\nline\r\nthree\ttab').includes('\n')) {
   console.error('sanitizeFmScalar must strip newlines and tabs');

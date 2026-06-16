@@ -41,6 +41,10 @@ Usage:
   taskops queue reports <work-dir> [--json]
   taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
   taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
+  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
+  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--json]
+  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--start] [--dry-run] [--json]
+  taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
   taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -424,6 +428,129 @@ try {
       }
     }
     process.exit(result.stopReason === 'wave_failed' ? 1 : 0);
+  }
+
+  if (cmd === 'daemon') {
+    const {
+      controlDaemon,
+      daemonLogs,
+      installDaemon,
+      readDaemonUnit,
+      renderSystemdUnit,
+      runDaemon,
+      uninstallDaemon,
+    } = await import('../lib-daemon.js');
+    const subcmd = positional[1];
+    if (!subcmd) fail('Missing daemon subcommand: run, unit, install, start, stop, restart, status, logs, or uninstall');
+    const daemonOptions = {
+      name: flags.name && flags.name !== true ? String(flags.name) : null,
+      runtimeAdapter: flags.runtime && flags.runtime !== true ? String(flags.runtime) : null,
+      runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
+      ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? flags['ttl-seconds'] : null,
+      maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
+      timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
+      reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
+      masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
+      agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+      pollIntervalMs: flags['poll-interval-ms'] != null && flags['poll-interval-ms'] !== true ? flags['poll-interval-ms'] : null,
+      daemonPollIntervalMs: flags['daemon-poll-interval-ms'] != null && flags['daemon-poll-interval-ms'] !== true ? flags['daemon-poll-interval-ms'] : null,
+      failureBackoffMs: flags['failure-backoff-ms'] != null && flags['failure-backoff-ms'] !== true ? flags['failure-backoff-ms'] : null,
+      maxDaemonCycles: flags['max-daemon-cycles'] != null && flags['max-daemon-cycles'] !== true ? flags['max-daemon-cycles'] : null,
+      maxWaves: flags['max-waves'] != null && flags['max-waves'] !== true ? flags['max-waves'] : null,
+      maxIdleCycles: flags['max-idle-cycles'] != null && flags['max-idle-cycles'] !== true ? flags['max-idle-cycles'] : null,
+      idleExitAfterSeconds: flags['idle-exit-after-seconds'] != null && flags['idle-exit-after-seconds'] !== true ? flags['idle-exit-after-seconds'] : null,
+      until: flags.until && flags.until !== true ? String(flags.until) : null,
+      continueOnFailure: flags['continue-on-failure'] === true,
+    };
+
+    if (subcmd === 'run') {
+      const workDir = positional[2];
+      if (!workDir) fail('Missing daemon run work-dir');
+      const result = runDaemon(workDir, {
+        ...daemonOptions,
+        onCycle: flags.json ? null : (entry) => {
+          console.log(`cycle=${entry.cycle} watchId=${entry.watchId} stopReason=${entry.stopReason} waves=${entry.claimedWaves}`);
+          if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
+        },
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`daemon=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
+      process.exit(0);
+    }
+
+    if (subcmd === 'unit') {
+      const workDir = positional[2];
+      if (!workDir) fail('Missing daemon unit work-dir');
+      const result = renderSystemdUnit(workDir, daemonOptions);
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else process.stdout.write(result.unit);
+      process.exit(0);
+    }
+
+    if (subcmd === 'install') {
+      const workDir = positional[2];
+      if (!workDir) fail('Missing daemon install work-dir');
+      const result = installDaemon(workDir, {
+        ...daemonOptions,
+        start: flags.start === true,
+        dryRun: flags['dry-run'] === true,
+        enable: flags.enable === false || flags.enable === 'false' ? false : true,
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`${result.dryRun ? 'would install' : 'installed'} ${result.serviceName}`);
+        console.log(result.unitPath);
+      }
+      process.exit(0);
+    }
+
+    if (['start', 'stop', 'restart', 'status'].includes(subcmd)) {
+      const name = positional[2];
+      if (!name) fail(`Missing daemon ${subcmd} name`);
+      const result = controlDaemon(name, subcmd);
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        process.stdout.write(result.stdout || '');
+        process.stderr.write(result.stderr || '');
+        if (!result.stdout && !result.stderr) console.log(`${subcmd} ${result.serviceName}: ${result.ok ? 'ok' : 'failed'}`);
+      }
+      process.exit(subcmd === 'status' ? 0 : (result.ok ? 0 : 1));
+    }
+
+    if (subcmd === 'logs') {
+      const name = positional[2];
+      if (!name) fail('Missing daemon logs name');
+      const result = daemonLogs(name, {
+        lines: flags.lines && flags.lines !== true ? flags.lines : 100,
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        process.stdout.write(result.stdout || '');
+        process.stderr.write(result.stderr || '');
+      }
+      process.exit(result.ok ? 0 : 1);
+    }
+
+    if (subcmd === 'uninstall') {
+      const name = positional[2];
+      if (!name) fail('Missing daemon uninstall name');
+      const result = uninstallDaemon(name, { dryRun: flags['dry-run'] === true });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`${result.dryRun ? 'would uninstall' : 'uninstalled'} ${result.serviceName}`);
+      process.exit(0);
+    }
+
+    if (subcmd === 'read-unit') {
+      const name = positional[2];
+      if (!name) fail('Missing daemon read-unit name');
+      const result = readDaemonUnit(name);
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else if (result.exists) process.stdout.write(result.unit);
+      else fail(`No unit installed at ${result.unitPath}`, 1);
+      process.exit(0);
+    }
+
+    fail(`Unknown daemon subcommand: ${subcmd}`);
   }
 
   if (cmd === 'restart') {

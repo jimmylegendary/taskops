@@ -101,6 +101,10 @@ taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--
 taskops queue reports <work-dir> [--json]
 taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
 taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
+taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--json]
+taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--start] [--dry-run] [--json]
+taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
@@ -190,6 +194,39 @@ taskops runner watch ./my-work \
 ```
 
 Watch mode stops on the first failed wave by default. Use `--continue-on-failure` only when `--max-attempts` or another supervisor prevents retry loops. SQLite does not call OpenClaw by itself; the watch process is the always-on execution subject, and `.taskops/queue.sqlite` is the durable queue/lease/report ledger it watches.
+
+## TaskOps daemon
+
+`taskops daemon` is the stable always-on wrapper for unattended local work. It separates two concerns:
+
+- `taskops runner watch` is the foreground queue-draining primitive.
+- `taskops daemon run` is the outer supervise loop that repeatedly runs watch cycles, preserves their stop reasons, sleeps between cycles, and is safe to put behind a process supervisor.
+
+For local Linux workstations, install a user-systemd service:
+
+```bash
+taskops daemon install ./my-work \
+  --name my-work \
+  --runtime openclaw-cli \
+  --runner-id taskopsd-my-work \
+  --timeout 300 \
+  --max-attempts 3 \
+  --report-sink openclaw-chat-inject \
+  --master-session-key agent:main:telegram:direct:7558560166 \
+  --start
+```
+
+Then inspect or control it:
+
+```bash
+taskops daemon status my-work
+taskops daemon logs my-work
+taskops daemon restart my-work
+taskops daemon stop my-work
+taskops daemon uninstall my-work
+```
+
+Use `taskops daemon unit ./my-work --name my-work` or `taskops daemon install ./my-work --dry-run --json` to review the exact service before installing it. The generated unit uses `Restart=always` around `taskops daemon run`, not around `taskops runner watch`. That matters because `runner watch` exits normally with `all_closed`; the daemon layer is what decides when to sleep and wait for future work.
 
 Adapter boundary:
 
