@@ -86,7 +86,7 @@ taskops classify-runnable ./oauth-refactor task-auth-middleware --json
 taskops run ./oauth-refactor --executor dry-run --max-steps 3 --json
 
 # 5. Or let a local queue-backed runner keep draining work
-taskops runner watch ./oauth-refactor --runtime openclaw-cli --runner-id taskopsd-main --max-attempts 3
+taskops runner watch ./oauth-refactor --runtime openclaw-cli --runner-id taskopsd-main --max-attempts 3 --timeout 300
 
 # 6. Review execution evidence
 taskops summary ./oauth-refactor
@@ -94,7 +94,7 @@ taskops summary ./oauth-refactor
 
 `dry-run` is for smoke tests and graph rehearsals. For real work, use `--executor openclaw-agent --agent <agent-id>`.
 
-For unattended local work, `taskops runner watch` is the always-on process. SQLite remains a queue/lease/report projection; the watch runner is what stays alive, claims queue items, invokes the configured runtime adapter, and records progress. Watch mode defaults to a three-failure retry cap per current task fingerprint so an unchanged failing task does not loop forever.
+For unattended local work, `taskops runner watch` is the always-on process. SQLite remains a queue/lease/report projection; the watch runner is what stays alive, claims queue items, invokes the configured runtime adapter, and records progress. Watch mode defaults to a three-failure retry cap per current task fingerprint so an unchanged failing task does not loop forever. Use `--timeout <seconds>` with `--runtime openclaw-cli` so long worker waves fail inside TaskOps and release their lease; if the runner process is externally killed, the next queue sync/list/claim operation marks the expired lease stale and finalizes the linked running attempt as failed.
 
 ## Killer use case: large AI-assisted refactors
 

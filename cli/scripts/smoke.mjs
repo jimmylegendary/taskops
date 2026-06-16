@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import { insertRunnerAttempt } from '../lib-queue.js';
 import { sanitizeFmScalar } from '../lib-runner.js';
 import { parseFrontmatterText } from '../lib-taskops.js';
 
@@ -20,6 +22,7 @@ const runnerWorkDir = join(tempRoot, 'runner-work');
 const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
 const watchWorkDir = join(tempRoot, 'watch-work');
 const retryWorkDir = join(tempRoot, 'retry-work');
+const staleRecoveryWorkDir = join(tempRoot, 'stale-recovery-work');
 const reportSinkWorkDir = join(tempRoot, 'report-sink-work');
 
 function run(args, expected = 0) {
@@ -506,6 +509,76 @@ if (!retryClaimReset.claimed || retryClaimReset.item.id !== 'tgv-root-v2:task-re
 }
 run(['queue', 'release', retryWorkDir, retryClaimReset.lease.id, '--status', 'cancelled', '--json']);
 run(['validate', retryWorkDir]);
+
+run(['init', staleRecoveryWorkDir, '--id', 'stale-recovery-work', '--title', 'Stale Recovery Work', '--objective', 'Smoke test stale lease recovery', '--language', 'en']);
+const staleRecoverySpecPath = join(tempRoot, 'stale-recovery-spec.json');
+writeFileSync(staleRecoverySpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Stale lease recovery decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-stale',
+      title: 'Stale lease task',
+      objective: 'Remain claimable only after the stale lease and running attempt are recovered honestly.',
+      responsibility: 'Prove an externally killed runner leaves recoverable queue evidence.',
+      completionCriteria: 'Expired active lease becomes stale, linked running attempt becomes failed, and max-attempts blocks reclaim.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready for queue stale recovery smoke.',
+      understandingLevel: 'known',
+      order: 1
+    }
+  ]
+}, null, 2));
+run(['decompose', staleRecoveryWorkDir, '--task-group-id', 'tg-root', '--spec', staleRecoverySpecPath]);
+const staleRecoverySnapshotPath = join(staleRecoveryWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(staleRecoverySnapshotPath, readFileSync(staleRecoverySnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const staleClaim = JSON.parse(run(['queue', 'claim', staleRecoveryWorkDir, '--runner-id', 'stale-smoke', '--ttl-seconds', '300', '--json']).stdout);
+if (!staleClaim.claimed || staleClaim.item.id !== 'tgv-root-v2:task-stale') {
+  console.error('stale recovery smoke should claim the single runnable task');
+  console.error(staleClaim);
+  process.exit(1);
+}
+insertRunnerAttempt(staleRecoveryWorkDir, {
+  id: 'attempt-stale-smoke',
+  queueItemId: staleClaim.item.id,
+  leaseId: staleClaim.lease.id,
+  runnerId: 'stale-smoke',
+  runtimeAdapter: 'openclaw-cli',
+  status: 'running',
+  startedAt: new Date(Date.now() - 60_000).toISOString(),
+});
+const staleDb = new DatabaseSync(staleClaim.dbPath);
+staleDb.prepare(`
+  UPDATE leases
+  SET expires_at = ?
+  WHERE id = ?
+`).run(new Date(Date.now() - 10_000).toISOString(), staleClaim.lease.id);
+staleDb.close();
+const staleListOut = JSON.parse(run(['queue', 'list', staleRecoveryWorkDir, '--json']).stdout);
+if (staleListOut.rows[0].failed_attempts !== 1) {
+  console.error('queue list should recover stale active leases and expose the failed attempt count');
+  console.error(staleListOut);
+  process.exit(1);
+}
+const staleDbAfter = new DatabaseSync(staleClaim.dbPath);
+const staleLeaseRow = staleDbAfter.prepare('SELECT status FROM leases WHERE id = ?').get(staleClaim.lease.id);
+const staleAttemptRow = staleDbAfter.prepare('SELECT status, stop_reason, error_summary FROM runner_attempts WHERE id = ?').get('attempt-stale-smoke');
+staleDbAfter.close();
+if (staleLeaseRow?.status !== 'stale' || staleAttemptRow?.status !== 'failed' || staleAttemptRow?.stop_reason !== 'stale_lease') {
+  console.error('stale recovery should mark lease stale and linked running attempt failed');
+  console.error({ staleLeaseRow, staleAttemptRow });
+  process.exit(1);
+}
+const staleClaimBlocked = JSON.parse(run(['queue', 'claim', staleRecoveryWorkDir, '--runner-id', 'stale-smoke-again', '--max-attempts', '1', '--json']).stdout);
+if (staleClaimBlocked.claimed !== false) {
+  console.error('queue claim should respect the recovered failed attempt at max-attempts=1');
+  console.error(staleClaimBlocked);
+  process.exit(1);
+}
+run(['validate', staleRecoveryWorkDir]);
 
 run(['init', reportSinkWorkDir, '--id', 'report-sink-work', '--title', 'Report Sink Work', '--objective', 'Smoke test report sink failure ledger', '--language', 'en']);
 const reportSinkSpecPath = join(tempRoot, 'report-sink-spec.json');

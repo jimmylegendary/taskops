@@ -81,8 +81,8 @@ taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-att
 taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
-taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 ```
 
@@ -129,6 +129,8 @@ Important boundary:
 - SQLite does not call OpenClaw and does not execute triggers by itself.
 - The watch runner is the process that stays alive and invokes the runtime adapter.
 - `--runtime openclaw-cli` maps to same-host `openclaw agent --json`.
+- Use `--timeout <seconds>` with `--runtime openclaw-cli` for unattended waves. Internal timeout finalizes the attempt as failed and releases the lease; external shell `timeout` should be a supervisor last resort, not the normal control path.
+- If a runner process is externally killed after claiming a lease, the next queue sync/list/claim operation marks the expired lease stale, finalizes any linked running attempt as failed, and lets the fingerprint retry cap decide whether to reclaim it.
 - `--max-attempts <n>` skips queue items whose current markdown fingerprint already has `n` failed runner attempts. Editing the task markdown changes the fingerprint and resets the retry budget.
 - Watch mode stops on the first failed wave by default to avoid retry loops. Use `--continue-on-failure` only with `--max-attempts` or a separate retry/attempt guard.
 - `--report-sink ledger` records progress in `.taskops/queue.sqlite`.

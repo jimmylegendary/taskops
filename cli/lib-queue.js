@@ -176,12 +176,39 @@ function readLease(db, leaseId) {
 }
 
 function expireStaleLeases(db, now) {
-  db.prepare(`
-    UPDATE leases
-    SET status = 'stale'
+  const staleLeases = db.prepare(`
+    SELECT id, queue_item_id, runner_id, expires_at
+    FROM leases
     WHERE status = 'active'
       AND expires_at <= ?
-  `).run(now);
+  `).all(now);
+  if (staleLeases.length === 0) return [];
+
+  const markLeaseStale = db.prepare(`
+    UPDATE leases
+    SET status = 'stale',
+        heartbeat_at = ?
+    WHERE id = ?
+  `);
+  const markAttemptFailed = db.prepare(`
+    UPDATE runner_attempts
+    SET status = 'failed',
+        finished_at = COALESCE(finished_at, ?),
+        stop_reason = COALESCE(stop_reason, 'stale_lease'),
+        error_summary = COALESCE(error_summary, ?)
+    WHERE lease_id = ?
+      AND status = 'running'
+  `);
+
+  for (const lease of staleLeases) {
+    markLeaseStale.run(now, lease.id);
+    markAttemptFailed.run(
+      now,
+      `Lease ${lease.id} expired at ${lease.expires_at} before runner completion.`,
+      lease.id,
+    );
+  }
+  return staleLeases;
 }
 
 function leaseTtlSeconds(value) {
@@ -231,6 +258,7 @@ export function syncQueueProjection(workDir) {
 
   db.exec('BEGIN IMMEDIATE');
   try {
+    expireStaleLeases(db, now);
     for (const row of rows) {
       upsert.run(
         row.id,
@@ -268,6 +296,15 @@ export function syncQueueProjection(workDir) {
 export function listQueueProjection(workDir) {
   const { projectDir, parsed } = parseSingleProject(workDir);
   const { db, dbPath } = openQueueDb(projectDir);
+  const now = isoNow();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    expireStaleLeases(db, now);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   const rows = readQueueRows(db);
   db.close();
   return {
@@ -407,6 +444,18 @@ export function releaseLease(workDir, leaseId, { status = 'done' } = {}) {
       SET status = ?, heartbeat_at = ?
       WHERE id = ?
     `).run(status, now, leaseId);
+    const attemptStatus = status === 'done' ? 'done' : 'failed';
+    const stopReason = status === 'done' ? 'lease_released' : `lease_${status}`;
+    const errorSummary = status === 'done' ? null : `Lease ${leaseId} released with status ${status}.`;
+    db.prepare(`
+      UPDATE runner_attempts
+      SET status = ?,
+          finished_at = COALESCE(finished_at, ?),
+          stop_reason = COALESCE(stop_reason, ?),
+          error_summary = COALESCE(error_summary, ?)
+      WHERE lease_id = ?
+        AND status = 'running'
+    `).run(attemptStatus, now, stopReason, errorSummary, leaseId);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
