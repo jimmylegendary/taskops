@@ -19,12 +19,14 @@ const projectDir = join(tempRoot, 'demo-project');
 const vaultDir = join(tempRoot, 'vault');
 const remoteBareDir = join(tempRoot, 'vault-remote.git');
 const runnerWorkDir = join(tempRoot, 'runner-work');
+const reviewGuardWorkDir = join(tempRoot, 'review-guard-work');
 const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
 const watchWorkDir = join(tempRoot, 'watch-work');
 const retryWorkDir = join(tempRoot, 'retry-work');
 const staleRecoveryWorkDir = join(tempRoot, 'stale-recovery-work');
 const reportSinkWorkDir = join(tempRoot, 'report-sink-work');
 const daemonWorkDir = join(tempRoot, 'daemon-work');
+const daemonBatchWorkDir = join(tempRoot, 'daemon-batch-work');
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -148,6 +150,12 @@ writeFileSync(runnerSpecPath, JSON.stringify({
       objective: 'Validate that the runner can advance one runnable task.',
       responsibility: 'Own the first checkable runner step.',
       completionCriteria: 'Runner marks this task done and writes EoW nodes.',
+      acceptance: {
+        mode: 'informational',
+        expectedOutcome: 'Runner marks this task done, records observed result evidence, reviews it, and writes EoW nodes.',
+        requiredArtifacts: [],
+        requiredChecks: []
+      },
       status: 'pending',
       runReadiness: 'runnable',
       runReadinessReason: 'Objective, responsibility, and completion criteria are present with no unknowns.',
@@ -251,11 +259,39 @@ if (!firstTaskAfter.includes('status: done') || !firstTaskAfter.includes('runRef
 const taskEowPath = join(runnerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-first.md');
 const runEowPath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'eow-run-node-task-first.md');
 const runEdgePath = join(runnerWorkDir, 'runs', 'run-main', 'edges', 'edge-run-node-task-first-to-eow.md');
-for (const p of [taskEowPath, runEowPath, runEdgePath]) {
+const reviewNodePath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'review-run-node-task-first.md');
+const reviewEowPath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'eow-review-run-node-task-first.md');
+const reviewEdgePath = join(runnerWorkDir, 'runs', 'run-main', 'edges', 'edge-run-node-task-first-to-review-run-node-task-first.md');
+for (const p of [taskEowPath, runEowPath, runEdgePath, reviewNodePath, reviewEowPath, reviewEdgePath]) {
   try { readFileSync(p, 'utf8'); } catch {
     console.error(`Expected runner artifact at ${p}`);
     process.exit(1);
   }
+}
+const firstRunNode = parseFrontmatterText(readFileSync(join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'run-node-task-first.md'), 'utf8'));
+if (firstRunNode.result?.executorSummary == null || firstRunNode.result?.observed?.outcomeSummary == null || !Array.isArray(firstRunNode.result?.observed?.evidenceRefs)) {
+  console.error('run node should record executorSummary separately from observed evidence');
+  console.error(firstRunNode);
+  process.exit(1);
+}
+const reviewNode = parseFrontmatterText(readFileSync(reviewNodePath, 'utf8'));
+if (reviewNode.type !== 'review' || reviewNode.reviewReport?.decision !== 'approved' || !reviewNode.reviewReport?.reviewedAcceptanceHash || !reviewNode.reviewReport?.reviewedResultHash) {
+  console.error('review node should contain an approved reviewReport with acceptance/result hashes');
+  console.error(reviewNode);
+  process.exit(1);
+}
+const taskEow = parseFrontmatterText(readFileSync(taskEowPath, 'utf8'));
+const runEow = parseFrontmatterText(readFileSync(runEowPath, 'utf8'));
+if (taskEow.reason !== 'approved_result' || runEow.reason !== 'approved_result' || taskEow.approvedByReviewNodeId !== 'review-run-node-task-first' || runEow.approvedByReviewNodeId !== 'review-run-node-task-first') {
+  console.error('approved execution EoW should reference the approved review node');
+  console.error({ taskEow, runEow });
+  process.exit(1);
+}
+const manualReview = JSON.parse(run(['review', runnerWorkDir, 'task-first', '--json']).stdout);
+if (manualReview.reviewReport.decision !== 'approved' || manualReview.reviewNodeId !== 'review-run-node-task-first') {
+  console.error('taskops review should regenerate the deterministic approved review report');
+  console.error(manualReview);
+  process.exit(1);
 }
 const runnerSummary = run(['summary', runnerWorkDir]).stdout;
 if (!runnerSummary.includes('task task-first [done; runnable]') || !runnerSummary.includes('run-main/run-node-task-first') || !runnerSummary.includes('EoW eow-task-first')) {
@@ -263,6 +299,52 @@ if (!runnerSummary.includes('task task-first [done; runnable]') || !runnerSummar
   console.error(runnerSummary);
   process.exit(1);
 }
+
+run(['init', reviewGuardWorkDir, '--id', 'review-guard-work', '--title', 'Review Guard Work', '--objective', 'Smoke test guarded acceptance review', '--language', 'en']);
+const reviewGuardSpecPath = join(tempRoot, 'review-guard-spec.json');
+writeFileSync(reviewGuardSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Guarded acceptance fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-guarded',
+      title: 'Guarded task',
+      objective: 'Require a check result before closure can be trusted.',
+      responsibility: 'Own guarded acceptance behavior.',
+      completionCriteria: 'The task cannot close as approved without the required check result.',
+      acceptance: {
+        mode: 'guarded',
+        expectedOutcome: 'Observed result and required check prove closure.',
+        requiredArtifacts: [],
+        requiredChecks: [{ command: 'npm test --workspace cli' }]
+      },
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Fixture intentionally requires a check the dry-run executor will not observe.',
+      understandingLevel: 'known',
+      order: 1
+    }
+  ]
+}, null, 2));
+run(['decompose', reviewGuardWorkDir, '--task-group-id', 'tg-root', '--spec', reviewGuardSpecPath]);
+const reviewGuardSnapshotPath = join(reviewGuardWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(reviewGuardSnapshotPath, readFileSync(reviewGuardSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const guardedRun = JSON.parse(run(['run', reviewGuardWorkDir, '--executor', 'dry-run', '--max-steps', '1', '--json'], 1).stdout);
+if (guardedRun.stopReason !== 'task_failed' || guardedRun.actions[0]?.reviewDecision !== 'needs_verification') {
+  console.error('guarded acceptance should block closure when required checks are not observed');
+  console.error(guardedRun);
+  process.exit(1);
+}
+const guardedReview = parseFrontmatterText(readFileSync(join(reviewGuardWorkDir, 'runs', 'run-main', 'nodes', 'review-run-node-task-guarded.md'), 'utf8'));
+const guardedTask = parseFrontmatterText(readFileSync(join(reviewGuardWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-guarded.md'), 'utf8'));
+if (guardedReview.reviewReport?.decision !== 'needs_verification' || !guardedReview.reviewReport?.missingExpected?.includes('required check not observed: npm test --workspace cli') || guardedTask.status !== 'blocked') {
+  console.error('guarded review should record missing check and block the task');
+  console.error({ guardedReview, guardedTask });
+  process.exit(1);
+}
+run(['validate', reviewGuardWorkDir]);
 
 run(['init', orchestratorWorkDir, '--id', 'orchestrator-work', '--title', 'Orchestrator Work', '--objective', 'Smoke test queue-backed orchestration', '--language', 'en']);
 const orchestratorSpecPath = join(tempRoot, 'orchestrator-spec.json');
@@ -399,14 +481,15 @@ const watchOut = JSON.parse(run([
   '--max-waves', '5',
   '--json'
 ]).stdout);
-if (watchOut.stopReason !== 'all_closed' || watchOut.claimedWaves !== 2 || watchOut.waves.length !== 2) {
-  console.error('runner watch should drain two tasks and stop all_closed');
+if (watchOut.stopReason !== 'all_closed' || watchOut.claimedWaves !== 1 || watchOut.claimedItems !== 2 || watchOut.waves.length !== 1 || watchOut.waves[0].claimedCount !== 2) {
+  console.error('runner watch should drain two executable tasks in one batch wave and stop all_closed');
   console.error(watchOut);
   process.exit(1);
 }
-if (watchOut.waves[0].queueItem.id !== 'tgv-root-v2:task-watch-first' || watchOut.waves[1].queueItem.id !== 'tgv-root-v2:task-watch-second') {
-  console.error('runner watch should claim queue items in deterministic order');
-  console.error(watchOut.waves.map((wave) => wave.queueItem.id));
+const watchWorkerQueueItems = watchOut.waves[0].workers.map((worker) => worker.queueItem.id).sort();
+if (watchWorkerQueueItems.join(',') !== 'tgv-root-v2:task-watch-first,tgv-root-v2:task-watch-second') {
+  console.error('runner watch should claim all executable queue items in the batch wave');
+  console.error(watchWorkerQueueItems);
   process.exit(1);
 }
 const watchFirstTask = readFileSync(join(watchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-watch-first.md'), 'utf8');
@@ -418,7 +501,7 @@ if (!watchFirstTask.includes('status: done') || !watchSecondTask.includes('statu
 }
 const watchReportsOut = JSON.parse(run(['queue', 'reports', watchWorkDir, '--json']).stdout);
 if (watchReportsOut.reports.length !== 2 || !watchReportsOut.reports.every((report) => report.master_session_key === 'agent:main:webchat:channel:taskops-watch-smoke')) {
-  console.error('runner watch should write one progress ledger row per claimed wave');
+  console.error('runner watch should write one progress ledger row per claimed worker transaction');
   console.error(watchReportsOut);
   process.exit(1);
 }
@@ -478,12 +561,12 @@ const retryWatchOut = JSON.parse(run([
   '--continue-on-failure',
   '--json'
 ]).stdout);
-if (retryWatchOut.stopReason !== 'idle_cycles' || retryWatchOut.claimedWaves !== 2 || retryWatchOut.waves.length !== 2) {
+if (retryWatchOut.stopReason !== 'idle_cycles' || retryWatchOut.claimedWaves !== 2 || retryWatchOut.claimedItems !== 2 || retryWatchOut.waves.length !== 2) {
   console.error('runner watch should stop reclaiming an unchanged failing item after max-attempts=2');
   console.error(retryWatchOut);
   process.exit(1);
 }
-if (!retryWatchOut.waves.every((wave) => wave.releaseStatus === 'failed' && wave.runResult.stopReason === 'delegation_pending')) {
+if (!retryWatchOut.waves.every((wave) => wave.releaseStatus === 'failed' && wave.workers?.[0]?.runResult?.stopReason === 'delegation_pending')) {
   console.error('retry smoke waves should fail because the delegate is still pending');
   console.error(retryWatchOut.waves);
   process.exit(1);
@@ -659,11 +742,12 @@ const daemonUnitOut = JSON.parse(run([
   '--runner-id', 'daemon-smoke-runner',
   '--timeout', '10',
   '--max-attempts', '2',
+  '--max-parallel', '4',
   '--report-sink', 'ledger',
   '--max-daemon-cycles', '1',
   '--json'
 ]).stdout);
-if (daemonUnitOut.serviceName !== 'taskopsd-daemon-smoke.service' || !daemonUnitOut.unit.includes('ExecStart=') || !daemonUnitOut.unit.includes(' daemon run ') || !daemonUnitOut.unit.includes('--runtime dry-run') || !daemonUnitOut.unit.includes('Restart=always')) {
+if (daemonUnitOut.serviceName !== 'taskopsd-daemon-smoke.service' || !daemonUnitOut.unit.includes('ExecStart=') || !daemonUnitOut.unit.includes(' daemon run ') || !daemonUnitOut.unit.includes('--runtime dry-run') || !daemonUnitOut.unit.includes('--max-parallel 4') || !daemonUnitOut.unit.includes('Restart=always')) {
   console.error('daemon unit should render a user-systemd service around taskops daemon run');
   console.error(daemonUnitOut);
   process.exit(1);
@@ -678,6 +762,36 @@ const daemonInstallDryRun = JSON.parse(run([
 if (daemonInstallDryRun.installed !== false || daemonInstallDryRun.dryRun !== true || !daemonInstallDryRun.unit.includes('Restart=always')) {
   console.error('daemon install --dry-run should not touch systemd but should return the rendered unit');
   console.error(daemonInstallDryRun);
+  process.exit(1);
+}
+const daemonEnableDryRun = JSON.parse(run([
+  'daemon', 'enable', daemonWorkDir,
+  '--name', 'daemon-smoke',
+  '--runtime', 'dry-run',
+  '--dry-run',
+  '--json'
+]).stdout);
+if (daemonEnableDryRun.enabled !== false || daemonEnableDryRun.dryRun !== true || daemonEnableDryRun.startRequested !== true || daemonEnableDryRun.activation.mode !== 'runner-managed' || daemonEnableDryRun.activation.supervisor !== 'user-systemd') {
+  console.error('daemon enable --dry-run should describe runner-managed activation without touching systemd');
+  console.error(daemonEnableDryRun);
+  process.exit(1);
+}
+if (!daemonEnableDryRun.activationPath.endsWith(join('.taskops', 'runner.json')) || daemonEnableDryRun.activation.syncedQueueItems !== null) {
+  console.error('daemon enable --dry-run should report the activation path and avoid queue sync mutation');
+  console.error(daemonEnableDryRun);
+  process.exit(1);
+}
+const daemonEnableNoStartDryRun = JSON.parse(run([
+  'daemon', 'enable', daemonWorkDir,
+  '--name', 'daemon-smoke',
+  '--runtime', 'dry-run',
+  '--no-start',
+  '--dry-run',
+  '--json'
+]).stdout);
+if (daemonEnableNoStartDryRun.startRequested !== false || daemonEnableNoStartDryRun.activation.started !== false) {
+  console.error('daemon enable --no-start should install activation without requesting service start');
+  console.error(daemonEnableNoStartDryRun);
   process.exit(1);
 }
 const daemonRunOut = JSON.parse(run([
@@ -707,6 +821,98 @@ if (daemonReportsOut.reports.length !== 1 || daemonReportsOut.reports[0].status 
   console.error(daemonReportsOut);
   process.exit(1);
 }
+
+run(['init', daemonBatchWorkDir, '--id', 'daemon-batch-work', '--title', 'Daemon Batch Work', '--objective', 'Verify taskopsd leases all currently executable tasks and respects dependencies.', '--language', 'en']);
+const daemonBatchSpecPath = join(tempRoot, 'daemon-batch-spec.json');
+writeFileSync(daemonBatchSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Batch daemon dependency fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-a',
+      title: 'Independent task A',
+      objective: 'Complete independent task A.',
+      responsibility: 'Own independent branch A.',
+      completionCriteria: 'A is done.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Independent and ready.',
+      understandingLevel: 'known',
+      order: 1
+    },
+    {
+      id: 'task-b',
+      title: 'Independent task B',
+      objective: 'Complete independent task B.',
+      responsibility: 'Own independent branch B.',
+      completionCriteria: 'B is done.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Independent and ready.',
+      understandingLevel: 'known',
+      order: 2
+    },
+    {
+      id: 'task-c',
+      title: 'Dependent task C',
+      objective: 'Run only after task A is done.',
+      responsibility: 'Verify dependency-aware queue projection.',
+      completionCriteria: 'C is done after A.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Runnable only after blocker resolution.',
+      blockedBy: [{ type: 'task', id: 'task-a', taskGroupVersionId: 'tgv-root-v2' }],
+      understandingLevel: 'known',
+      order: 3
+    }
+  ]
+}, null, 2));
+run(['decompose', daemonBatchWorkDir, '--task-group-id', 'tg-root', '--spec', daemonBatchSpecPath]);
+const daemonBatchSnapshotPath = join(daemonBatchWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(daemonBatchSnapshotPath, readFileSync(daemonBatchSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const daemonBatchInitialQueue = JSON.parse(run(['queue', 'sync', daemonBatchWorkDir, '--json']).stdout);
+const blockedC = daemonBatchInitialQueue.rows.find((row) => row.task_id === 'task-c');
+if (!blockedC || blockedC.status !== 'blocked' || blockedC.readiness !== 'blocked' || !blockedC.blocked_reason?.includes('task-a')) {
+  console.error('queue sync should mark blockedBy-dependent task unavailable before its dependency closes');
+  console.error(daemonBatchInitialQueue);
+  process.exit(1);
+}
+const daemonBatchRunOut = JSON.parse(run([
+  'daemon', 'run', daemonBatchWorkDir,
+  '--name', 'daemon-batch-smoke',
+  '--runtime', 'dry-run',
+  '--runner-id', 'daemon-batch-smoke-runner',
+  '--report-sink', 'ledger',
+  '--daemon-poll-interval-ms', '1',
+  '--max-daemon-cycles', '1',
+  '--max-parallel', '8',
+  '--json'
+]).stdout);
+if (daemonBatchRunOut.cycles.length !== 1 || daemonBatchRunOut.cycles[0].stopReason !== 'all_closed' || daemonBatchRunOut.cycles[0].claimedWaves !== 2 || daemonBatchRunOut.cycles[0].claimedItems !== 3) {
+  console.error('daemon batch run should finish all three tasks across dependency-aware waves');
+  console.error(daemonBatchRunOut);
+  process.exit(1);
+}
+if (!daemonBatchRunOut.cycles[0].waveDetails || daemonBatchRunOut.cycles[0].waveDetails[0]?.claimedCount !== 2 || daemonBatchRunOut.cycles[0].waveDetails[1]?.claimedCount !== 1) {
+  console.error('daemon batch run should start all currently executable tasks in the first wave, then the dependent task in the next wave');
+  console.error(daemonBatchRunOut);
+  process.exit(1);
+}
+const daemonBatchQueueAfter = JSON.parse(run(['queue', 'list', daemonBatchWorkDir, '--json']).stdout);
+if (daemonBatchQueueAfter.rows.some((row) => row.status !== 'done')) {
+  console.error('daemon batch queue should end with all rows done');
+  console.error(daemonBatchQueueAfter);
+  process.exit(1);
+}
+const daemonBatchReportsOut = JSON.parse(run(['queue', 'reports', daemonBatchWorkDir, '--json']).stdout);
+if (daemonBatchReportsOut.reports.length !== 3) {
+  console.error('daemon batch run should write one progress report per worker transaction');
+  console.error(daemonBatchReportsOut);
+  process.exit(1);
+}
+
 const daemonErrorOut = JSON.parse(run([
   'daemon', 'run', join(tempRoot, 'missing-daemon-work'),
   '--name', 'daemon-error-smoke',

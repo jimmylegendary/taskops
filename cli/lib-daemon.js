@@ -3,16 +3,32 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runQueueWatch } from './lib-orchestrator.js';
+import { QUEUE_DB_RELATIVE_PATH, syncQueueProjection } from './lib-queue.js';
 
 function isoNow() {
   return new Date().toISOString();
 }
 
-function sleepMs(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return;
-  const buffer = new SharedArrayBuffer(4);
-  const view = new Int32Array(buffer);
-  Atomics.wait(view, 0, 0, Math.floor(ms));
+function sleepMs(ms, shouldStop = null) {
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve();
+  if (typeof shouldStop === 'function' && shouldStop()) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    let poll = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+    const timer = setTimeout(done, Math.floor(ms));
+    if (typeof shouldStop === 'function') {
+      poll = setInterval(() => {
+        if (shouldStop()) done();
+      }, 50);
+    }
+  });
 }
 
 function optionalPositiveInteger(value, name, fallback = null) {
@@ -67,6 +83,7 @@ export function normalizeDaemonOptions(workDir, options = {}) {
     runtimeAdapter: options.runtimeAdapter || options.runtime || 'openclaw-cli',
     ttlSeconds: optionalPositiveInteger(options.ttlSeconds, 'ttl seconds', 300),
     maxAttempts: optionalPositiveInteger(options.maxAttempts, 'max attempts', 3),
+    maxParallel: optionalPositiveInteger(options.maxParallel, 'max parallel', 8),
     timeout: options.timeout == null || options.timeout === '' ? 300 : Number(options.timeout),
     reportSink: options.reportSink || 'ledger',
     masterSessionKey: options.masterSessionKey || null,
@@ -130,6 +147,7 @@ function runnerArgs(opts) {
   if (opts.agent) args.push('--agent', opts.agent);
   if (opts.maxDaemonCycles != null) args.push('--max-daemon-cycles', String(opts.maxDaemonCycles));
   if (opts.maxWaves != null) args.push('--max-waves', String(opts.maxWaves));
+  if (opts.maxParallel != null) args.push('--max-parallel', String(opts.maxParallel));
   if (opts.maxIdleCycles != null) args.push('--max-idle-cycles', String(opts.maxIdleCycles));
   if (opts.idleExitAfterSeconds != null) args.push('--idle-exit-after-seconds', String(opts.idleExitAfterSeconds));
   if (opts.until) args.push('--until', opts.until);
@@ -202,6 +220,62 @@ export function installDaemon(workDir, options = {}) {
   };
 }
 
+function runnerActivationConfig(rendered, queue, { started, dryRun }) {
+  return {
+    schemaVersion: 1,
+    mode: 'runner-managed',
+    supervisor: 'user-systemd',
+    enabledAt: dryRun ? null : isoNow(),
+    workDir: rendered.options.workDir,
+    daemonName: rendered.name,
+    serviceName: rendered.serviceName,
+    unitPath: rendered.unitPath,
+    runtimeAdapter: rendered.options.runtimeAdapter,
+    runnerId: rendered.options.runnerId,
+    reportSink: rendered.options.reportSink,
+    masterSessionKeyConfigured: Boolean(rendered.options.masterSessionKey),
+    queueDbPath: queue?.dbPath || join(rendered.options.workDir, QUEUE_DB_RELATIVE_PATH),
+    syncedQueueItems: queue?.synced ?? null,
+    started: Boolean(started),
+  };
+}
+
+export function runnerConfigPathForWorkDir(workDir) {
+  return join(resolve(workDir), '.taskops', 'runner.json');
+}
+
+export function enableDaemon(workDir, options = {}) {
+  const rendered = renderSystemdUnit(workDir, options);
+  const start = options.start !== false;
+  if (options.dryRun) {
+    return {
+      ...rendered,
+      enabled: false,
+      installed: false,
+      dryRun: true,
+      activationPath: runnerConfigPathForWorkDir(workDir),
+      activation: runnerActivationConfig(rendered, null, { started: start, dryRun: true }),
+      queueSynced: null,
+      startRequested: start,
+    };
+  }
+
+  const queue = syncQueueProjection(workDir);
+  const installed = installDaemon(workDir, { ...options, start });
+  const activation = runnerActivationConfig(installed, queue, { started: start, dryRun: false });
+  const activationPath = runnerConfigPathForWorkDir(workDir);
+  mkdirSync(dirname(activationPath), { recursive: true });
+  writeFileSync(activationPath, `${JSON.stringify(activation, null, 2)}\n`, 'utf8');
+  return {
+    ...installed,
+    enabled: true,
+    activationPath,
+    activation,
+    queueSynced: queue,
+    startRequested: start,
+  };
+}
+
 export function uninstallDaemon(name, options = {}) {
   const safeName = sanitizeName(name);
   const unitPath = unitPathForName(safeName);
@@ -247,7 +321,7 @@ export function daemonLogs(name, options = {}) {
   return { name: safeName, serviceName: svc, status: result.status, ok: result.status === 0, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
-export function runDaemon(workDir, options = {}) {
+export async function runDaemon(workDir, options = {}) {
   const opts = normalizeDaemonOptions(workDir, options);
   const cycles = [];
   let stopRequested = false;
@@ -265,11 +339,12 @@ export function runDaemon(workDir, options = {}) {
     let result = null;
     let error = null;
     try {
-      result = runQueueWatch(opts.workDir, {
+      result = await runQueueWatch(opts.workDir, {
         runtimeAdapter: opts.runtimeAdapter,
         runnerId: opts.runnerId,
         ttlSeconds: opts.ttlSeconds,
         maxAttempts: opts.maxAttempts,
+        maxParallel: opts.maxParallel,
         timeout: opts.timeout,
         reportSink: opts.reportSink,
         masterSessionKey: opts.masterSessionKey,
@@ -280,6 +355,7 @@ export function runDaemon(workDir, options = {}) {
         idleExitAfterSeconds: opts.idleExitAfterSeconds,
         until: opts.until,
         watchId,
+        shouldStop: () => stopRequested,
         stopOnFailure: !opts.continueOnFailure,
       });
     } catch (caught) {
@@ -294,13 +370,28 @@ export function runDaemon(workDir, options = {}) {
       stopReason: result?.stopReason || 'daemon_error',
       stopDetail: result?.stopDetail || error?.message || null,
       claimedWaves: result?.claimedWaves || 0,
+      claimedItems: result?.claimedItems || 0,
       idleCycles: result?.idleCycles || 0,
+      waveDetails: Array.isArray(result?.waves) ? result.waves.map((wave) => ({
+        waveId: wave.waveId,
+        claimed: Boolean(wave.claimed),
+        claimedCount: wave.claimedCount || (wave.claimed ? 1 : 0),
+        releaseStatus: wave.releaseStatus || null,
+        workerStatuses: Array.isArray(wave.workers)
+          ? wave.workers.map((worker) => ({
+              queueItemId: worker.queueItem?.id || null,
+              releaseStatus: worker.releaseStatus || null,
+              stopReason: worker.runResult?.stopReason || null,
+            }))
+          : [],
+      })) : [],
     };
     cycles.push(entry);
     if (options.onCycle) options.onCycle(entry, result);
     if (opts.maxDaemonCycles != null && cycle >= opts.maxDaemonCycles) break;
+    if (stopRequested) break;
     const delay = ['wave_failed', 'daemon_error'].includes(entry.stopReason) ? opts.failureBackoffMs : opts.daemonPollIntervalMs;
-    sleepMs(delay);
+    await sleepMs(delay, () => stopRequested);
   }
 
   return {

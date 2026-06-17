@@ -85,15 +85,14 @@ taskops classify-runnable ./oauth-refactor task-auth-middleware --json
 # 4. Advance bounded work: execute, decompose, or explore depending on readiness
 taskops run ./oauth-refactor --executor dry-run --max-steps 3 --json
 
-# 5. Or install a user-level daemon that keeps the queue-backed runner alive
-taskops daemon install ./oauth-refactor \
+# 5. Or enable a user-level daemon for this runner-managed work directory
+taskops daemon enable ./oauth-refactor \
   --name oauth-refactor \
   --runtime openclaw-cli \
   --runner-id taskopsd-oauth-refactor \
   --max-attempts 3 \
   --timeout 300 \
-  --report-sink ledger \
-  --start
+  --report-sink ledger
 
 # 6. Review execution evidence
 taskops summary ./oauth-refactor
@@ -101,9 +100,9 @@ taskops summary ./oauth-refactor
 
 `dry-run` is for smoke tests and graph rehearsals. For real work, use `--executor openclaw-agent --agent <agent-id>`.
 
-For unattended local work, `taskops daemon install` writes a user-systemd service around `taskops daemon run`. The daemon loop starts `taskops runner watch`, interprets each watch stop reason, sleeps between cycles, and lets systemd restart the daemon process if the host session kills it. `taskops runner watch` remains the foreground primitive for tests and controlled sessions; do not wire `runner watch` directly to `Restart=always`, because `all_closed` is a normal stop reason and would otherwise become a restart loop.
+Installing TaskOps does not start unattended work by itself. For unattended local work, `taskops daemon enable <work-dir>` is the explicit activation step for a specific runner-managed work directory: it syncs the queue projection, writes `.taskops/runner.json`, installs a user-systemd service around `taskops daemon run`, and starts it by default. The daemon loop starts `taskops runner watch`, interprets each watch stop reason, sleeps between cycles, and lets systemd restart the daemon process if the host session kills it. `taskops runner watch` remains the foreground primitive for tests and controlled sessions; do not wire `runner watch` directly to `Restart=always`, because `all_closed` is a normal stop reason and would otherwise become a restart loop.
 
-SQLite remains a queue/lease/report projection. The runner/daemon process is what stays alive, claims queue items, invokes the configured runtime adapter, and records progress. Watch mode defaults to a three-failure retry cap per current task fingerprint so an unchanged failing task does not loop forever. Use `--timeout <seconds>` with `--runtime openclaw-cli` so long worker waves fail inside TaskOps and release their lease; if the runner process is externally killed, the next queue sync/list/claim operation marks the expired lease stale and finalizes the linked running attempt as failed.
+SQLite remains a queue/lease/report projection. The runner/daemon process is what stays alive, projects dependency/readiness status from markdown, leases the currently executable batch up to `--max-parallel`, invokes the configured runtime adapter once per leased worker transaction, and records progress. Watch mode defaults to a three-failure retry cap per current task fingerprint so an unchanged failing task does not loop forever. Use `--timeout <seconds>` with `--runtime openclaw-cli` so long worker waves fail inside TaskOps and release their lease; if the runner process is externally killed, the next queue sync/list/claim operation marks the expired lease stale and finalizes the linked running attempt as failed.
 
 ## Killer use case: large AI-assisted refactors
 

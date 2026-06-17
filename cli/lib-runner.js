@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -34,8 +35,16 @@ function isoNow() {
   return new Date().toISOString();
 }
 
+function sleepMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.floor(ms));
+}
+
 const FM_SCALAR_MAX_LEN = 500;
 const FM_SCALAR_FALLBACK = 'executor_failed';
+const ACCEPTANCE_MODES = new Set(['informational', 'enforced', 'guarded', 'runner-managed']);
 
 export function sanitizeFmScalar(value, { maxLen = FM_SCALAR_MAX_LEN, fallback = FM_SCALAR_FALLBACK } = {}) {
   if (value == null) return fallback;
@@ -63,12 +72,188 @@ function appendRunLog(runDir, line) {
   appendFileSync(logPath, `- ${line}\n`, 'utf8');
 }
 
+function stableForHash(value) {
+  if (Array.isArray(value)) return value.map((item) => stableForHash(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableForHash(value[key])]));
+  }
+  return value ?? null;
+}
+
+function sha256Of(value) {
+  return `sha256:${createHash('sha256').update(JSON.stringify(stableForHash(value))).digest('hex')}`;
+}
+
+function asArray(value) {
+  if (value == null || value === '') return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function normalizeAcceptance(task) {
+  const raw = task && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance) ? task.acceptance : {};
+  const mode = ACCEPTANCE_MODES.has(String(raw.mode || '').trim()) ? String(raw.mode).trim() : 'informational';
+  return {
+    mode,
+    expectedOutcome: raw.expectedOutcome || task?.completionCriteria || '',
+    requiredArtifacts: asArray(raw.requiredArtifacts),
+    requiredChecks: asArray(raw.requiredChecks),
+  };
+}
+
+function normalizeResult(runNode) {
+  const raw = runNode && typeof runNode.result === 'object' && !Array.isArray(runNode.result) ? runNode.result : {};
+  const observed = raw.observed && typeof raw.observed === 'object' && !Array.isArray(raw.observed) ? raw.observed : {};
+  return {
+    executorSummary: raw.executorSummary || '',
+    observed: {
+      outcomeSummary: observed.outcomeSummary || '',
+      artifactRefs: asArray(observed.artifactRefs),
+      evidenceRefs: asArray(observed.evidenceRefs),
+      checkResults: asArray(observed.checkResults),
+    },
+  };
+}
+
+function refText(value) {
+  if (value && typeof value === 'object') return String(value.path || value.ref || value.id || value.command || '');
+  return String(value || '');
+}
+
+function commandText(value) {
+  if (value && typeof value === 'object') return String(value.command || value.name || value.id || '');
+  return String(value || '');
+}
+
+function checkStatus(value) {
+  if (value && typeof value === 'object') return String(value.status || value.result || '').toLowerCase();
+  return '';
+}
+
+function evidenceContainsRef(result, expectedRef, projectDir = process.cwd()) {
+  const needle = refText(expectedRef);
+  if (!needle) return true;
+  const observedRefs = [
+    ...result.observed.artifactRefs.map(refText),
+    ...result.observed.evidenceRefs.map(refText),
+  ];
+  if (observedRefs.includes(needle)) return true;
+  return existsSync(resolve(projectDir, needle)) || existsSync(resolve(needle)) || observedRefs.some((ref) => ref.endsWith(needle));
+}
+
+function buildExecutionResult({ task, runId, runNodeId, executorResult }) {
+  const summary = sanitizeFmScalar(
+    executorResult?.message || `Executor completed task ${task.id}.`,
+    { maxLen: 1000, fallback: `Executor completed task ${task.id}.` },
+  );
+  return {
+    executorSummary: summary,
+    observed: {
+      outcomeSummary: summary,
+      artifactRefs: executorResult?.artifactPath ? [executorResult.artifactPath] : [],
+      evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+      checkResults: [],
+    },
+  };
+}
+
+function buildReviewReport({ projectDir, task, runNode }) {
+  const acceptance = normalizeAcceptance(task);
+  const result = normalizeResult(runNode);
+  const missingExpected = [];
+  const unsupportedObserved = [];
+  const failedChecks = [];
+
+  if (acceptance.expectedOutcome && !result.observed.outcomeSummary) {
+    missingExpected.push('observed.outcomeSummary is missing for the expected outcome');
+  }
+
+  for (const artifact of acceptance.requiredArtifacts) {
+    if (!evidenceContainsRef(result, artifact, projectDir)) {
+      missingExpected.push(`required artifact not observed: ${refText(artifact)}`);
+    }
+  }
+
+  for (const requiredCheck of acceptance.requiredChecks) {
+    const command = commandText(requiredCheck);
+    if (!command) continue;
+    const observed = result.observed.checkResults.find((check) => commandText(check) === command);
+    if (!observed) {
+      missingExpected.push(`required check not observed: ${command}`);
+      continue;
+    }
+    const status = checkStatus(observed);
+    if (status && !['passed', 'pass', 'ok', 'success', 'succeeded'].includes(status)) {
+      failedChecks.push(`${command}: ${status}`);
+    }
+  }
+
+  if (result.executorSummary && !result.observed.outcomeSummary && result.observed.artifactRefs.length === 0 && result.observed.evidenceRefs.length === 0) {
+    unsupportedObserved.push('executorSummary exists without observed outcome or evidence refs');
+  }
+
+  const decision = failedChecks.length > 0
+    ? 'rejected'
+    : (missingExpected.length > 0 || unsupportedObserved.length > 0 ? 'needs_verification' : 'approved');
+  return {
+    schemaVersion: 'acceptance-review-v1',
+    decision,
+    mode: acceptance.mode,
+    expectedOutcome: acceptance.expectedOutcome,
+    observedOutcome: result.observed.outcomeSummary,
+    missingExpected,
+    unsupportedObserved,
+    failedChecks,
+    followUpNeeded: decision === 'approved' ? [] : ['Add observed evidence/check results or revise acceptance before closure is trusted.'],
+    reviewedAcceptanceHash: sha256Of(acceptance),
+    reviewedResultHash: sha256Of(result),
+  };
+}
+
 function resolveRunId(parsed, requested) {
   if (requested) return String(requested);
   const runs = [...parsed.runs.values()];
   const active = runs.filter((r) => r.status === 'active');
   if (active.length === 1) return active[0].id;
   return DEFAULT_RUN_ID;
+}
+
+function filterConcurrentTargetValidationErrors(errors, { allowConcurrentTarget, runId, targetTaskId, targetTaskGroupVersionId }) {
+  if (!allowConcurrentTarget || !runId) return errors;
+  return errors.filter((error) => {
+    const message = String(error || '');
+    const runMatch = message.match(/\/runs\/([^/]+)\//);
+    if (runMatch && runMatch[1] !== runId) return false;
+
+    const taskMatch = message.match(/\/task-groups\/([^/]+)\/versions\/([^/]+)\/tasks\/([^/]+)\.md:/);
+    if (taskMatch) {
+      const versionId = taskMatch[2];
+      const taskId = taskMatch[3];
+      if (targetTaskId && taskId !== targetTaskId) return false;
+      if (targetTaskGroupVersionId && versionId !== targetTaskGroupVersionId) return false;
+    }
+
+    return true;
+  });
+}
+
+function isTransientConcurrentParseError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('/runs/') && (
+    message.includes('Missing YAML frontmatter')
+    || message.includes('ENOENT')
+    || message.includes('not found')
+  );
+}
+
+function parseProjectForRunner(projectDir, { allowConcurrentTarget = false } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return parseProject(projectDir);
+    } catch (error) {
+      if (!allowConcurrentTarget || attempt >= 5 || !isTransientConcurrentParseError(error)) throw error;
+      sleepMs(25 * (attempt + 1));
+    }
+  }
 }
 
 function ensureRunDirectories(projectDir, runId, project) {
@@ -210,14 +395,20 @@ function normalizeBlockedBy(task) {
   return Array.isArray(task.blockedBy) ? task.blockedBy : [task.blockedBy];
 }
 
-export function recheckBlockedTasks(workDir, { dryRun = false } = {}) {
+export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTarget = false, runId = null } = {}) {
   const workRoot = resolve(workDir);
   const projects = discoverProjects(workRoot);
   if (projects.length !== 1) throw new Error(`Expected exactly 1 TaskOps work under ${workDir}, found ${projects.length}`);
   const projectDir = projects[0];
-  const parsed = parseProject(projectDir);
-  if (parsed.errors.length > 0) {
-    throw new Error(`TaskOps work has validation errors; cannot recheck blockers:\n- ${parsed.errors.join('\n- ')}`);
+  const parsed = parseProjectForRunner(projectDir, { allowConcurrentTarget });
+  const validationErrors = filterConcurrentTargetValidationErrors(parsed.errors, {
+    allowConcurrentTarget,
+    runId,
+    targetTaskId: null,
+    targetTaskGroupVersionId: null,
+  });
+  if (validationErrors.length > 0) {
+    throw new Error(`TaskOps work has validation errors; cannot recheck blockers:\n- ${validationErrors.join('\n- ')}`);
   }
 
   const checked = [];
@@ -390,6 +581,8 @@ function buildAgentExecutionPrompt({ project, task }) {
     `Task completion criteria: ${task.completionCriteria || ''}`,
     '',
     'Execute this single TaskOps task. Do not recursively invoke `taskops run`.',
+    'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
+    'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
   ].join('\n');
 }
@@ -473,6 +666,27 @@ function invokeAgent({ args, stepTimeoutMs }) {
   return { ok: true, message: stdout, stdout, stderr };
 }
 
+function safeSessionPart(value, fallback = 'task') {
+  const safe = String(value || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return safe || fallback;
+}
+
+function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
+  const parts = [
+    'taskops-worker',
+    safeSessionPart(projectId, 'work'),
+    safeSessionPart(taskId, 'task'),
+    safeSessionPart(action, 'execute'),
+    String(process.pid),
+    String(Date.now()),
+  ];
+  return `agent:${agentId}:` + parts.join('-');
+}
+
 function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs }) {
   if (executor === 'dry-run') {
     return {
@@ -483,7 +697,13 @@ function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs }) {
   }
   if (executor === 'openclaw-agent') {
     const prompt = buildAgentExecutionPrompt({ project, task });
-    const args = ['agent', '--agent', agentId, '--message', prompt, '--json'];
+    const args = [
+      'agent',
+      '--agent', agentId,
+      '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'execute' }),
+      '--message', prompt,
+      '--json',
+    ];
     if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
       args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
     }
@@ -541,7 +761,13 @@ function performAgentLoopback({ project, projectDir, delegate, agentId, stepTime
   const artifactPath = join(artifactsDir, `${loopbackNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
   const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName });
-  const args = ['agent', '--agent', agentId, '--message', prompt, '--json'];
+  const args = [
+    'agent',
+    '--agent', agentId,
+    '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: delegate.sourceTaskId || delegate.id, action: 'loopback' }),
+    '--message', prompt,
+    '--json',
+  ];
   if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
     args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
   }
@@ -705,6 +931,20 @@ function ensureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, so
   return runNodePath;
 }
 
+function runNodeIdForTask(runDir, task) {
+  const baseId = `run-node-${task.id}`;
+  const basePath = join(runDir, 'nodes', `${baseId}.md`);
+  if (!existsSync(basePath)) return baseId;
+  const existing = parseMarkdownFile(basePath);
+  if (
+    existing.sourceTaskId === task.id
+    && existing.sourceTaskGroupVersionId === task.taskGroupVersionId
+  ) {
+    return baseId;
+  }
+  return `run-node-${safeSessionPart(task.taskGroupVersionId, 'version')}-${safeSessionPart(task.id, 'task')}`;
+}
+
 function attachRunRef(taskPath, runId, runNodeId, role) {
   rewriteFrontmatter(taskPath, (fm) => {
     if (fm.status === 'pending') fm.status = 'active';
@@ -717,7 +957,7 @@ function attachRunRef(taskPath, runId, runNodeId, role) {
   });
 }
 
-function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt }) {
+function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null }) {
   const eowRunNodeId = `eow-${runNodeId}`;
   const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
   if (!existsSync(eowRunPath)) {
@@ -735,6 +975,12 @@ function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt }) {
       createdAt: finishedAt,
       status: 'done',
     };
+    if (approvedReview) {
+      eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+      eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
+      eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
+      eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
+    }
     writeFileSync(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`, 'utf8');
   }
   const edgeId = `edge-${runNodeId}-to-eow`;
@@ -755,7 +1001,7 @@ function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt }) {
   }
 }
 
-function closeTaskWithEow({ task, reason, finishedAt }) {
+function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
   const versionDir = dirname(dirname(task.path));
   const eowTaskId = `eow-${task.id}`;
   const eowTaskDir = join(versionDir, 'eow');
@@ -775,13 +1021,77 @@ function closeTaskWithEow({ task, reason, finishedAt }) {
       createdAt: finishedAt,
       status: 'done',
     };
+    if (approvedReview) {
+      eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+      eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
+      eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
+      eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
+    }
     writeFileSync(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`, 'utf8');
   }
 }
 
+function writeReviewForRunNode({ projectDir, task, runNode }) {
+  const runDir = join(projectDir, 'runs', runNode.runId);
+  const reviewNodeId = `review-${runNode.id}`;
+  const reviewNodePath = ensureRunNode({
+    runDir,
+    runId: runNode.runId,
+    runNodeId: reviewNodeId,
+    type: 'review',
+    title: `Review ${runNode.id}`,
+    sourceTaskId: task?.id,
+    sourceTaskGroupVersionId: task?.taskGroupVersionId,
+    status: 'done',
+    kindLabel: 'review',
+  });
+  const report = buildReviewReport({ projectDir, task, runNode });
+  const reviewReportHash = sha256Of(report);
+  rewriteFrontmatter(reviewNodePath, (fm) => {
+    fm.status = 'done';
+    fm.reviewsRunNodeId = runNode.id;
+    fm.reviewedRunId = runNode.runId;
+    fm.reviewReport = report;
+    fm.reviewReportHash = reviewReportHash;
+    return fm;
+  });
+
+  const edgeId = `edge-${runNode.id}-to-${reviewNodeId}`;
+  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
+  if (!existsSync(edgePath)) {
+    const edgeFm = {
+      taskOpsVersion: 'v1',
+      entityType: 'runEdge',
+      id: edgeId,
+      runId: runNode.runId,
+      fromRunNodeId: runNode.id,
+      toRunNodeId: reviewNodeId,
+      edgeType: 'reviews',
+      createdAt: isoNow(),
+      status: 'done',
+    };
+    writeFileSync(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNode.id} reviewed by ${reviewNodeId}\n`, 'utf8');
+  }
+  closeRunNodeWithEow({ runDir, runId: runNode.runId, runNodeId: reviewNodeId, reason: 'review_recorded', finishedAt: isoNow() });
+
+  return {
+    reviewNodeId,
+    reviewNodePath,
+    reviewReport: report,
+    reviewReportHash,
+    approvedReview: report.decision === 'approved' ? {
+      reviewNodeId,
+      reviewReportHash,
+      reviewedAcceptanceHash: report.reviewedAcceptanceHash,
+      reviewedResultHash: report.reviewedResultHash,
+    } : null,
+  };
+}
+
 function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs }) {
+  const projectDir = dirname(dirname(runDir));
   const startedAt = isoNow();
-  const runNodeId = `run-node-${task.id}`;
+  const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
     type: 'implementation',
@@ -814,18 +1124,44 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
   const finishedAt = isoNow();
 
   if (result.ok) {
+    const executionResult = buildExecutionResult({ task, runId, runNodeId, executorResult: result });
     rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
-    closeTaskWithEow({ task, reason: 'no_further_decomposition', finishedAt });
-    closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'execution_path_closed', finishedAt });
+    rewriteFrontmatter(runNodePath, (fm) => {
+      fm.status = 'done';
+      fm.result = executionResult;
+      return fm;
+    });
+    const reviewedRunNode = parseMarkdownFile(runNodePath);
+    const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
+    const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
+    if (review.reviewReport.decision !== 'approved' && isGuarded) {
+      rewriteFrontmatter(task.path, (fm) => {
+        fm.status = 'blocked';
+        fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
+        return fm;
+      });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'task_review_failed', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
+        decision: review.reviewReport.decision,
+      });
+      appendRunLog(runDir, `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`);
+      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision };
+    }
+    const approvedReview = review.approvedReview;
+    const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
+    closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
+    closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
 
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'task_completed', runId,
       taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      reviewNodeId: review.reviewNodeId,
+      reviewDecision: review.reviewReport.decision,
       message: result.message || null,
     });
-    appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId}`);
-    return { taskId: task.id, runNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null };
+    appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
+    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision };
   }
 
   rewriteFrontmatter(task.path, (fm) => {
@@ -936,7 +1272,13 @@ function performAgentDecomposition({ projectDir, project, task, agentId, stepTim
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
   const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId });
-  const args = ['agent', '--agent', agentId, '--message', prompt, '--json'];
+  const args = [
+    'agent',
+    '--agent', agentId,
+    '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
+    '--message', prompt,
+    '--json',
+  ];
   if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
     args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
   }
@@ -950,7 +1292,7 @@ function performAgentDecomposition({ projectDir, project, task, agentId, stepTim
 
 function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs }) {
   const startedAt = isoNow();
-  const runNodeId = `run-node-${task.id}`;
+  const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
     type: 'decomposition',
@@ -1057,7 +1399,13 @@ function performAgentExploration({ project, projectDir, task, agentId, stepTimeo
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
   const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath });
-  const args = ['agent', '--agent', agentId, '--message', prompt, '--json'];
+  const args = [
+    'agent',
+    '--agent', agentId,
+    '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'explore' }),
+    '--message', prompt,
+    '--json',
+  ];
   if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
     args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
   }
@@ -1071,7 +1419,7 @@ function performAgentExploration({ project, projectDir, task, agentId, stepTimeo
 
 function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs }) {
   const startedAt = isoNow();
-  const runNodeId = `run-node-${task.id}`;
+  const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
     type: 'exploration',
@@ -1294,6 +1642,95 @@ function findCloseTarget(parsed, targetId) {
   return { type: 'runNode', runNode: runNodeMatches[0] };
 }
 
+function normalizeRunRefs(task) {
+  return Array.isArray(task?.runRefs) ? task.runRefs : [];
+}
+
+function findTaskForRunNode(parsed, node) {
+  if (!node?.sourceTaskId) return null;
+  const matches = [...parsed.tasks.values()].filter((task) => (
+    task.id === node.sourceTaskId
+    && (!node.sourceTaskGroupVersionId || task.taskGroupVersionId === node.sourceTaskGroupVersionId)
+  ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function findReviewSubject(parsed, targetId) {
+  const direct = findCloseTarget(parsed, targetId);
+  if (direct.type === 'runNode') {
+    const task = findTaskForRunNode(parsed, direct.runNode);
+    return { task, runNode: direct.runNode };
+  }
+
+  const task = direct.task;
+  const refs = normalizeRunRefs(task).slice().reverse();
+  for (const ref of refs) {
+    if (!ref?.runId || !ref?.runNodeId) continue;
+    const node = parsed.runNodes.get(`${ref.runId}:${ref.runNodeId}`);
+    if (node && node.type !== 'review') return { task, runNode: node };
+  }
+  const node = [...parsed.runNodes.values()]
+    .reverse()
+    .find((candidate) => candidate.sourceTaskId === task.id && candidate.sourceTaskGroupVersionId === task.taskGroupVersionId && candidate.type !== 'review');
+  if (node) return { task, runNode: node };
+  throw new Error(`Task '${task.id}' has no run node to review`);
+}
+
+function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedReview }) {
+  if (!approvedReview) return [];
+  const touched = [];
+  for (const eow of parsed.eowNodes.values()) {
+    const taskMatch = task && eow.graphType === 'task' && eow.attachedToId === task.id && eow.taskGroupVersionId === task.taskGroupVersionId;
+    const runMatch = eow.graphType === 'run' && eow.runId === runNode.runId && eow.attachedToId === runNode.id;
+    if (!taskMatch && !runMatch) continue;
+    rewriteFrontmatter(eow.path, (fm) => {
+      fm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+      fm.approvedReviewReportHash = approvedReview.reviewReportHash;
+      fm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
+      fm.reviewedResultHash = approvedReview.reviewedResultHash;
+      if (fm.reason === 'manual_close' || fm.reason === 'no_further_decomposition' || fm.reason === 'execution_path_closed') {
+        fm.reason = 'approved_result';
+      }
+      return fm;
+    });
+    touched.push(eow.path);
+  }
+  return touched;
+}
+
+export function reviewTarget(workDir, targetId) {
+  if (!targetId) throw new Error('Missing review target id');
+  const projectDir = resolveSingleProject(workDir);
+  const parsed = parseProject(projectDir);
+  if (parsed.errors.length > 0) {
+    throw new Error(`TaskOps work has validation errors; refuse to review until resolved:\n- ${parsed.errors.join('\n- ')}`);
+  }
+  const { task, runNode } = findReviewSubject(parsed, targetId);
+  const review = writeReviewForRunNode({ projectDir, task, runNode });
+  const eowPathsUpdated = attachApprovedReviewToExistingEows({
+    parsed,
+    task,
+    runNode,
+    approvedReview: review.approvedReview,
+  });
+  return {
+    workId: parsed.project.id,
+    projectDir,
+    target: {
+      type: task ? 'task' : 'runNode',
+      id: task?.id || runNode.id,
+      taskGroupVersionId: task?.taskGroupVersionId || null,
+      runId: runNode.runId,
+      runNodeId: runNode.id,
+    },
+    reviewNodeId: review.reviewNodeId,
+    reviewNodePath: review.reviewNodePath,
+    reviewReport: review.reviewReport,
+    reviewReportHash: review.reviewReportHash,
+    eowPathsUpdated,
+  };
+}
+
 const RUN_NODE_OVERRIDE_REASONS = new Set(['manual_verified', 'manual_close', 'failure', 'superseded', 'cancelled']);
 const DELEGATION_OVERRIDE_REASONS = new Set(['manual_verified', 'cancelled', 'superseded']);
 
@@ -1495,28 +1932,40 @@ export function runTaskOps(workDir, options = {}) {
     : (executor === 'openclaw-agent' ? agentId : 'taskops-runner');
   const targetTaskId = options.targetTaskId || null;
   const targetTaskGroupVersionId = options.targetTaskGroupVersionId || null;
+  const allowConcurrentTarget = options.allowConcurrentTarget === true && Boolean(targetTaskId);
 
   const lockDir = join(projectDir, RUNNER_LOCK_DIR);
-  try {
-    mkdirSync(lockDir, { recursive: false });
-  } catch (err) {
-    if (err && err.code === 'EEXIST') {
-      throw new Error(`TaskOps runner lock already held at ${lockDir}; remove it if no runner is active`);
+  let ownsLock = false;
+  if (!allowConcurrentTarget) {
+    try {
+      mkdirSync(lockDir, { recursive: false });
+      ownsLock = true;
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        throw new Error(`TaskOps runner lock already held at ${lockDir}; remove it if no runner is active`);
+      }
+      throw err;
     }
-    throw err;
+    try {
+      writeFileSync(join(lockDir, 'pid'), String(process.pid), 'utf8');
+    } catch {}
   }
-  try {
-    writeFileSync(join(lockDir, 'pid'), String(process.pid), 'utf8');
-  } catch {}
 
   const cleanup = () => {
+    if (!ownsLock) return;
     try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
   };
 
   try {
-    let parsed = parseProject(projectDir);
-    if (parsed.errors.length > 0) {
-      throw new Error(`TaskOps work has validation errors; cannot start runner:\n- ${parsed.errors.join('\n- ')}`);
+    let parsed = parseProjectForRunner(projectDir, { allowConcurrentTarget });
+    let validationErrors = filterConcurrentTargetValidationErrors(parsed.errors, {
+      allowConcurrentTarget,
+      runId: options.runId ? String(options.runId) : null,
+      targetTaskId,
+      targetTaskGroupVersionId,
+    });
+    if (validationErrors.length > 0) {
+      throw new Error(`TaskOps work has validation errors; cannot start runner:\n- ${validationErrors.join('\n- ')}`);
     }
 
     const runId = resolveRunId(parsed, options.runId);
@@ -1544,11 +1993,17 @@ export function runTaskOps(workDir, options = {}) {
       if (until != null && Date.now() >= until) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
       if (maxSteps != null && stepsRun >= maxSteps) { stopReason = STOP_REASONS.MAX_STEPS; break; }
 
-      recheckBlockedTasks(projectDir);
-      parsed = parseProject(projectDir);
-      if (parsed.errors.length > 0) {
+      recheckBlockedTasks(projectDir, { allowConcurrentTarget, runId });
+      parsed = parseProjectForRunner(projectDir, { allowConcurrentTarget });
+      validationErrors = filterConcurrentTargetValidationErrors(parsed.errors, {
+        allowConcurrentTarget,
+        runId,
+        targetTaskId,
+        targetTaskGroupVersionId,
+      });
+      if (validationErrors.length > 0) {
         stopReason = STOP_REASONS.VALIDATION_FAILED;
-        logEvent(eventsPath, { timestamp: isoNow(), type: 'validation_failed', runId, errors: parsed.errors });
+        logEvent(eventsPath, { timestamp: isoNow(), type: 'validation_failed', runId, errors: validationErrors });
         break;
       }
 

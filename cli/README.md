@@ -90,6 +90,7 @@ taskops show <path> [--json]
 taskops classify-runnable <work-dir> <task-id> [--json]
 taskops next <work-dir> [--json]
 taskops explain <work-dir> [--json]
+taskops review <work-dir> <run-node-id|task-id> [--json]
 taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
 taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
@@ -100,10 +101,11 @@ taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
 taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
-taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
-taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--json]
-taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--start] [--dry-run] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
+taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--json]
+taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--no-start] [--dry-run] [--json]
+taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--start] [--dry-run] [--json]
 taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -116,15 +118,17 @@ taskops watch-sync <vault-dir> [--message <msg>] [--debounce-ms <ms>] [--branch 
 
 ## Honest-action commands
 
-These three read-only/guarded commands are the "honest loop" surface. They never lie about progress:
+These read-only/guarded commands are the "honest loop" surface. They never lie about progress:
 
 - `taskops next <work-dir> [--json]` — return the one next honest action: `execute`, `decompose`, `explore`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. The output also includes the target task or run node and a recommended command. It does not mutate state.
 - `taskops explain <work-dir> [--json]` — explain why the work is or is not done. Reports the closure summary, the next honest action, and the concrete reasons the work is still open (missing terminal EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors). It does not mutate state.
+- `taskops review <work-dir> <run-node-id|task-id> [--json]` — write or refresh a `type: review` run node with `reviewReport`. The report compares task `acceptance` (or `completionCriteria` fallback) against the run node's observed result, records `approved | rejected | needs_verification`, and attaches approved review hashes to existing EoW nodes when possible.
 - `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. Refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied (in which case the task status is also flipped to `done` so closure counts stay honest). Refuses to close a run node that is not `done`/`cancelled` unless an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied; refuses delegated/waiting nodes unless one of `manual_verified|cancelled|superseded` is given. On success it writes an EoW file (and a `closes_with` run edge for run nodes).
 
 ```bash
 taskops next ./my-work --json
 taskops explain ./my-work
+taskops review ./my-work task-foo --json
 taskops close ./my-work task-foo --reason manual_verified
 ```
 
@@ -145,6 +149,7 @@ This surface uses Node's built-in `node:sqlite` module, so it requires Node 22 o
 The initial queue surface is intentionally read-only relative to markdown:
 
 - `queue sync` parses and validates the work tree, then projects selected snapshot tasks into `queue_items`.
+- Unresolved `blockedBy` dependencies are reflected in the projection as blocked queue rows, so they cannot be leased until their blocker is done/cancelled.
 - `queue list` reads the current projection.
 - `queue claim` creates one active lease for the next runnable/projectable item; another claim cannot receive the same item until that lease expires or is released.
 - `--max-attempts <n>` skips items whose current markdown fingerprint already has `n` failed runner attempts. Use `0` for unlimited attempts. Editing the task markdown changes the fingerprint and resets the retry budget for that task version.
@@ -152,7 +157,7 @@ The initial queue surface is intentionally read-only relative to markdown:
 - `queue release` marks an active lease `done`, `failed`, or `cancelled`.
 - `queue reports` lists progress report ledger rows written by queue-backed runner commands.
 - Deleting `.taskops/queue.sqlite` and rerunning `queue sync` should rebuild the projection from markdown.
-- Existing single-step execution remains under `taskops run`; `taskops runner once` is the one-wave primitive and `taskops runner watch` is the long-lived local loop over that primitive.
+- Existing single-step execution remains under `taskops run`; `taskops runner once` is the one-item primitive and `taskops runner watch` is the long-lived local loop over batch waves.
 
 ## Queue-backed runner
 
@@ -170,7 +175,7 @@ taskops runner once ./my-work \
 
 This command is intentionally small: it runs one claimed queue item and stops.
 
-`taskops runner watch <work-dir>` is the long-lived local runner. It repeatedly calls the same claim/run/release/report primitive, exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached. Watch mode defaults to `--max-attempts 3`; pass `--max-attempts 0` for unlimited retries.
+`taskops runner watch <work-dir>` is the long-lived local runner. Each wave syncs markdown into SQLite, leases every currently executable queue item up to `--max-parallel` (default `8`), and starts one worker transaction per lease. For `--runtime openclaw-cli`, each worker transaction calls `openclaw agent --json` through the normal TaskOps runner target path. Watch exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached. Watch mode defaults to `--max-attempts 3`; pass `--max-attempts 0` for unlimited retries.
 If a runner process dies after claiming a lease, the next queue sync/list/claim operation marks the expired lease stale, finalizes any linked running attempt as failed, and lets the normal fingerprint-based retry cap decide whether the item can be reclaimed.
 
 ```bash
@@ -178,6 +183,7 @@ taskops runner watch ./my-work \
   --runtime openclaw-cli \
   --runner-id taskopsd-main \
   --max-attempts 3 \
+  --max-parallel 8 \
   --report-sink ledger \
   --master-session-key agent:main:webchat:channel:taskops-control
 ```
@@ -199,21 +205,22 @@ Watch mode stops on the first failed wave by default. Use `--continue-on-failure
 
 `taskops daemon` is the stable always-on wrapper for unattended local work. It separates two concerns:
 
+- Installing the TaskOps package does not start any background daemon.
 - `taskops runner watch` is the foreground queue-draining primitive.
 - `taskops daemon run` is the outer supervise loop that repeatedly runs watch cycles, preserves their stop reasons, sleeps between cycles, and is safe to put behind a process supervisor.
+- `taskops daemon enable <work-dir>` is the high-level activation step for a specific runner-managed work directory. It syncs the queue projection, installs the user-systemd service, records `.taskops/runner.json`, and starts the service by default.
 
-For local Linux workstations, install a user-systemd service:
+For local Linux workstations, enable a work directory as runner-managed:
 
 ```bash
-taskops daemon install ./my-work \
+taskops daemon enable ./my-work \
   --name my-work \
   --runtime openclaw-cli \
   --runner-id taskopsd-my-work \
   --timeout 300 \
   --max-attempts 3 \
   --report-sink openclaw-chat-inject \
-  --master-session-key agent:main:telegram:direct:7558560166 \
-  --start
+  --master-session-key agent:main:telegram:direct:7558560166
 ```
 
 Then inspect or control it:
@@ -226,7 +233,7 @@ taskops daemon stop my-work
 taskops daemon uninstall my-work
 ```
 
-Use `taskops daemon unit ./my-work --name my-work` or `taskops daemon install ./my-work --dry-run --json` to review the exact service before installing it. The generated unit uses `Restart=always` around `taskops daemon run`, not around `taskops runner watch`. That matters because `runner watch` exits normally with `all_closed`; the daemon layer is what decides when to sleep and wait for future work.
+Use `taskops daemon unit ./my-work --name my-work` or `taskops daemon enable ./my-work --dry-run --json` to review the exact service before installing it. Use `--no-start` when the service should be installed and enabled but not started yet. The generated unit uses `Restart=always` around `taskops daemon run`, not around `taskops runner watch`. That matters because `runner watch` exits normally with `all_closed`; the daemon layer is what decides when to sleep and wait for future work.
 
 Adapter boundary:
 

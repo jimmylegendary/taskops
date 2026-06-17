@@ -14,6 +14,13 @@ function isoNow() {
   return new Date().toISOString();
 }
 
+function sleepMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.floor(ms));
+}
+
 function sha256(text) {
   return createHash('sha256').update(text).digest('hex');
 }
@@ -101,15 +108,28 @@ function ensureColumn(db, table, column, ddl) {
   if (!existing) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }
 
+function isTransientRunGraphError(error) {
+  const message = String(error || '');
+  return message.includes('/runs/') && (
+    message.includes('not found')
+    || message.includes('missing index.md')
+    || message.includes('duplicate run')
+    || message.includes('duplicate EoW')
+  );
+}
+
 function parseSingleProject(workDir) {
   const workRoot = resolve(workDir);
   const projects = discoverProjects(workRoot);
   if (projects.length !== 1) throw new Error(`Expected exactly 1 TaskOps work under ${workDir}, found ${projects.length}`);
   const projectDir = projects[0];
-  const parsed = parseProject(projectDir);
-  if (parsed.errors.length > 0) {
-    throw new Error(`TaskOps work has validation errors; cannot sync queue:\n- ${parsed.errors.join('\n- ')}`);
+  let parsed = parseProject(projectDir);
+  for (let attempt = 0; parsed.errors.length > 0 && attempt < 5; attempt += 1) {
+    if (!parsed.errors.every(isTransientRunGraphError)) break;
+    sleepMs(25 * (attempt + 1));
+    parsed = parseProject(projectDir);
   }
+  if (parsed.errors.length > 0) throw new Error(`TaskOps work has validation errors; cannot sync queue:\n- ${parsed.errors.join('\n- ')}`);
   return { projectDir, parsed };
 }
 
@@ -128,8 +148,17 @@ function selectedTasks(parsed) {
 
 function queueRowFromTask(projectDir, parsed, task, now) {
   const classification = classifyTaskReadiness(task);
-  const status = task.status || 'pending';
-  const readiness = classification.runReadiness || task.runReadiness || 'blocked';
+  let status = task.status || 'pending';
+  let readiness = classification.runReadiness || task.runReadiness || 'blocked';
+  let dependencyBlockReason = null;
+  if (!['done', 'cancelled'].includes(status)) {
+    const unresolved = unresolvedBlockers(parsed, task);
+    if (unresolved.length > 0) {
+      status = 'blocked';
+      readiness = 'blocked';
+      dependencyBlockReason = unresolved.join('; ');
+    }
+  }
   const priority = Number.isFinite(Number(task.priority)) ? Number(task.priority) : 0;
   return {
     id: `${task.taskGroupVersionId}:${task.id}`,
@@ -140,7 +169,7 @@ function queueRowFromTask(projectDir, parsed, task, now) {
     status,
     priority,
     blocked_reason: status === 'blocked' || readiness === 'blocked'
-      ? (classification.reason || task.runReadinessReason || null)
+      ? (dependencyBlockReason || classification.reason || task.runReadinessReason || null)
       : null,
     md_fingerprint: taskFingerprint(task),
     created_at: now,
@@ -149,6 +178,46 @@ function queueRowFromTask(projectDir, parsed, task, now) {
     task_group_version_id: task.taskGroupVersionId,
     title: task.title || task.id,
   };
+}
+
+function normalizeBlockedBy(task) {
+  if (!task.blockedBy) return [];
+  return Array.isArray(task.blockedBy) ? task.blockedBy : [task.blockedBy];
+}
+
+function unresolvedBlockers(parsed, task) {
+  const blockers = normalizeBlockedBy(task);
+  if (blockers.length === 0) return [];
+  const unresolved = [];
+  for (const ref of blockers) {
+    if (!ref || typeof ref !== 'object') {
+      unresolved.push('Invalid blocker reference.');
+      continue;
+    }
+    if (ref.type === 'task') {
+      const id = ref.id || ref.taskId;
+      const matches = [...parsed.tasks.values()].filter((candidate) => (
+        candidate.id === id
+        && (!ref.taskGroupVersionId || candidate.taskGroupVersionId === ref.taskGroupVersionId)
+      ));
+      if (matches.length === 0) unresolved.push(`Task blocker '${id}' not found.`);
+      else {
+        const open = matches.filter((candidate) => !['done', 'cancelled'].includes(candidate.status));
+        if (open.length > 0) unresolved.push(`Task blocker '${id}' is ${open.map((candidate) => candidate.status).join('/')}.`);
+      }
+      continue;
+    }
+    if (ref.type === 'runNode') {
+      const id = ref.id || ref.runNodeId;
+      const key = `${ref.runId}:${id}`;
+      const node = parsed.runNodes.get(key);
+      if (!node) unresolved.push(`Run node blocker '${key}' not found.`);
+      else if (!['done', 'cancelled'].includes(node.status)) unresolved.push(`Run node blocker '${key}' is ${node.status}.`);
+      continue;
+    }
+    unresolved.push(`Unsupported blocker type '${ref.type || 'unknown'}'.`);
+  }
+  return unresolved;
 }
 
 function readQueueRows(db) {
@@ -163,6 +232,7 @@ function readQueueRows(db) {
                AND COALESCE(ra.md_fingerprint, queue_items.md_fingerprint) = queue_items.md_fingerprint
            ) AS failed_attempts
     FROM queue_items
+    WHERE status != 'stale_projection'
     ORDER BY priority DESC, id ASC
   `).all();
 }
@@ -254,7 +324,22 @@ export function syncQueueProjection(workDir) {
       md_fingerprint = excluded.md_fingerprint,
       updated_at = excluded.updated_at
   `);
-  const deleteMissing = db.prepare(`DELETE FROM queue_items WHERE id NOT IN (${rows.map(() => '?').join(',') || "''"})`);
+  const markMissing = rows.length > 0
+    ? db.prepare(`
+        UPDATE queue_items
+        SET status = 'stale_projection',
+            readiness = 'blocked',
+            blocked_reason = 'No longer present in the selected TaskOps projection.',
+            updated_at = ?
+        WHERE id NOT IN (${rows.map(() => '?').join(',')})
+      `)
+    : db.prepare(`
+        UPDATE queue_items
+        SET status = 'stale_projection',
+            readiness = 'blocked',
+            blocked_reason = 'No longer present in the selected TaskOps projection.',
+            updated_at = ?
+      `);
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -274,8 +359,8 @@ export function syncQueueProjection(workDir) {
         row.updated_at,
       );
     }
-    if (rows.length > 0) deleteMissing.run(...rows.map((row) => row.id));
-    else db.exec('DELETE FROM queue_items');
+    if (rows.length > 0) markMissing.run(now, ...rows.map((row) => row.id));
+    else markMissing.run(now);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -397,6 +482,93 @@ export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds 
     item,
     lease,
     claimed: Boolean(lease),
+    maxAttempts: maxAttemptsLimit,
+  };
+}
+
+export function claimQueueItems(workDir, { runnerId = 'local-runner', ttlSeconds = 300, maxAttempts = null, limit = null } = {}) {
+  const synced = syncQueueProjection(workDir);
+  const { db, dbPath } = openQueueDb(synced.projectDir);
+  const now = isoNow();
+  const ttl = leaseTtlSeconds(ttlSeconds);
+  const maxAttemptsLimit = maxAttemptsValue(maxAttempts);
+  const batchLimit = limit == null ? null : Math.max(0, Math.floor(Number(limit)));
+  const claims = [];
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    expireStaleLeases(db, now);
+    const rows = db.prepare(`
+      SELECT qi.*
+      FROM queue_items qi
+      WHERE qi.status IN ('pending', 'active')
+        AND qi.readiness IN ('runnable', 'needs_decomposition', 'needs_exploration')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM leases l
+          WHERE l.queue_item_id = qi.id
+            AND l.status = 'active'
+            AND l.expires_at > ?
+        )
+        AND (
+          ? IS NULL
+          OR (
+            SELECT COUNT(*)
+            FROM runner_attempts ra
+            WHERE ra.queue_item_id = qi.id
+              AND ra.status = 'failed'
+              AND COALESCE(ra.md_fingerprint, qi.md_fingerprint) = qi.md_fingerprint
+          ) < ?
+        )
+      ORDER BY qi.priority DESC, qi.id ASC
+      ${batchLimit == null ? '' : 'LIMIT ?'}
+    `).all(...(batchLimit == null ? [now, maxAttemptsLimit, maxAttemptsLimit] : [now, maxAttemptsLimit, maxAttemptsLimit, batchLimit]));
+
+    for (const item of rows) {
+      const priorAttempt = db.prepare(`
+        SELECT COALESCE(MAX(attempt), 0) AS max_attempt
+        FROM leases
+        WHERE queue_item_id = ?
+      `).get(item.id)?.max_attempt || 0;
+      const lease = {
+        id: `lease-${randomUUID()}`,
+        queue_item_id: item.id,
+        runner_id: String(runnerId || 'local-runner'),
+        status: 'active',
+        leased_at: now,
+        heartbeat_at: now,
+        expires_at: isoPlusSeconds(now, ttl),
+        attempt: Number(priorAttempt) + 1,
+      };
+      db.prepare(`
+        INSERT INTO leases (
+          id, queue_item_id, runner_id, status, leased_at, heartbeat_at, expires_at, attempt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        lease.id,
+        lease.queue_item_id,
+        lease.runner_id,
+        lease.status,
+        lease.leased_at,
+        lease.heartbeat_at,
+        lease.expires_at,
+        lease.attempt,
+      );
+      claims.push({ item, lease });
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  db.close();
+  return {
+    projectDir: synced.projectDir,
+    workId: synced.workId,
+    dbPath,
+    claims,
+    claimed: claims.length > 0,
     maxAttempts: maxAttemptsLimit,
   };
 }

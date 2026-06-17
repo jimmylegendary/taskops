@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
+  claimQueueItems,
   claimQueueItem,
   insertProgressReport,
   insertRunnerAttempt,
@@ -15,11 +16,26 @@ function isoNow() {
   return new Date().toISOString();
 }
 
-function sleepMs(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return;
-  const buffer = new SharedArrayBuffer(4);
-  const view = new Int32Array(buffer);
-  Atomics.wait(view, 0, 0, Math.floor(ms));
+function sleepMs(ms, shouldStop = null) {
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve();
+  if (typeof shouldStop === 'function' && shouldStop()) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    let poll = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      resolve();
+    };
+    const timer = setTimeout(done, Math.floor(ms));
+    if (typeof shouldStop === 'function') {
+      poll = setInterval(() => {
+        if (shouldStop()) done();
+      }, 50);
+    }
+  });
 }
 
 function optionalPositiveInteger(value, name) {
@@ -83,6 +99,15 @@ function executorForRuntime(runtimeAdapter) {
     case 'openclaw-cli': return 'openclaw-agent';
     default: throw new Error(`Unsupported runtime adapter '${runtimeAdapter}'`);
   }
+}
+
+function safeIdPart(value) {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 96);
+  return safe || 'item';
 }
 
 function normalizeReportSink(value) {
@@ -173,6 +198,199 @@ function writeProgressReport(workDir, {
     message,
     errorSummary: deliveryError,
   }).report;
+}
+
+function runWorkerProcess(args, timeoutMs = null) {
+  return new Promise((resolve) => {
+    const child = spawn(args[0], args.slice(1), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let timer = null;
+    if (timeoutMs != null && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+      }, timeoutMs + 1000);
+    }
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', (error) => {
+      if (timer) clearTimeout(timer);
+      resolve({ status: 1, stdout: stdout.trim(), stderr: stderr.trim(), error, timedOut });
+    });
+    child.on('close', (status, signal) => {
+      if (timer) clearTimeout(timer);
+      resolve({ status, signal, stdout: stdout.trim(), stderr: stderr.trim(), timedOut });
+    });
+  });
+}
+
+async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runnerId, reportSink, masterSessionKey, agent, runId, timeout, actor, waveId, cliPath, nodePath }) {
+  const item = claim.item;
+  const lease = claim.lease;
+  const target = parseQueueItemId(item.id);
+  const workerRunId = runId
+    ? `${safeIdPart(runId)}-${safeIdPart(item.id)}`
+    : `run-${safeIdPart(item.id)}`;
+  const attemptId = `attempt-${randomUUID()}`;
+  insertRunnerAttempt(workDir, {
+    id: attemptId,
+    queueItemId: item.id,
+    leaseId: lease.id,
+    runnerId,
+    runtimeAdapter,
+    status: 'running',
+    startedAt: isoNow(),
+  });
+
+  const args = [
+    nodePath || process.execPath,
+    cliPath || process.argv[1],
+    'run',
+    workDir,
+    '--executor',
+    executorForRuntime(runtimeAdapter),
+    '--max-steps',
+    '1',
+    '--target-task-id',
+    target.taskId,
+    '--target-task-group-version-id',
+    target.taskGroupVersionId,
+    '--allow-concurrent-target',
+    '--run-id',
+    workerRunId,
+    '--json',
+  ];
+  if (agent) args.push('--agent', agent);
+  if (timeout != null) args.push('--timeout', String(timeout));
+  if (actor) args.push('--actor', actor);
+
+  let runResult;
+  let releaseStatus = 'failed';
+  let errorSummary = null;
+  let report = null;
+  const worker = await runWorkerProcess(args, timeout == null ? null : Number(timeout) * 1000);
+  if (worker.status === 0 && worker.stdout) {
+    try {
+      runResult = JSON.parse(worker.stdout);
+      releaseStatus = terminalStatusFromRun(runResult);
+    } catch (error) {
+      errorSummary = `worker JSON parse failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  } else {
+    errorSummary = worker.timedOut
+      ? `worker timed out after ${timeout}s`
+      : (worker.stderr || worker.stdout || worker.error?.message || `worker exited with status ${worker.status}`);
+  }
+  if (!runResult) {
+    runResult = {
+      workId: null,
+      runId: null,
+      stopReason: worker.timedOut ? 'timeout' : 'error',
+      stopDetail: errorSummary,
+      stepsRun: 0,
+      actions: [],
+    };
+  }
+
+  const finishedAt = isoNow();
+  updateRunnerAttempt(workDir, attemptId, {
+    status: releaseStatus === 'done' ? 'done' : 'failed',
+    finishedAt,
+    runId: runResult?.runId || null,
+    stopReason: runResult?.stopReason || null,
+    errorSummary,
+  });
+  releaseLease(workDir, lease.id, { status: releaseStatus });
+
+  if (reportSink !== 'none') {
+    const message = errorSummary
+      ? `TaskOps ${waveId} (${item.work_id || ''})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\nerror: ${errorSummary}`
+      : buildProgressMessage({ workId: item.work_id || runResult.workId || '', waveId, item, runResult, releaseStatus });
+    report = writeProgressReport(workDir, {
+      item,
+      target,
+      waveId,
+      masterSessionKey: masterSessionKey || null,
+      reportSink,
+      message,
+      errorSummary,
+    });
+  }
+
+  return {
+    claimed: true,
+    waveId,
+    queueItem: item,
+    lease,
+    attemptId,
+    runtimeAdapter,
+    runResult,
+    releaseStatus,
+    errorSummary,
+    report,
+    worker: {
+      status: worker.status,
+      signal: worker.signal || null,
+      timedOut: worker.timedOut,
+      stdout: worker.stdout,
+      stderr: worker.stderr,
+    },
+  };
+}
+
+export async function runQueueWave(workDir, options = {}) {
+  const runtimeAdapter = normalizeRuntimeAdapter(options.runtimeAdapter || options.runtime);
+  const reportSink = normalizeReportSink(options.reportSink || options.report);
+  const runnerId = options.runnerId || `taskops-runner-${process.pid}`;
+  const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
+  const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts');
+  const maxParallel = optionalPositiveInteger(options.maxParallel, 'max parallel') ?? 8;
+  const waveId = options.waveId || `wave-${randomUUID()}`;
+  const claim = claimQueueItems(workDir, { runnerId, ttlSeconds, maxAttempts, limit: maxParallel });
+  if (!claim.claimed || claim.claims.length === 0) {
+    return {
+      projectDir: claim.projectDir,
+      workId: claim.workId,
+      dbPath: claim.dbPath,
+      claimed: false,
+      stopReason: 'no_claimable_queue_item',
+      waveId,
+      maxAttempts,
+      maxParallel,
+      workers: [],
+    };
+  }
+
+  const workers = await Promise.all(claim.claims.map((itemClaim, index) => runClaimedQueueItemWorker(workDir, {
+    claim: itemClaim,
+    runtimeAdapter,
+    runnerId: `${runnerId}-worker-${index + 1}`,
+    reportSink,
+    masterSessionKey: options.masterSessionKey || null,
+    agent: options.agent || null,
+    runId: options.runId || null,
+    timeout: options.timeout || null,
+    actor: options.actor || runnerId,
+    waveId: `${waveId}-worker-${index + 1}`,
+    cliPath: options.cliPath || process.argv[1],
+    nodePath: options.nodePath || process.execPath,
+  })));
+  syncQueueProjection(workDir);
+  return {
+    projectDir: claim.projectDir,
+    workId: claim.workId,
+    dbPath: claim.dbPath,
+    claimed: true,
+    waveId,
+    runtimeAdapter,
+    maxAttempts,
+    maxParallel,
+    claimedCount: claim.claims.length,
+    workers,
+    releaseStatus: workers.some((worker) => worker.releaseStatus === 'failed') ? 'failed' : 'done',
+  };
 }
 
 export function runQueueOnce(workDir, options = {}) {
@@ -286,12 +504,13 @@ export function runQueueOnce(workDir, options = {}) {
   };
 }
 
-export function runQueueWatch(workDir, options = {}) {
+export async function runQueueWatch(workDir, options = {}) {
   const runtimeAdapter = normalizeRuntimeAdapter(options.runtimeAdapter || options.runtime);
   const reportSink = normalizeReportSink(options.reportSink || options.report);
   const runnerId = options.runnerId || `taskops-runner-${process.pid}`;
   const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
   const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts') ?? 3;
+  const maxParallel = optionalPositiveInteger(options.maxParallel, 'max parallel') ?? 8;
   const pollIntervalMs = optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms') ?? 5000;
   const maxWaves = optionalPositiveInteger(options.maxWaves, 'max waves');
   const maxIdleCycles = optionalPositiveInteger(options.maxIdleCycles, 'max idle cycles');
@@ -299,8 +518,10 @@ export function runQueueWatch(workDir, options = {}) {
   const until = normalizeUntil(options.until);
   const stopOnFailure = normalizeBool(options.stopOnFailure, true);
   const watchId = options.watchId || `watch-${randomUUID()}`;
+  const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
   const startedAt = isoNow();
   let claimedWaves = 0;
+  let claimedItems = 0;
   let idleCycles = 0;
   let firstIdleAt = null;
   let stopReason = null;
@@ -309,9 +530,23 @@ export function runQueueWatch(workDir, options = {}) {
   const waves = [];
 
   while (true) {
+    if (shouldStop()) {
+      stopReason = 'stopped';
+      stopDetail = 'Stop requested by supervisor.';
+      break;
+    }
     if (until != null && Date.now() >= until) {
       stopReason = 'deadline_reached';
       break;
+    }
+    try {
+      finalExplain = explainWork(workDir);
+      if (finalExplain.complete) {
+        stopReason = 'all_closed';
+        break;
+      }
+    } catch {
+      finalExplain = null;
     }
     if (maxWaves != null && claimedWaves >= maxWaves) {
       stopReason = 'max_waves';
@@ -320,7 +555,7 @@ export function runQueueWatch(workDir, options = {}) {
     }
 
     const waveId = `${watchId}-wave-${claimedWaves + 1}`;
-    const result = runQueueOnce(workDir, {
+    const result = await runQueueWave(workDir, {
       runtimeAdapter,
       runnerId,
       ttlSeconds,
@@ -332,10 +567,14 @@ export function runQueueWatch(workDir, options = {}) {
       actor: options.actor || runnerId,
       maxAttempts,
       waveId,
+      maxParallel,
+      cliPath: options.cliPath || process.argv[1],
+      nodePath: options.nodePath || process.execPath,
     });
 
     if (result.claimed) {
       claimedWaves += 1;
+      claimedItems += result.claimedCount || 1;
       idleCycles = 0;
       firstIdleAt = null;
       waves.push(result);
@@ -371,7 +610,7 @@ export function runQueueWatch(workDir, options = {}) {
       }
     }
 
-    sleepMs(pollIntervalMs);
+    await sleepMs(pollIntervalMs, shouldStop);
   }
 
   const stoppedAt = isoNow();
@@ -398,10 +637,12 @@ export function runQueueWatch(workDir, options = {}) {
     stopReason: stopReason || 'stopped',
     stopDetail,
     claimedWaves,
+    claimedItems,
     idleCycles,
     maxWaves,
     maxIdleCycles,
     maxAttempts,
+    maxParallel,
     idleExitAfterSeconds,
     pollIntervalMs,
     stopOnFailure,

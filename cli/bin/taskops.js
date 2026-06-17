@@ -16,7 +16,7 @@ import {
   writeSummary,
   writeVersionFromSpec,
 } from '../lib-taskops.js';
-import { closeTarget, computeNextAction, explainWork, recheckBlockedTasks, runTaskOps } from '../lib-runner.js';
+import { closeTarget, computeNextAction, explainWork, recheckBlockedTasks, reviewTarget, runTaskOps } from '../lib-runner.js';
 
 function usage() {
   console.log(`TaskOps CLI
@@ -30,6 +30,7 @@ Usage:
   taskops classify-runnable <work-dir> <task-id> [--json]
   taskops next <work-dir> [--json]
   taskops explain <work-dir> [--json]
+  taskops review <work-dir> <run-node-id|task-id> [--json]
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
@@ -40,10 +41,11 @@ Usage:
   taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
   taskops queue reports <work-dir> [--json]
   taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
-  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
-  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--json]
-  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--start] [--dry-run] [--json]
+  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
+  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
+  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--json]
+  taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--no-start] [--dry-run] [--json]
+  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--start] [--dry-run] [--json]
   taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -275,6 +277,32 @@ try {
     process.exit(0);
   }
 
+  if (cmd === 'review') {
+    const workDir = positional[1];
+    const targetId = positional[2];
+    if (!workDir) fail('Missing review work-dir');
+    if (!targetId) fail('Missing review target id');
+    const result = reviewTarget(workDir, targetId);
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`Reviewed ${result.target.runId}/${result.target.runNodeId} with ${result.reviewNodeId}`);
+      console.log(`decision: ${result.reviewReport.decision}`);
+      if (result.reviewReport.missingExpected.length > 0) {
+        console.log('missing expected:');
+        for (const item of result.reviewReport.missingExpected) console.log(`- ${item}`);
+      }
+      if (result.reviewReport.unsupportedObserved.length > 0) {
+        console.log('unsupported observed:');
+        for (const item of result.reviewReport.unsupportedObserved) console.log(`- ${item}`);
+      }
+      if (result.reviewReport.failedChecks.length > 0) {
+        console.log('failed checks:');
+        for (const item of result.reviewReport.failedChecks) console.log(`- ${item}`);
+      }
+    }
+    process.exit(0);
+  }
+
   if (cmd === 'unblock-check') {
     const workDir = positional[1];
     if (!workDir) fail('Missing unblock-check work-dir');
@@ -301,6 +329,9 @@ try {
       loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
+      targetTaskId: flags['target-task-id'] && flags['target-task-id'] !== true ? String(flags['target-task-id']) : null,
+      targetTaskGroupVersionId: flags['target-task-group-version-id'] && flags['target-task-group-version-id'] !== true ? String(flags['target-task-group-version-id']) : null,
+      allowConcurrentTarget: flags['allow-concurrent-target'] === true,
     });
     if (flags.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -391,6 +422,7 @@ try {
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
+      maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
     };
     if (subcmd === 'once') {
       const result = runQueueOnce(workDir, {
@@ -407,7 +439,7 @@ try {
       }
       process.exit(result.releaseStatus === 'failed' ? 1 : 0);
     }
-    const result = runQueueWatch(workDir, {
+    const result = await runQueueWatch(workDir, {
       ...commonOptions,
       watchId: flags['watch-id'] && flags['watch-id'] !== true ? String(flags['watch-id']) : null,
       pollIntervalMs: flags['poll-interval-ms'] != null && flags['poll-interval-ms'] !== true ? flags['poll-interval-ms'] : null,
@@ -419,7 +451,7 @@ try {
     });
     if (flags.json) console.log(JSON.stringify(result, null, 2));
     else {
-      console.log(`workId=${result.workId} watchId=${result.watchId} runtime=${result.runtimeAdapter} stopReason=${result.stopReason} waves=${result.claimedWaves}`);
+      console.log(`workId=${result.workId} watchId=${result.watchId} runtime=${result.runtimeAdapter} stopReason=${result.stopReason} waves=${result.claimedWaves} items=${result.claimedItems}`);
       if (result.stopDetail) console.log(`stopDetail=${result.stopDetail}`);
       for (const wave of result.waves) {
         const queueItem = wave.queueItem?.id || '-';
@@ -430,10 +462,11 @@ try {
     process.exit(result.stopReason === 'wave_failed' ? 1 : 0);
   }
 
-  if (cmd === 'daemon') {
+    if (cmd === 'daemon') {
     const {
       controlDaemon,
       daemonLogs,
+      enableDaemon,
       installDaemon,
       readDaemonUnit,
       renderSystemdUnit,
@@ -441,13 +474,14 @@ try {
       uninstallDaemon,
     } = await import('../lib-daemon.js');
     const subcmd = positional[1];
-    if (!subcmd) fail('Missing daemon subcommand: run, unit, install, start, stop, restart, status, logs, or uninstall');
+    if (!subcmd) fail('Missing daemon subcommand: run, unit, enable, install, start, stop, restart, status, logs, or uninstall');
     const daemonOptions = {
       name: flags.name && flags.name !== true ? String(flags.name) : null,
       runtimeAdapter: flags.runtime && flags.runtime !== true ? String(flags.runtime) : null,
       runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
       ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? flags['ttl-seconds'] : null,
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
+      maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
       masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
@@ -466,10 +500,10 @@ try {
     if (subcmd === 'run') {
       const workDir = positional[2];
       if (!workDir) fail('Missing daemon run work-dir');
-      const result = runDaemon(workDir, {
+      const result = await runDaemon(workDir, {
         ...daemonOptions,
         onCycle: flags.json ? null : (entry) => {
-          console.log(`cycle=${entry.cycle} watchId=${entry.watchId} stopReason=${entry.stopReason} waves=${entry.claimedWaves}`);
+          console.log(`cycle=${entry.cycle} watchId=${entry.watchId} stopReason=${entry.stopReason} waves=${entry.claimedWaves} items=${entry.claimedItems}`);
           if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
         },
       });
@@ -500,6 +534,25 @@ try {
       else {
         console.log(`${result.dryRun ? 'would install' : 'installed'} ${result.serviceName}`);
         console.log(result.unitPath);
+      }
+      process.exit(0);
+    }
+
+    if (subcmd === 'enable') {
+      const workDir = positional[2];
+      if (!workDir) fail('Missing daemon enable work-dir');
+      const result = enableDaemon(workDir, {
+        ...daemonOptions,
+        start: flags['no-start'] === true ? false : true,
+        dryRun: flags['dry-run'] === true,
+        enable: flags.enable === false || flags.enable === 'false' ? false : true,
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`${result.dryRun ? 'would enable' : 'enabled'} ${result.serviceName}`);
+        console.log(result.unitPath);
+        console.log(result.activationPath);
+        console.log(`start=${result.startRequested ? 'yes' : 'no'} queueItems=${result.activation.syncedQueueItems ?? 'not-synced'}`);
       }
       process.exit(0);
     }

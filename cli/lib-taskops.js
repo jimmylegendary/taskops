@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process';
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
+export const REVIEW_DECISION_VALUES = ['approved', 'rejected', 'needs_verification'];
+export const ACCEPTANCE_MODE_VALUES = ['informational', 'enforced', 'guarded', 'runner-managed'];
 export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow'];
 export const WORK_ENTITY_TYPES = ['work', 'project'];
 export const EOW_GRAPH_TYPES = ['task', 'run'];
@@ -188,6 +190,8 @@ export function parseScalar(value) {
   const stripped = String(value).trim();
   if (stripped === 'true') return true;
   if (stripped === 'false') return false;
+  if (stripped === '[]') return [];
+  if (stripped === '{}') return {};
   if (/^-?\d+$/.test(stripped)) return Number(stripped);
   return stripped;
 }
@@ -224,7 +228,7 @@ export function parseFrontmatterText(content, filePath = '<inline>') {
     if (trimmed.startsWith('- ')) {
       if (!Array.isArray(parent.container)) throw new Error(`Invalid list item in ${filePath}: ${raw}`);
       const itemText = trimmed.slice(2);
-      if (!itemText.includes(':')) {
+      if (!/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(itemText)) {
         parent.container.push(parseScalar(itemText));
       } else {
         const obj = {};
@@ -416,6 +420,13 @@ export function parseProject(projectDir) {
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
+        if (task.acceptance != null) {
+          if (!task.acceptance || typeof task.acceptance !== 'object' || Array.isArray(task.acceptance)) {
+            warnings.push(withPath(taskPath, 'acceptance should be an object with expectedOutcome, requiredArtifacts, and requiredChecks'));
+          } else if (task.acceptance.mode && !ACCEPTANCE_MODE_VALUES.includes(task.acceptance.mode)) {
+            warnings.push(withPath(taskPath, `invalid acceptance.mode '${task.acceptance.mode}'`));
+          }
+        }
         const key = taskKey(v.id, task.id);
         if (tasks.has(key)) errors.push(withPath(taskPath, t.duplicateTaskKey(key)));
         const taskRecord = { ...task, path: taskPath };
@@ -520,6 +531,14 @@ export function parseProject(projectDir) {
           if (!(field in node) || node[field] === '' || node[field] == null) warnings.push(withPath(nodePath, t.delegateMissingField(field)));
         }
       }
+      if (node.type === 'review') {
+        if (!node.reviewReport || typeof node.reviewReport !== 'object' || Array.isArray(node.reviewReport)) {
+          warnings.push(withPath(nodePath, 'review node missing reviewReport'));
+        } else if (!REVIEW_DECISION_VALUES.includes(node.reviewReport.decision)) {
+          errors.push(withPath(nodePath, `invalid reviewReport.decision '${node.reviewReport.decision}'`));
+        }
+        if (!node.reviewsRunNodeId) warnings.push(withPath(nodePath, 'review node missing reviewsRunNodeId'));
+      }
       const nodeRecord = { ...node, path: nodePath };
       const key = runNodeKey(run.id, node.id);
       if (runNodes.has(key)) errors.push(withPath(nodePath, `duplicate run node key '${key}'`));
@@ -588,6 +607,7 @@ export function parseProject(projectDir) {
 
   for (const node of runNodes.values()) {
     if (!node.sourceTaskId) continue;
+    if (node.type === 'review') continue;
     const candidates = [...tasks.values()].filter((task) => task.id === node.sourceTaskId && (!node.sourceTaskGroupVersionId || task.taskGroupVersionId === node.sourceTaskGroupVersionId));
     for (const task of candidates) {
       const hasRef = normalizeRunRefs(task).some((ref) => ref && ref.runId === node.runId && ref.runNodeId === node.id);
@@ -816,22 +836,64 @@ function fmScalar(value) {
 
 export function fmBlock(data) {
   const lines = ['---'];
+  const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+  const emitArrayItem = (item, indent) => {
+    if (Array.isArray(item)) {
+      if (item.length === 0) {
+        lines.push(`${indent}- []`);
+        return;
+      }
+      lines.push(`${indent}-`);
+      for (const nested of item) emitArrayItem(nested, `${indent}  `);
+      return;
+    }
+    if (isObject(item)) {
+      const entries = Object.entries(item);
+      if (entries.length === 0) {
+        lines.push(`${indent}- {}`);
+        return;
+      }
+      const [firstK, firstV] = entries[0];
+      if (Array.isArray(firstV)) {
+        if (firstV.length === 0) lines.push(`${indent}- ${firstK}: []`);
+        else {
+          lines.push(`${indent}- ${firstK}:`);
+          for (const nested of firstV) emitArrayItem(nested, `${indent}  `);
+        }
+      } else if (isObject(firstV)) {
+        if (Object.keys(firstV).length === 0) lines.push(`${indent}- ${firstK}: {}`);
+        else {
+          lines.push(`${indent}- ${firstK}:`);
+          for (const [k, v] of Object.entries(firstV)) emit(k, v, `${indent}  `);
+        }
+      } else {
+        lines.push(`${indent}- ${firstK}: ${fmScalar(firstV)}`);
+      }
+      for (const [k, v] of entries.slice(1)) emit(k, v, `${indent}  `);
+      return;
+    }
+    lines.push(`${indent}- ${fmScalar(item)}`);
+  };
   const emit = (key, value, indent = '') => {
     if (Array.isArray(value)) {
+      if (value.length === 0) {
+        lines.push(`${indent}${key}: []`);
+        return;
+      }
       lines.push(`${indent}${key}:`);
       for (const item of value) {
-        if (item && typeof item === 'object' && !Array.isArray(item)) {
-          const entries = Object.entries(item);
-          if (entries.length === 0) lines.push(`${indent}  - {}`);
-          else {
-            const [firstK, firstV] = entries[0];
-            lines.push(`${indent}  - ${firstK}: ${fmScalar(firstV)}`);
-            for (const [k, v] of entries.slice(1)) lines.push(`${indent}    ${k}: ${fmScalar(v)}`);
-          }
-        } else {
-          lines.push(`${indent}  - ${fmScalar(item)}`);
-        }
+        emitArrayItem(item, `${indent}  `);
       }
+      return;
+    }
+    if (isObject(value)) {
+      const entries = Object.entries(value);
+      if (entries.length === 0) {
+        lines.push(`${indent}${key}: {}`);
+        return;
+      }
+      lines.push(`${indent}${key}:`);
+      for (const [k, v] of entries) emit(k, v, `${indent}  `);
       return;
     }
     lines.push(`${indent}${key}: ${fmScalar(value)}`);
@@ -1086,6 +1148,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
+    if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');
   });
   for (const eow of spec.eows || []) {

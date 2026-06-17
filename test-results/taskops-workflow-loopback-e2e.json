@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-05-15T04:27:26.267Z",
-  "tempRoot": "/tmp/taskops-workflow-e2e-AskXCE",
+  "generatedAt": "2026-06-17T18:40:44.531Z",
+  "tempRoot": "/tmp/taskops-workflow-e2e-JG8pyH",
   "summary": {
     "passed": 5,
     "total": 5,
@@ -34,7 +34,7 @@
           "waitingDelegations": 0,
           "openBlockers": 0
         },
-        "eventsPath": "/tmp/taskops-workflow-e2e-AskXCE/tc-autonomous-decomposition/runs/run-main/events.jsonl"
+        "eventsPath": "/tmp/taskops-workflow-e2e-JG8pyH/tc-autonomous-decomposition/runs/run-main/events.jsonl"
       },
       "pass": true
     },
