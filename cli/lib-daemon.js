@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runQueueWatch } from './lib-orchestrator.js';
 import { QUEUE_DB_RELATIVE_PATH, syncQueueProjection } from './lib-queue.js';
+import { DEFAULT_MAX_LOOPBACKS } from './lib-runner.js';
 
 function isoNow() {
   return new Date().toISOString();
@@ -52,6 +53,20 @@ function normalizeBool(value, fallback) {
   throw new Error(`Invalid boolean value: ${value}`);
 }
 
+function normalizeLoopbackPolicy(value) {
+  const policy = value == null || value === '' ? 'none' : String(value).trim().toLowerCase();
+  if (!['none', 'self'].includes(policy)) throw new Error(`Invalid loopback policy '${value}'. Use none or self.`);
+  return policy;
+}
+
+function normalizeMaxLoopbacks(value, loopbackPolicy) {
+  if (loopbackPolicy === 'none') return 0;
+  if (value == null || value === '') return DEFAULT_MAX_LOOPBACKS;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid max loopbacks: ${value}`);
+  return Math.floor(n);
+}
+
 function sanitizeName(value) {
   const raw = String(value || '').trim().toLowerCase();
   const cleaned = raw.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -76,18 +91,24 @@ function keyValueLine(key, value) {
 export function normalizeDaemonOptions(workDir, options = {}) {
   const name = sanitizeName(options.name || options.daemonName || defaultDaemonName(workDir));
   const runnerId = options.runnerId || `taskopsd-${name}`;
+  const loopbackPolicy = normalizeLoopbackPolicy(options.loopback || options.loopbackPolicy);
   return {
     workDir: resolve(workDir),
     name,
     runnerId,
+    runId: options.runId || null,
     runtimeAdapter: options.runtimeAdapter || options.runtime || 'openclaw-cli',
     ttlSeconds: optionalPositiveInteger(options.ttlSeconds, 'ttl seconds', 300),
     maxAttempts: optionalPositiveInteger(options.maxAttempts, 'max attempts', 3),
     maxParallel: optionalPositiveInteger(options.maxParallel, 'max parallel', 8),
+    maxSteps: optionalPositiveInteger(options.maxSteps, 'max steps'),
+    loopbackPolicy,
+    maxLoopbacks: normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy),
     timeout: options.timeout == null || options.timeout === '' ? 300 : Number(options.timeout),
     reportSink: options.reportSink || 'ledger',
     masterSessionKey: options.masterSessionKey || null,
     agent: options.agent || null,
+    actor: options.actor || null,
     pollIntervalMs: optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms', 5000),
     daemonPollIntervalMs: optionalPositiveInteger(options.daemonPollIntervalMs, 'daemon poll interval ms', 30000),
     failureBackoffMs: optionalPositiveInteger(options.failureBackoffMs, 'failure backoff ms', 60000),
@@ -145,9 +166,13 @@ function runnerArgs(opts) {
   ];
   if (opts.masterSessionKey) args.push('--master-session-key', opts.masterSessionKey);
   if (opts.agent) args.push('--agent', opts.agent);
+  if (opts.actor) args.push('--actor', opts.actor);
+  if (opts.runId) args.push('--run-id', opts.runId);
   if (opts.maxDaemonCycles != null) args.push('--max-daemon-cycles', String(opts.maxDaemonCycles));
   if (opts.maxWaves != null) args.push('--max-waves', String(opts.maxWaves));
   if (opts.maxParallel != null) args.push('--max-parallel', String(opts.maxParallel));
+  if (opts.maxSteps != null) args.push('--max-steps', String(opts.maxSteps));
+  if (opts.loopbackPolicy !== 'none') args.push('--loopback', opts.loopbackPolicy, '--max-loopbacks', String(opts.maxLoopbacks));
   if (opts.maxIdleCycles != null) args.push('--max-idle-cycles', String(opts.maxIdleCycles));
   if (opts.idleExitAfterSeconds != null) args.push('--idle-exit-after-seconds', String(opts.idleExitAfterSeconds));
   if (opts.until) args.push('--until', opts.until);
@@ -232,10 +257,16 @@ function runnerActivationConfig(rendered, queue, { started, dryRun }) {
     unitPath: rendered.unitPath,
     runtimeAdapter: rendered.options.runtimeAdapter,
     runnerId: rendered.options.runnerId,
+    runId: rendered.options.runId,
     reportSink: rendered.options.reportSink,
+    actor: rendered.options.actor,
     masterSessionKeyConfigured: Boolean(rendered.options.masterSessionKey),
     queueDbPath: queue?.dbPath || join(rendered.options.workDir, QUEUE_DB_RELATIVE_PATH),
     syncedQueueItems: queue?.synced ?? null,
+    maxParallel: rendered.options.maxParallel,
+    maxSteps: rendered.options.maxSteps,
+    loopbackPolicy: rendered.options.loopbackPolicy,
+    maxLoopbacks: rendered.options.maxLoopbacks,
     started: Boolean(started),
   };
 }
@@ -342,13 +373,18 @@ export async function runDaemon(workDir, options = {}) {
       result = await runQueueWatch(opts.workDir, {
         runtimeAdapter: opts.runtimeAdapter,
         runnerId: opts.runnerId,
+        runId: opts.runId,
         ttlSeconds: opts.ttlSeconds,
         maxAttempts: opts.maxAttempts,
         maxParallel: opts.maxParallel,
+        maxSteps: opts.maxSteps,
+        loopback: opts.loopbackPolicy,
+        maxLoopbacks: opts.maxLoopbacks,
         timeout: opts.timeout,
         reportSink: opts.reportSink,
         masterSessionKey: opts.masterSessionKey,
         agent: opts.agent,
+        actor: opts.actor,
         pollIntervalMs: opts.pollIntervalMs,
         maxWaves: opts.maxWaves,
         maxIdleCycles: opts.maxIdleCycles,
@@ -376,7 +412,10 @@ export async function runDaemon(workDir, options = {}) {
         waveId: wave.waveId,
         claimed: Boolean(wave.claimed),
         claimedCount: wave.claimedCount || (wave.claimed ? 1 : 0),
+        queueItemId: wave.queueItem?.id || null,
         releaseStatus: wave.releaseStatus || null,
+        stopReason: wave.runResult?.stopReason || null,
+        targetCompleted: wave.targetCompleted ?? null,
         workerStatuses: Array.isArray(wave.workers)
           ? wave.workers.map((worker) => ({
               queueItemId: worker.queueItem?.id || null,

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -42,6 +42,12 @@ function sleepMs(ms) {
   Atomics.wait(view, 0, 0, Math.floor(ms));
 }
 
+function writeTextFileAtomic(filePath, text) {
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  writeFileSync(tmpPath, text, 'utf8');
+  renameSync(tmpPath, filePath);
+}
+
 const FM_SCALAR_MAX_LEN = 500;
 const FM_SCALAR_FALLBACK = 'executor_failed';
 const ACCEPTANCE_MODES = new Set(['informational', 'enforced', 'guarded', 'runner-managed']);
@@ -59,7 +65,7 @@ function rewriteFrontmatter(filePath, updater) {
   const body = readBody(filePath);
   const next = updater({ ...fm }) ?? fm;
   const text = fmBlock(next) + (body ? body + '\n' : '');
-  writeFileSync(filePath, text, 'utf8');
+  writeTextFileAtomic(filePath, text);
 }
 
 function logEvent(eventsPath, event) {
@@ -270,7 +276,7 @@ function ensureRunDirectories(projectDir, runId, project) {
       createdAt: isoNow(),
       status: 'active',
     };
-    writeFileSync(indexPath, fmBlock(fm) + `# Run ${runId}\n`, 'utf8');
+    writeTextFileAtomic(indexPath, fmBlock(fm) + `# Run ${runId}\n`);
   }
   const logPath = join(runDir, 'run-log.md');
   if (!existsSync(logPath)) writeFileSync(logPath, '# Run log\n\n- Run initialized by runner.\n', 'utf8');
@@ -716,12 +722,13 @@ function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs }) {
 export function isSelfDelegate(node, project) {
   if (!node || typeof node !== 'object') return false;
   if (node.type !== 'delegate') return false;
-  if (node.selfDelegate === true) return true;
   const delegateeType = typeof node.delegateeType === 'string' ? node.delegateeType.trim().toLowerCase() : '';
-  if (delegateeType === 'self') return true;
   const delegateeRef = node.delegateeRef == null ? '' : String(node.delegateeRef).trim().toLowerCase();
-  if (delegateeRef === 'self') return true;
-  if (project?.id && delegateeRef === String(project.id).toLowerCase()) return true;
+  const refIsSelf = delegateeRef === 'self' || (project?.id && delegateeRef === String(project.id).toLowerCase());
+  if (delegateeType && delegateeType !== 'self') return false;
+  if (delegateeRef && !refIsSelf) return false;
+  if (delegateeType === 'self' || refIsSelf) return true;
+  if (node.selfDelegate === true) return true;
   return false;
 }
 
@@ -794,7 +801,7 @@ function writeRunEdge({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeT
     status: 'done',
   };
   if (note) fm.note = sanitizeFmScalar(note);
-  writeFileSync(edgePath, fmBlock(fm) + `# Run edge: ${fromRunNodeId} -${edgeType}-> ${toRunNodeId}\n`, 'utf8');
+  writeTextFileAtomic(edgePath, fmBlock(fm) + `# Run edge: ${fromRunNodeId} -${edgeType}-> ${toRunNodeId}\n`);
   return edgePath;
 }
 
@@ -802,8 +809,10 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   const startedAt = isoNow();
   const safeDelegateId = String(delegate.id).replace(/[^a-zA-Z0-9._-]/g, '-');
   const loopbackNodeId = `run-node-loopback-${safeDelegateId}${loopbackIndex > 1 ? `-${loopbackIndex}` : ''}`;
+  const loopbackRunId = delegate.runId || runId;
+  const loopbackRunDir = loopbackRunId === runId ? runDir : ensureRunDirectories(projectDir, loopbackRunId, project);
   const loopbackPath = ensureRunNode({
-    runDir, runId, runNodeId: loopbackNodeId,
+    runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: loopbackNodeId,
     type: 'loopback',
     title: `Loopback resolution for ${delegate.id}`,
     sourceTaskId: delegate.sourceTaskId || null,
@@ -821,7 +830,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   });
 
   writeRunEdge({
-    runDir, runId,
+    runDir: loopbackRunDir, runId: loopbackRunId,
     edgeId: `edge-${delegate.id}-loopback-${loopbackIndex}`,
     fromRunNodeId: delegate.id,
     toRunNodeId: loopbackNodeId,
@@ -832,18 +841,22 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
 
   logEvent(eventsPath, {
     timestamp: startedAt, type: 'loopback_started', runId,
+    loopbackRunId,
     delegateRunNodeId: delegate.id, loopbackRunNodeId: loopbackNodeId,
     sourceTaskId: delegate.sourceTaskId || null,
     sourceTaskGroupVersionId: delegate.sourceTaskGroupVersionId || null,
     executor, executedBy: actorName, executionMode: 'loopback', loopbackIndex,
   });
   appendRunLog(runDir, `${startedAt} loopback_started delegateRunNodeId=${delegate.id} loopbackRunNodeId=${loopbackNodeId} executor=${executor} executedBy=${actorName}`);
+  if (loopbackRunDir !== runDir) {
+    appendRunLog(loopbackRunDir, `${startedAt} loopback_started delegateRunNodeId=${delegate.id} loopbackRunNodeId=${loopbackNodeId} executor=${executor} executedBy=${actorName} workerRunId=${runId}`);
+  }
 
   let result;
   try {
     result = executor === 'dry-run'
-      ? performDryRunLoopback({ runDir, loopbackNodeId, delegate, actorName })
-      : performAgentLoopback({ project, projectDir, delegate, agentId, stepTimeoutMs, runDir, runId, loopbackNodeId, actorName });
+      ? performDryRunLoopback({ runDir: loopbackRunDir, loopbackNodeId, delegate, actorName })
+      : performAgentLoopback({ project, projectDir, delegate, agentId, stepTimeoutMs, runDir: loopbackRunDir, runId: loopbackRunId, loopbackNodeId, actorName });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -857,11 +870,15 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     });
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'loopback_failed', runId,
+      loopbackRunId,
       delegateRunNodeId: delegate.id, loopbackRunNodeId: loopbackNodeId,
       executor, executedBy: actorName, executionMode: 'loopback', loopbackIndex,
       message: result.message || null,
     });
     appendRunLog(runDir, `${finishedAt} loopback_failed delegateRunNodeId=${delegate.id} reason=${result.message || ''}`);
+    if (loopbackRunDir !== runDir) {
+      appendRunLog(loopbackRunDir, `${finishedAt} loopback_failed delegateRunNodeId=${delegate.id} workerRunId=${runId} reason=${result.message || ''}`);
+    }
     return {
       kind: 'loopback', status: 'failed', executor, executedBy: actorName, executionMode: 'loopback',
       delegateRunNodeId: delegate.id, runNodeId: loopbackNodeId,
@@ -870,7 +887,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   }
 
   rewriteFrontmatter(loopbackPath, (fm) => { fm.status = 'done'; return fm; });
-  closeRunNodeWithEow({ runDir, runId, runNodeId: loopbackNodeId, reason: 'loopback_recorded', finishedAt });
+  closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: loopbackNodeId, reason: 'loopback_recorded', finishedAt });
 
   const delegatePath = delegate.path;
   if (delegatePath && existsSync(delegatePath)) {
@@ -885,16 +902,20 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
       return fm;
     });
   }
-  closeRunNodeWithEow({ runDir, runId, runNodeId: delegate.id, reason: 'loopback_resolved', finishedAt });
+  closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: delegate.id, reason: 'loopback_resolved', finishedAt });
 
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'loopback_completed', runId,
+    loopbackRunId,
     delegateRunNodeId: delegate.id, loopbackRunNodeId: loopbackNodeId,
     executor, executedBy: actorName, executionMode: 'loopback', loopbackIndex,
     artifactPath: result.artifactPath || null,
     message: result.message || null,
   });
   appendRunLog(runDir, `${finishedAt} loopback_completed delegateRunNodeId=${delegate.id} loopbackRunNodeId=${loopbackNodeId} executedBy=${actorName} artifact=${result.artifactPath || ''}`);
+  if (loopbackRunDir !== runDir) {
+    appendRunLog(loopbackRunDir, `${finishedAt} loopback_completed delegateRunNodeId=${delegate.id} loopbackRunNodeId=${loopbackNodeId} executedBy=${actorName} workerRunId=${runId} artifact=${result.artifactPath || ''}`);
+  }
 
   return {
     kind: 'loopback', status: 'completed', executor, executedBy: actorName, executionMode: 'loopback',
@@ -921,7 +942,7 @@ function ensureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, so
     if (sourceTaskId != null && sourceTaskId !== '') nodeFm.sourceTaskId = sourceTaskId;
     if (sourceTaskGroupVersionId != null && sourceTaskGroupVersionId !== '') nodeFm.sourceTaskGroupVersionId = sourceTaskGroupVersionId;
     const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
-    writeFileSync(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`, 'utf8');
+    writeTextFileAtomic(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`);
   } else {
     rewriteFrontmatter(runNodePath, (fm) => {
       fm.status = status;
@@ -981,7 +1002,7 @@ function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, app
       eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
       eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
     }
-    writeFileSync(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`, 'utf8');
+    writeTextFileAtomic(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
   }
   const edgeId = `edge-${runNodeId}-to-eow`;
   const edgePath = join(runDir, 'edges', `${edgeId}.md`);
@@ -997,7 +1018,7 @@ function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, app
       createdAt: finishedAt,
       status: 'done',
     };
-    writeFileSync(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNodeId} closes with EoW\n`, 'utf8');
+    writeTextFileAtomic(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNodeId} closes with EoW\n`);
   }
 }
 
@@ -1027,7 +1048,7 @@ function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
       eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
       eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
     }
-    writeFileSync(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`, 'utf8');
+    writeTextFileAtomic(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
   }
 }
 
@@ -1070,7 +1091,7 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
       createdAt: isoNow(),
       status: 'done',
     };
-    writeFileSync(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNode.id} reviewed by ${reviewNodeId}\n`, 'utf8');
+    writeTextFileAtomic(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNode.id} reviewed by ${reviewNodeId}\n`);
   }
   closeRunNodeWithEow({ runDir, runId: runNode.runId, runNodeId: reviewNodeId, reason: 'review_recorded', finishedAt: isoNow() });
 
@@ -1229,7 +1250,7 @@ function performDryRunDecomposition({ projectDir, task }) {
     objective: `Synthetic dry-run decomposition of ${task.id}: ${task.title}`,
     activeVersionId: versionId, createdAt: now, status: 'active',
   };
-  writeFileSync(join(tgDir, 'index.md'), fmBlock(tgFm) + `# Task group ${childTaskGroupId}\n\nSynthetic placeholder created by the TaskOps dry-run runner. Real human input is required before the child tasks become runnable.\n`, 'utf8');
+  writeTextFileAtomic(join(tgDir, 'index.md'), fmBlock(tgFm) + `# Task group ${childTaskGroupId}\n\nSynthetic placeholder created by the TaskOps dry-run runner. Real human input is required before the child tasks become runnable.\n`);
 
   const versionFm = {
     taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: versionId,
@@ -1237,7 +1258,7 @@ function performDryRunDecomposition({ projectDir, task }) {
     summary: `Synthetic dry-run decomposition of ${task.title}`,
     createdAt: now, status: 'active',
   };
-  writeFileSync(join(tgDir, 'versions', versionId, 'index.md'), fmBlock(versionFm) + `# Version ${versionId}\n\nSynthetic placeholder children. Replace with concrete tasks once real inputs are supplied.\n`, 'utf8');
+  writeTextFileAtomic(join(tgDir, 'versions', versionId, 'index.md'), fmBlock(versionFm) + `# Version ${versionId}\n\nSynthetic placeholder children. Replace with concrete tasks once real inputs are supplied.\n`);
   writeFileSync(
     join(tgDir, 'versions', versionId, 'decomposition-log.md'),
     `# Decomposition log\n\n- ${now} synthetic dry-run decomposition of ${task.id}. Children are placeholders blocked until human input is supplied.\n`,
@@ -1257,10 +1278,9 @@ function performDryRunDecomposition({ projectDir, task }) {
     runReadinessReason: 'Synthetic dry-run placeholder. A human must supply real inputs before this becomes runnable.',
     understandingLevel: 'unknown',
   };
-  writeFileSync(
+  writeTextFileAtomic(
     join(tgDir, 'versions', versionId, 'tasks', `${childTaskId}.md`),
     fmBlock(childFm) + `# ${childFm.title}\n\nSynthetic placeholder created by the TaskOps dry-run runner. This is not real progress; it is structural scaffolding so the parent task can be marked decomposed without losing trace to the open question.\n`,
-    'utf8',
   );
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
@@ -1806,7 +1826,7 @@ export function closeTarget(workDir, targetId, { reason = null } = {}) {
       createdAt: declaredAt,
       status: 'done',
     };
-    writeFileSync(eowPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`, 'utf8');
+    writeTextFileAtomic(eowPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
     return {
       workId: parsed.project.id,
       projectDir,
@@ -1849,7 +1869,7 @@ export function closeTarget(workDir, targetId, { reason = null } = {}) {
     createdAt: declaredAt,
     status: 'done',
   };
-  writeFileSync(eowPath, fmBlock(eowFm) + `# EoW: ${node.id}\n`, 'utf8');
+  writeTextFileAtomic(eowPath, fmBlock(eowFm) + `# EoW: ${node.id}\n`);
   const edgeId = `edge-${node.id}-to-eow`;
   const edgePath = join(runDir, 'edges', `${edgeId}.md`);
   if (!existsSync(edgePath)) {
@@ -1864,7 +1884,7 @@ export function closeTarget(workDir, targetId, { reason = null } = {}) {
       createdAt: declaredAt,
       status: 'done',
     };
-    writeFileSync(edgePath, fmBlock(edgeFm) + `# Run edge: ${node.id} closes with EoW\n`, 'utf8');
+    writeTextFileAtomic(edgePath, fmBlock(edgeFm) + `# Run edge: ${node.id} closes with EoW\n`);
   }
   return {
     workId: parsed.project.id,
@@ -2021,7 +2041,7 @@ export function runTaskOps(workDir, options = {}) {
         ) {
           const delegateKey = `${next.source.runId}:${next.source.id}`;
           const delegate = parsed.runNodes.get(delegateKey);
-          if (delegate && delegate.type === 'delegate') {
+          if (delegate && delegate.type === 'delegate' && isSelfDelegate(delegate, parsed.project)) {
             if (loopbacksUsed >= maxLoopbacks) {
               stopReason = STOP_REASONS.MAX_LOOPBACKS;
               stopDetail = `Loopback budget exhausted at ${loopbacksUsed}/${maxLoopbacks}; pending delegate ${delegate.runId}/${delegate.id} still open.`;

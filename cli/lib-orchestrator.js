@@ -10,7 +10,9 @@ import {
   syncQueueProjection,
   updateRunnerAttempt,
 } from './lib-queue.js';
-import { explainWork, runTaskOps } from './lib-runner.js';
+import { DEFAULT_MAX_LOOPBACKS, explainWork, runTaskOps } from './lib-runner.js';
+
+const DEFAULT_LOOPBACK_WORKER_MAX_STEPS = 50;
 
 function isoNow() {
   return new Date().toISOString();
@@ -73,6 +75,30 @@ function normalizeBool(value, fallback) {
   throw new Error(`Invalid boolean value: ${value}`);
 }
 
+function normalizeLoopbackPolicy(value) {
+  const policy = value == null || value === '' ? 'none' : String(value).trim().toLowerCase();
+  if (!['none', 'self'].includes(policy)) throw new Error(`Invalid loopback policy '${value}'. Use none or self.`);
+  return policy;
+}
+
+function normalizeMaxLoopbacks(value, loopbackPolicy) {
+  if (loopbackPolicy === 'none') return 0;
+  if (value == null || value === '') return DEFAULT_MAX_LOOPBACKS;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid max loopbacks: ${value}`);
+  return Math.floor(n);
+}
+
+function normalizeWorkerMaxSteps(value, { loopbackPolicy }) {
+  if (value != null && value !== '') {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid max steps: ${value}`);
+    return Math.floor(n);
+  }
+  if (loopbackPolicy === 'self') return DEFAULT_LOOPBACK_WORKER_MAX_STEPS;
+  return 1;
+}
+
 function parseQueueItemId(id) {
   const raw = String(id || '');
   const idx = raw.indexOf(':');
@@ -118,14 +144,26 @@ function normalizeReportSink(value) {
   return sink;
 }
 
-function terminalStatusFromRun(result) {
+function targetCompleted(result, target) {
+  if (result.stopReason === 'all_closed') return true;
+  const actions = result.actions || result.tasks || [];
+  return actions.some((action) => (
+    action
+    && action.status === 'completed'
+    && action.kind !== 'loopback'
+    && action.taskId === target.taskId
+  ));
+}
+
+function terminalStatusFromRun(result, target) {
+  const actions = result.actions || result.tasks || [];
   if (result.stopReason === 'task_failed' || result.stopReason === 'validation_failed') return 'failed';
-  if ((result.tasks || result.actions || []).some((action) => action.status === 'failed')) return 'failed';
-  if (result.stepsRun > 0) return 'done';
+  if (actions.some((action) => action.status === 'failed')) return 'failed';
+  if (targetCompleted(result, target)) return 'done';
   return 'failed';
 }
 
-function buildProgressMessage({ workId, waveId, item, runResult, releaseStatus }) {
+function buildProgressMessage({ workId, waveId, item, target, runResult, releaseStatus }) {
   const actions = runResult.actions || runResult.tasks || [];
   const completed = actions.filter((action) => action.status === 'completed')
     .map((action) => `${action.kind}:${action.taskId || action.delegateRunNodeId}`)
@@ -139,6 +177,7 @@ function buildProgressMessage({ workId, waveId, item, runResult, releaseStatus }
     `stopReason: ${runResult.stopReason}`,
     `releaseStatus: ${releaseStatus}`,
     `completed: ${completed}`,
+    `targetCompleted: ${targetCompleted(runResult, target)}`,
     `failed: ${failed}`,
   ].join('\n');
 }
@@ -226,7 +265,24 @@ function runWorkerProcess(args, timeoutMs = null) {
   });
 }
 
-async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runnerId, reportSink, masterSessionKey, agent, runId, timeout, actor, waveId, cliPath, nodePath }) {
+async function runClaimedQueueItemWorker(workDir, {
+  claim,
+  runtimeAdapter,
+  runnerId,
+  reportSink,
+  masterSessionKey,
+  agent,
+  runId,
+  timeout,
+  actor,
+  waveId,
+  cliPath,
+  nodePath,
+  loopbackPolicy,
+  maxLoopbacks,
+  maxSteps,
+  until,
+}) {
   const item = claim.item;
   const lease = claim.lease;
   const target = parseQueueItemId(item.id);
@@ -252,7 +308,7 @@ async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runne
     '--executor',
     executorForRuntime(runtimeAdapter),
     '--max-steps',
-    '1',
+    String(maxSteps),
     '--target-task-id',
     target.taskId,
     '--target-task-group-version-id',
@@ -265,6 +321,8 @@ async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runne
   if (agent) args.push('--agent', agent);
   if (timeout != null) args.push('--timeout', String(timeout));
   if (actor) args.push('--actor', actor);
+  if (until) args.push('--until', until);
+  if (loopbackPolicy !== 'none') args.push('--loopback', loopbackPolicy, '--max-loopbacks', String(maxLoopbacks));
 
   let runResult;
   let releaseStatus = 'failed';
@@ -274,7 +332,7 @@ async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runne
   if (worker.status === 0 && worker.stdout) {
     try {
       runResult = JSON.parse(worker.stdout);
-      releaseStatus = terminalStatusFromRun(runResult);
+      releaseStatus = terminalStatusFromRun(runResult, target);
     } catch (error) {
       errorSummary = `worker JSON parse failed: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -302,12 +360,16 @@ async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runne
     stopReason: runResult?.stopReason || null,
     errorSummary,
   });
-  releaseLease(workDir, lease.id, { status: releaseStatus });
+  try {
+    releaseLease(workDir, lease.id, { status: releaseStatus });
+  } finally {
+    syncQueueProjection(workDir);
+  }
 
   if (reportSink !== 'none') {
     const message = errorSummary
-      ? `TaskOps ${waveId} (${item.work_id || ''})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\nerror: ${errorSummary}`
-      : buildProgressMessage({ workId: item.work_id || runResult.workId || '', waveId, item, runResult, releaseStatus });
+      ? `TaskOps ${waveId} (${item.work_id || ''})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\ntargetCompleted: false\nerror: ${errorSummary}`
+      : buildProgressMessage({ workId: item.work_id || runResult.workId || '', waveId, item, target, runResult, releaseStatus });
     report = writeProgressReport(workDir, {
       item,
       target,
@@ -326,6 +388,10 @@ async function runClaimedQueueItemWorker(workDir, { claim, runtimeAdapter, runne
     lease,
     attemptId,
     runtimeAdapter,
+    maxSteps,
+    loopbackPolicy,
+    maxLoopbacks,
+    targetCompleted: targetCompleted(runResult, target),
     runResult,
     releaseStatus,
     errorSummary,
@@ -347,6 +413,9 @@ export async function runQueueWave(workDir, options = {}) {
   const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
   const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts');
   const maxParallel = optionalPositiveInteger(options.maxParallel, 'max parallel') ?? 8;
+  const loopbackPolicy = normalizeLoopbackPolicy(options.loopback);
+  const maxLoopbacks = normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy);
+  const maxSteps = normalizeWorkerMaxSteps(options.maxSteps, { loopbackPolicy, maxLoopbacks });
   const waveId = options.waveId || `wave-${randomUUID()}`;
   const claim = claimQueueItems(workDir, { runnerId, ttlSeconds, maxAttempts, limit: maxParallel });
   if (!claim.claimed || claim.claims.length === 0) {
@@ -359,6 +428,9 @@ export async function runQueueWave(workDir, options = {}) {
       waveId,
       maxAttempts,
       maxParallel,
+      maxSteps,
+      loopbackPolicy,
+      maxLoopbacks,
       workers: [],
     };
   }
@@ -376,8 +448,11 @@ export async function runQueueWave(workDir, options = {}) {
     waveId: `${waveId}-worker-${index + 1}`,
     cliPath: options.cliPath || process.argv[1],
     nodePath: options.nodePath || process.execPath,
+    loopbackPolicy,
+    maxLoopbacks,
+    maxSteps,
+    until: options.until || null,
   })));
-  syncQueueProjection(workDir);
   return {
     projectDir: claim.projectDir,
     workId: claim.workId,
@@ -387,6 +462,9 @@ export async function runQueueWave(workDir, options = {}) {
     runtimeAdapter,
     maxAttempts,
     maxParallel,
+    maxSteps,
+    loopbackPolicy,
+    maxLoopbacks,
     claimedCount: claim.claims.length,
     workers,
     releaseStatus: workers.some((worker) => worker.releaseStatus === 'failed') ? 'failed' : 'done',
@@ -399,6 +477,9 @@ export function runQueueOnce(workDir, options = {}) {
   const runnerId = options.runnerId || `taskops-runner-${process.pid}`;
   const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
   const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts');
+  const loopbackPolicy = normalizeLoopbackPolicy(options.loopback);
+  const maxLoopbacks = normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy);
+  const maxSteps = normalizeWorkerMaxSteps(options.maxSteps, { loopbackPolicy, maxLoopbacks });
   const waveId = options.waveId || `wave-${randomUUID()}`;
 
   const claim = claimQueueItem(workDir, { runnerId, ttlSeconds, maxAttempts });
@@ -411,6 +492,9 @@ export function runQueueOnce(workDir, options = {}) {
       stopReason: 'no_claimable_queue_item',
       waveId,
       maxAttempts,
+      loopbackPolicy,
+      maxLoopbacks,
+      maxSteps,
     };
   }
 
@@ -437,13 +521,17 @@ export function runQueueOnce(workDir, options = {}) {
       executor: executorForRuntime(runtimeAdapter),
       agent: options.agent || null,
       runId: options.runId || null,
-      maxSteps: 1,
+      maxSteps,
       timeout: options.timeout || null,
+      until: options.until || null,
+      loopback: loopbackPolicy,
+      maxLoopbacks,
       actor: options.actor || runnerId,
       targetTaskId: target.taskId,
       targetTaskGroupVersionId: target.taskGroupVersionId,
+      allowConcurrentTarget: true,
     });
-    releaseStatus = terminalStatusFromRun(runResult);
+    releaseStatus = terminalStatusFromRun(runResult, target);
   } catch (error) {
     errorSummary = error instanceof Error ? error.message : String(error);
     runResult = {
@@ -473,8 +561,8 @@ export function runQueueOnce(workDir, options = {}) {
 
   if (reportSink !== 'none') {
     const message = errorSummary
-        ? `TaskOps ${waveId} (${claim.workId})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\nerror: ${errorSummary}`
-        : buildProgressMessage({ workId: claim.workId, waveId, item, runResult, releaseStatus });
+        ? `TaskOps ${waveId} (${claim.workId})\nqueueItem: ${item.id}\nstopReason: error\nreleaseStatus: failed\ntargetCompleted: false\nerror: ${errorSummary}`
+        : buildProgressMessage({ workId: claim.workId, waveId, item, target, runResult, releaseStatus });
     report = writeProgressReport(workDir, {
       item,
       target,
@@ -497,6 +585,10 @@ export function runQueueOnce(workDir, options = {}) {
     attemptId,
     runtimeAdapter,
     maxAttempts,
+    maxSteps,
+    loopbackPolicy,
+    maxLoopbacks,
+    targetCompleted: targetCompleted(runResult, target),
     releaseStatus,
     runResult,
     errorSummary,
@@ -511,6 +603,9 @@ export async function runQueueWatch(workDir, options = {}) {
   const ttlSeconds = options.ttlSeconds == null ? 300 : Number(options.ttlSeconds);
   const maxAttempts = optionalNonNegativeInteger(options.maxAttempts, 'max attempts') ?? 3;
   const maxParallel = optionalPositiveInteger(options.maxParallel, 'max parallel') ?? 8;
+  const loopbackPolicy = normalizeLoopbackPolicy(options.loopback);
+  const maxLoopbacks = normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy);
+  const maxSteps = normalizeWorkerMaxSteps(options.maxSteps, { loopbackPolicy, maxLoopbacks });
   const pollIntervalMs = optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms') ?? 5000;
   const maxWaves = optionalPositiveInteger(options.maxWaves, 'max waves');
   const maxIdleCycles = optionalPositiveInteger(options.maxIdleCycles, 'max idle cycles');
@@ -528,6 +623,36 @@ export async function runQueueWatch(workDir, options = {}) {
   let stopDetail = null;
   let finalExplain = null;
   const waves = [];
+  const active = new Map();
+  let workerSequence = 0;
+
+  const startWorker = () => {
+    if (maxWaves != null && claimedWaves + active.size >= maxWaves) return false;
+    const claim = claimQueueItem(workDir, { runnerId, ttlSeconds, maxAttempts });
+    if (!claim.claimed || !claim.item || !claim.lease) return false;
+    workerSequence += 1;
+    const waveId = `${watchId}-wave-${workerSequence}`;
+    const promise = runClaimedQueueItemWorker(workDir, {
+      claim,
+      runtimeAdapter,
+      runnerId: `${runnerId}-worker-${workerSequence}`,
+      reportSink,
+      masterSessionKey: options.masterSessionKey || null,
+      agent: options.agent || null,
+      runId: options.runId || null,
+      timeout: options.timeout || null,
+      actor: options.actor || runnerId,
+      waveId,
+      cliPath: options.cliPath || process.argv[1],
+      nodePath: options.nodePath || process.execPath,
+      loopbackPolicy,
+      maxLoopbacks,
+      maxSteps,
+      until: options.until || null,
+    }).then((result) => ({ waveId, result }));
+    active.set(waveId, promise);
+    return true;
+  };
 
   while (true) {
     if (shouldStop()) {
@@ -539,52 +664,41 @@ export async function runQueueWatch(workDir, options = {}) {
       stopReason = 'deadline_reached';
       break;
     }
-    try {
-      finalExplain = explainWork(workDir);
-      if (finalExplain.complete) {
-        stopReason = 'all_closed';
-        break;
-      }
-    } catch {
-      finalExplain = null;
-    }
-    if (maxWaves != null && claimedWaves >= maxWaves) {
+    if (maxWaves != null && claimedWaves + active.size >= maxWaves && active.size === 0) {
       stopReason = 'max_waves';
       stopDetail = `Reached max waves ${claimedWaves}/${maxWaves}.`;
       break;
     }
 
-    const waveId = `${watchId}-wave-${claimedWaves + 1}`;
-    const result = await runQueueWave(workDir, {
-      runtimeAdapter,
-      runnerId,
-      ttlSeconds,
-      reportSink,
-      masterSessionKey: options.masterSessionKey || null,
-      agent: options.agent || null,
-      runId: options.runId || null,
-      timeout: options.timeout || null,
-      actor: options.actor || runnerId,
-      maxAttempts,
-      waveId,
-      maxParallel,
-      cliPath: options.cliPath || process.argv[1],
-      nodePath: options.nodePath || process.execPath,
-    });
+    let startedAny = false;
+    while (active.size < maxParallel) {
+      if (maxWaves != null && claimedWaves + active.size >= maxWaves) break;
+      if (!startWorker()) break;
+      startedAny = true;
+    }
 
-    if (result.claimed) {
+    if (active.size > 0) {
+      const { waveId, result } = await Promise.race(active.values());
+      active.delete(waveId);
       claimedWaves += 1;
-      claimedItems += result.claimedCount || 1;
+      claimedItems += 1;
       idleCycles = 0;
       firstIdleAt = null;
       waves.push(result);
       if (result.releaseStatus === 'failed' && stopOnFailure) {
         stopReason = 'wave_failed';
         stopDetail = result.errorSummary || result.runResult?.stopDetail || result.runResult?.stopReason || 'Runner wave failed.';
+        const remaining = await Promise.all(active.values());
+        for (const settled of remaining) waves.push(settled.result);
+        claimedWaves += remaining.length;
+        claimedItems += remaining.length;
+        active.clear();
         break;
       }
       continue;
     }
+
+    if (startedAny) continue;
 
     idleCycles += 1;
     if (!firstIdleAt) firstIdleAt = Date.now();
@@ -643,6 +757,9 @@ export async function runQueueWatch(workDir, options = {}) {
     maxIdleCycles,
     maxAttempts,
     maxParallel,
+    maxSteps,
+    loopbackPolicy,
+    maxLoopbacks,
     idleExitAfterSeconds,
     pollIntervalMs,
     stopOnFailure,

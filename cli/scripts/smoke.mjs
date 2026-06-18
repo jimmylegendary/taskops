@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { insertRunnerAttempt } from '../lib-queue.js';
-import { sanitizeFmScalar } from '../lib-runner.js';
+import { runTaskOps, sanitizeFmScalar } from '../lib-runner.js';
 import { parseFrontmatterText } from '../lib-taskops.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -481,14 +481,14 @@ const watchOut = JSON.parse(run([
   '--max-waves', '5',
   '--json'
 ]).stdout);
-if (watchOut.stopReason !== 'all_closed' || watchOut.claimedWaves !== 1 || watchOut.claimedItems !== 2 || watchOut.waves.length !== 1 || watchOut.waves[0].claimedCount !== 2) {
-  console.error('runner watch should drain two executable tasks in one batch wave and stop all_closed');
+if (watchOut.stopReason !== 'all_closed' || watchOut.claimedWaves !== 2 || watchOut.claimedItems !== 2 || watchOut.waves.length !== 2) {
+  console.error('runner watch should drain two executable tasks with one-shot worker evidence and stop all_closed');
   console.error(watchOut);
   process.exit(1);
 }
-const watchWorkerQueueItems = watchOut.waves[0].workers.map((worker) => worker.queueItem.id).sort();
+const watchWorkerQueueItems = watchOut.waves.map((wave) => wave.queueItem.id).sort();
 if (watchWorkerQueueItems.join(',') !== 'tgv-root-v2:task-watch-first,tgv-root-v2:task-watch-second') {
-  console.error('runner watch should claim all executable queue items in the batch wave');
+  console.error('runner watch should claim all executable queue items through the worker pool');
   console.error(watchWorkerQueueItems);
   process.exit(1);
 }
@@ -540,8 +540,8 @@ runId: run-main
 type: delegate
 title: Retry blocker delegate
 status: waiting
-delegateeType: human
-delegateeRef: stakeholder
+delegateeType: self
+delegateeRef: self
 request: Resolve this deliberate retry smoke blocker.
 expectedOutput: A decision that allows the task to proceed.
 requestedAt: 2026-05-12T00:00:00Z
@@ -566,7 +566,7 @@ if (retryWatchOut.stopReason !== 'idle_cycles' || retryWatchOut.claimedWaves !==
   console.error(retryWatchOut);
   process.exit(1);
 }
-if (!retryWatchOut.waves.every((wave) => wave.releaseStatus === 'failed' && wave.workers?.[0]?.runResult?.stopReason === 'delegation_pending')) {
+if (!retryWatchOut.waves.every((wave) => wave.releaseStatus === 'failed' && wave.runResult?.stopReason === 'delegation_pending')) {
   console.error('retry smoke waves should fail because the delegate is still pending');
   console.error(retryWatchOut.waves);
   process.exit(1);
@@ -890,13 +890,14 @@ const daemonBatchRunOut = JSON.parse(run([
   '--max-parallel', '8',
   '--json'
 ]).stdout);
-if (daemonBatchRunOut.cycles.length !== 1 || daemonBatchRunOut.cycles[0].stopReason !== 'all_closed' || daemonBatchRunOut.cycles[0].claimedWaves !== 2 || daemonBatchRunOut.cycles[0].claimedItems !== 3) {
-  console.error('daemon batch run should finish all three tasks across dependency-aware waves');
+if (daemonBatchRunOut.cycles.length !== 1 || daemonBatchRunOut.cycles[0].stopReason !== 'all_closed' || daemonBatchRunOut.cycles[0].claimedWaves !== 3 || daemonBatchRunOut.cycles[0].claimedItems !== 3) {
+  console.error('daemon batch run should finish all three tasks through one-shot worker-pool slots');
   console.error(daemonBatchRunOut);
   process.exit(1);
 }
-if (!daemonBatchRunOut.cycles[0].waveDetails || daemonBatchRunOut.cycles[0].waveDetails[0]?.claimedCount !== 2 || daemonBatchRunOut.cycles[0].waveDetails[1]?.claimedCount !== 1) {
-  console.error('daemon batch run should start all currently executable tasks in the first wave, then the dependent task in the next wave');
+const daemonBatchIds = daemonBatchRunOut.cycles[0].waveDetails.map((wave) => wave.queueItemId).sort();
+if (daemonBatchIds.join(',') !== 'tgv-root-v2:task-a,tgv-root-v2:task-b,tgv-root-v2:task-c') {
+  console.error('daemon batch run should claim every dependency-eligible queue item exactly once');
   console.error(daemonBatchRunOut);
   process.exit(1);
 }
@@ -920,7 +921,7 @@ const daemonErrorOut = JSON.parse(run([
   '--max-daemon-cycles', '1',
   '--failure-backoff-ms', '1',
   '--json'
-]).stdout);
+], 1).stdout);
 if (daemonErrorOut.cycles.length !== 1 || daemonErrorOut.cycles[0].stopReason !== 'daemon_error' || !daemonErrorOut.cycles[0].stopDetail) {
   console.error('daemon run should capture watch-level exceptions as daemon_error cycles instead of crashing');
   console.error(daemonErrorOut);
@@ -1489,10 +1490,10 @@ entityType: runNode
 id: run-node-human-delegate
 runId: run-main
 type: delegate
-title: Human delegate awaiting loopback
+title: Self delegate awaiting loopback
 status: waiting
-delegateeType: human
-delegateeRef: stakeholder
+delegateeType: self
+delegateeRef: self
 request: Review and decide via loopback.
 expectedOutput: Loopback artifact attached.
 requestedAt: 2026-05-12T00:00:00Z
@@ -1500,7 +1501,7 @@ createdAt: 2026-05-12T00:00:00Z
 ---
 # Human delegate
 `, 'utf8');
-const loopbackOkOut = JSON.parse(run(['run', loopbackOkDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '2', '--max-steps', '5', '--actor', 'Nova', '--json']).stdout);
+const loopbackOkOut = runTaskOps(loopbackOkDir, { executor: 'dry-run', loopback: 'self', maxLoopbacks: 2, maxSteps: 5, actor: 'Nova' });
 if (loopbackOkOut.loopbacksUsed !== 1 || loopbackOkOut.loopbackPolicy !== 'self' || loopbackOkOut.actorName !== 'Nova') {
   console.error('Expected loopbacksUsed=1 with loopbackPolicy=self and actorName=Nova');
   console.error(loopbackOkOut);
@@ -1553,7 +1554,7 @@ createdAt: 2026-05-12T00:00:00Z
 ---
 # Self delegate
 `, 'utf8');
-const loopbackBudgetOut = JSON.parse(run(['run', loopbackBudgetDir, '--executor', 'dry-run', '--loopback', 'self', '--max-loopbacks', '0', '--json']).stdout);
+const loopbackBudgetOut = runTaskOps(loopbackBudgetDir, { executor: 'dry-run', loopback: 'self', maxLoopbacks: 0 });
 if (loopbackBudgetOut.stopReason !== 'max_loopbacks') {
   console.error('Expected stopReason=max_loopbacks when --max-loopbacks=0 with pending self delegate');
   console.error(loopbackBudgetOut);
@@ -1580,7 +1581,7 @@ createdAt: 2026-05-12T00:00:00Z
 ---
 # Human review
 `, 'utf8');
-const loopbackDefaultStopOut = JSON.parse(run(['run', loopbackDefaultStopDir, '--executor', 'dry-run', '--json']).stdout);
+const loopbackDefaultStopOut = runTaskOps(loopbackDefaultStopDir, { executor: 'dry-run' });
 if (loopbackDefaultStopOut.stopReason !== 'delegation_pending' || loopbackDefaultStopOut.loopbacksUsed !== 0) {
   console.error('Expected default loopback=none to stop with delegation_pending');
   console.error(loopbackDefaultStopOut);
@@ -1727,6 +1728,375 @@ if (!restartFileTaskBody.includes('restartInstruction: Line one: preserve contex
   process.exit(1);
 }
 run(['validate', restartFileDir]);
+
+function activateVersion(workDir, versionId) {
+  const snapshotPath = join(workDir, 'snapshots', 'snapshot-root-v1.md');
+  writeFileSync(snapshotPath, readFileSync(snapshotPath, 'utf8').replace('versionId: tgv-root-v1', `versionId: ${versionId}`));
+}
+
+function makeOneTaskWork(workDir, { id, taskId = 'task-main', blockedBy = null } = {}) {
+  run(['init', workDir, '--id', id, '--title', id, '--objective', `Smoke ${id}`, '--language', 'en']);
+  const specPath = join(tempRoot, `${id}.json`);
+  const task = {
+    id: taskId,
+    title: taskId,
+    objective: `Complete ${taskId}.`,
+    responsibility: `Own ${taskId}.`,
+    completionCriteria: `${taskId} is done.`,
+    status: 'pending',
+    runReadiness: 'runnable',
+    runReadinessReason: 'Smoke fixture is ready.',
+    understandingLevel: 'known',
+    order: 1,
+  };
+  if (blockedBy) task.blockedBy = blockedBy;
+  writeFileSync(specPath, JSON.stringify({
+    versionId: 'tgv-root-v2',
+    version: 'v2',
+    summary: `${id} decomposition`,
+    selected: true,
+    tasks: [task],
+  }, null, 2));
+  run(['decompose', workDir, '--task-group-id', 'tg-root', '--spec', specPath]);
+  activateVersion(workDir, 'tgv-root-v2');
+}
+
+function writeDelegate(workDir, {
+  id,
+  delegateeType,
+  delegateeRef,
+  sourceTaskId = 'task-main',
+  sourceTaskGroupVersionId = 'tgv-root-v2',
+  selfDelegate = false,
+}) {
+  const selfLine = selfDelegate ? 'selfDelegate: true\n' : '';
+  writeFileSync(join(workDir, 'runs', 'run-main', 'nodes', `${id}.md`), `---
+taskOpsVersion: v1
+entityType: runNode
+id: ${id}
+runId: run-main
+type: delegate
+title: ${id}
+status: waiting
+delegateeType: ${delegateeType}
+delegateeRef: ${delegateeRef}
+${selfLine}sourceTaskId: ${sourceTaskId}
+sourceTaskGroupVersionId: ${sourceTaskGroupVersionId}
+request: Resolve this delegated smoke step.
+expectedOutput: A concrete resolution.
+requestedAt: 2026-05-12T00:00:00Z
+createdAt: 2026-05-12T00:00:00Z
+---
+# ${id}
+`, 'utf8');
+}
+
+// ---- queue-backed loopback: propagated through runner watch and target-aware release ----
+const queueLoopbackDir = join(tempRoot, 'queue-loopback-self');
+makeOneTaskWork(queueLoopbackDir, { id: 'queue-loopback-self' });
+writeDelegate(queueLoopbackDir, { id: 'run-node-self-loop', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
+const queueLoopbackOut = JSON.parse(run([
+  'runner', 'watch', queueLoopbackDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'queue-loopback-smoke',
+  '--loopback', 'self',
+  '--max-loopbacks', '1',
+  '--max-waves', '2',
+  '--report-sink', 'ledger',
+  '--json'
+]).stdout);
+if (queueLoopbackOut.stopReason !== 'all_closed' || queueLoopbackOut.claimedItems !== 1 || queueLoopbackOut.loopbackPolicy !== 'self') {
+  console.error('runner watch should propagate loopback self and close the claimed task after resolving a self delegate');
+  console.error(queueLoopbackOut);
+  process.exit(1);
+}
+const queueLoopbackWave = queueLoopbackOut.waves[0];
+if (queueLoopbackWave.releaseStatus !== 'done' || queueLoopbackWave.targetCompleted !== true || queueLoopbackWave.runResult.loopbacksUsed !== 1) {
+  console.error('loopback-enabled queue worker should report target completion only after the claimed task completes');
+  console.error(queueLoopbackWave);
+  process.exit(1);
+}
+if (queueLoopbackWave.runResult.maxSteps !== 50) {
+  console.error('queue-backed loopback workers should use an independent default total-step safety cap, not maxLoopbacks + 1');
+  console.error(queueLoopbackWave.runResult);
+  process.exit(1);
+}
+if (!queueLoopbackWave.runResult.actions.some((a) => a.kind === 'loopback' && a.delegateRunNodeId === 'run-node-self-loop')) {
+  console.error('queue-backed loopback run should include a loopback action');
+  console.error(queueLoopbackWave.runResult.actions);
+  process.exit(1);
+}
+const queueLoopbackReports = JSON.parse(run(['queue', 'reports', queueLoopbackDir, '--json']).stdout);
+if (!queueLoopbackReports.reports[0].message.includes('targetCompleted: true')) {
+  console.error('progress report should record final target completion');
+  console.error(queueLoopbackReports.reports[0]);
+  process.exit(1);
+}
+const queueLoopbackDelegate = readFileSync(join(queueLoopbackDir, 'runs', 'run-main', 'nodes', 'run-node-self-loop.md'), 'utf8');
+if (!queueLoopbackDelegate.includes('resolvedBy: loopback')) {
+  console.error('self delegate should be resolved by loopback in queue-backed execution');
+  console.error(queueLoopbackDelegate);
+  process.exit(1);
+}
+run(['validate', queueLoopbackDir]);
+
+// ---- queue-backed loopback-only progress must not release claimed task as done ----
+const loopbackOnlyDir = join(tempRoot, 'queue-loopback-only');
+makeOneTaskWork(loopbackOnlyDir, { id: 'queue-loopback-only' });
+writeDelegate(loopbackOnlyDir, { id: 'run-node-loopback-only', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
+const loopbackOnlyOut = JSON.parse(run([
+  'runner', 'once', loopbackOnlyDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'loopback-only-smoke',
+  '--loopback', 'self',
+  '--max-loopbacks', '1',
+  '--max-steps', '1',
+  '--report-sink', 'ledger',
+  '--json'
+], 1).stdout);
+if (loopbackOnlyOut.releaseStatus !== 'failed' || loopbackOnlyOut.targetCompleted !== false || loopbackOnlyOut.runResult.loopbacksUsed !== 1) {
+  console.error('loopback-only progress must not be treated as claimed task completion');
+  console.error(loopbackOnlyOut);
+  process.exit(1);
+}
+const loopbackOnlyTask = readFileSync(join(loopbackOnlyDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-main.md'), 'utf8');
+if (!loopbackOnlyTask.includes('status: pending')) {
+  console.error('claimed task should remain pending after loopback-only progress');
+  console.error(loopbackOnlyTask);
+  process.exit(1);
+}
+
+// ---- queue-backed loopback none and non-self delegate stay honest ----
+const loopbackNoneDir = join(tempRoot, 'queue-loopback-none');
+makeOneTaskWork(loopbackNoneDir, { id: 'queue-loopback-none' });
+writeDelegate(loopbackNoneDir, { id: 'run-node-none-self', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
+const loopbackNoneOut = JSON.parse(run([
+  'runner', 'watch', loopbackNoneDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'loopback-none-smoke',
+  '--loopback', 'none',
+  '--max-waves', '1',
+  '--json'
+], 1).stdout);
+if (loopbackNoneOut.stopReason !== 'wave_failed' || loopbackNoneOut.waves[0].runResult.stopReason !== 'delegation_pending') {
+  console.error('loopback none should surface delegation_pending through queue automation');
+  console.error(loopbackNoneOut);
+  process.exit(1);
+}
+
+const nonSelfLoopbackDir = join(tempRoot, 'queue-non-self-loopback');
+makeOneTaskWork(nonSelfLoopbackDir, { id: 'queue-non-self-loopback' });
+writeDelegate(nonSelfLoopbackDir, { id: 'run-node-human-loop', delegateeType: 'human', delegateeRef: 'stakeholder' });
+const nonSelfLoopbackOut = JSON.parse(run([
+  'runner', 'watch', nonSelfLoopbackDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'non-self-loopback-smoke',
+  '--loopback', 'self',
+  '--max-loopbacks', '2',
+  '--max-waves', '1',
+  '--json'
+], 1).stdout);
+if (nonSelfLoopbackOut.waves[0].runResult.loopbacksUsed !== 0 || nonSelfLoopbackOut.waves[0].runResult.stopReason !== 'delegation_pending') {
+  console.error('loopback self must not execute non-self delegates');
+  console.error(nonSelfLoopbackOut);
+  process.exit(1);
+}
+const nonSelfDelegate = readFileSync(join(nonSelfLoopbackDir, 'runs', 'run-main', 'nodes', 'run-node-human-loop.md'), 'utf8');
+if (!nonSelfDelegate.includes('status: waiting') || nonSelfDelegate.includes('resolvedBy: loopback')) {
+  console.error('non-self delegate must remain waiting and unresolved by loopback');
+  console.error(nonSelfDelegate);
+  process.exit(1);
+}
+
+const conflictingSelfFlagDir = join(tempRoot, 'queue-conflicting-self-flag');
+makeOneTaskWork(conflictingSelfFlagDir, { id: 'queue-conflicting-self-flag' });
+writeDelegate(conflictingSelfFlagDir, { id: 'run-node-conflicting-self-flag', delegateeType: 'human', delegateeRef: 'stakeholder', selfDelegate: true });
+const conflictingSelfFlagOut = JSON.parse(run([
+  'runner', 'watch', conflictingSelfFlagDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'conflicting-self-flag-smoke',
+  '--loopback', 'self',
+  '--max-loopbacks', '2',
+  '--max-waves', '1',
+  '--json'
+], 1).stdout);
+if (conflictingSelfFlagOut.waves[0].runResult.loopbacksUsed !== 0 || conflictingSelfFlagOut.waves[0].runResult.stopReason !== 'delegation_pending') {
+  console.error('selfDelegate=true must not override explicit non-self delegatee fields');
+  console.error(conflictingSelfFlagOut);
+  process.exit(1);
+}
+
+const runLoopbackFailureDir = join(tempRoot, 'run-loopback-failure-exit');
+makeOneTaskWork(runLoopbackFailureDir, { id: 'run-loopback-failure-exit' });
+writeDelegate(runLoopbackFailureDir, { id: 'run-node-run-loopback-failure', delegateeType: 'human', delegateeRef: 'stakeholder' });
+const runLoopbackFailure = run([
+  'run', runLoopbackFailureDir,
+  '--executor', 'dry-run',
+  '--loopback', 'self',
+  '--max-loopbacks', '1',
+  '--json'
+], 1);
+const runLoopbackFailureOut = JSON.parse(runLoopbackFailure.stdout);
+if (runLoopbackFailureOut.cycles[0].stopReason !== 'wave_failed') {
+  console.error('user-facing taskops run --loopback self should exit nonzero when daemon-backed watch fails');
+  console.error(runLoopbackFailureOut);
+  process.exit(1);
+}
+
+const runIdLoopbackDir = join(tempRoot, 'run-loopback-run-id');
+makeOneTaskWork(runIdLoopbackDir, { id: 'run-loopback-run-id' });
+writeDelegate(runIdLoopbackDir, { id: 'run-node-run-id-loopback', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
+const runIdLoopbackOut = JSON.parse(run([
+  'run', runIdLoopbackDir,
+  '--executor', 'dry-run',
+  '--loopback', 'self',
+  '--max-loopbacks', '1',
+  '--max-steps', '2',
+  '--run-id', 'custom-loopback-run',
+  '--json'
+]).stdout);
+if (runIdLoopbackOut.cycles[0].stopReason !== 'all_closed' || !runIdLoopbackOut.cycles[0].waveDetails[0].stopReason) {
+  console.error('run-id loopback smoke should complete through daemon-backed execution');
+  console.error(runIdLoopbackOut);
+  process.exit(1);
+}
+const expectedWorkerRunDir = join(runIdLoopbackDir, 'runs', 'custom-loopback-run-tgv-root-v2-task-main');
+if (!readdirSync(join(runIdLoopbackDir, 'runs')).includes('custom-loopback-run-tgv-root-v2-task-main') || !readFileSync(join(expectedWorkerRunDir, 'events.jsonl'), 'utf8').includes('"type":"runner_stopped"')) {
+  console.error('--run-id should be preserved as the prefix for daemon-backed loopback worker run ids');
+  console.error(readdirSync(join(runIdLoopbackDir, 'runs')));
+  process.exit(1);
+}
+
+// ---- daemon loopback unit/enable/delegate entrypoint propagation ----
+const daemonLoopbackDir = join(tempRoot, 'daemon-loopback-options');
+makeOneTaskWork(daemonLoopbackDir, { id: 'daemon-loopback-options' });
+const daemonLoopbackUnit = JSON.parse(run([
+  'daemon', 'unit', daemonLoopbackDir,
+  '--name', 'daemon-loopback-options',
+  '--runtime', 'dry-run',
+  '--loopback', 'self',
+  '--max-loopbacks', '4',
+  '--max-parallel', '3',
+  '--max-steps', '7',
+  '--json'
+]).stdout);
+if (!daemonLoopbackUnit.unit.includes('--loopback self') || !daemonLoopbackUnit.unit.includes('--max-loopbacks 4') || !daemonLoopbackUnit.unit.includes('--max-parallel 3') || !daemonLoopbackUnit.unit.includes('--max-steps 7')) {
+  console.error('daemon unit should preserve loopback and worker-pool options');
+  console.error(daemonLoopbackUnit.unit);
+  process.exit(1);
+}
+const daemonLoopbackEnable = JSON.parse(run([
+  'daemon', 'enable', daemonLoopbackDir,
+  '--name', 'daemon-loopback-options',
+  '--runtime', 'dry-run',
+  '--loopback', 'self',
+  '--max-loopbacks', '4',
+  '--max-parallel', '3',
+  '--dry-run',
+  '--json'
+]).stdout);
+if (daemonLoopbackEnable.activation.loopbackPolicy !== 'self' || daemonLoopbackEnable.activation.maxLoopbacks !== 4 || daemonLoopbackEnable.activation.maxParallel !== 3 || !daemonLoopbackEnable.activationPath.endsWith(join('.taskops', 'runner.json'))) {
+  console.error('daemon enable --dry-run should expose persisted loopback activation settings');
+  console.error(daemonLoopbackEnable);
+  process.exit(1);
+}
+
+const delegatedEntrypointDir = join(tempRoot, 'delegated-entrypoint');
+makeOneTaskWork(delegatedEntrypointDir, { id: 'delegated-entrypoint' });
+writeDelegate(delegatedEntrypointDir, { id: 'run-node-delegated-entrypoint', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
+const delegatedEntrypointOut = JSON.parse(run([
+  'delegate', delegatedEntrypointDir,
+  '--foreground',
+  '--runtime', 'dry-run',
+  '--max-loopbacks', '1',
+  '--max-steps', '2',
+  '--max-daemon-cycles', '1',
+  '--json'
+]).stdout);
+if (delegatedEntrypointOut.cycles[0].stopReason !== 'all_closed' || delegatedEntrypointOut.cycles[0].claimedItems !== 1) {
+  console.error('high-level delegate entrypoint should reuse daemon run internals');
+  console.error(delegatedEntrypointOut);
+  process.exit(1);
+}
+
+const runLoopbackEntrypointDir = join(tempRoot, 'run-loopback-entrypoint');
+makeOneTaskWork(runLoopbackEntrypointDir, { id: 'run-loopback-entrypoint' });
+writeDelegate(runLoopbackEntrypointDir, { id: 'run-node-run-loopback-entrypoint', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
+const runLoopbackEntrypointOut = JSON.parse(run([
+  'run', runLoopbackEntrypointDir,
+  '--executor', 'dry-run',
+  '--loopback', 'self',
+  '--max-loopbacks', '1',
+  '--max-steps', '2',
+  '--max-daemon-cycles', '1',
+  '--json'
+]).stdout);
+if (runLoopbackEntrypointOut.cycles[0].stopReason !== 'all_closed' || runLoopbackEntrypointOut.cycles[0].claimedItems !== 1) {
+  console.error('user-facing taskops run --loopback self should route through daemon-backed queue execution');
+  console.error(runLoopbackEntrypointOut);
+  process.exit(1);
+}
+
+// ---- queue projection backlog is separate from maxParallel worker-pool limit ----
+const poolRefillDir = join(tempRoot, 'pool-refill-work');
+run(['init', poolRefillDir, '--id', 'pool-refill-work', '--title', 'Pool refill work', '--objective', 'Verify maxParallel is active worker count, not queue size', '--language', 'en']);
+const poolTasks = [];
+for (let i = 1; i <= 10; i += 1) {
+  poolTasks.push({
+    id: `task-pool-${String(i).padStart(2, '0')}`,
+    title: `Pool task ${i}`,
+    objective: `Complete pool task ${i}.`,
+    responsibility: `Own pool task ${i}.`,
+    completionCriteria: `Pool task ${i} is done.`,
+    status: 'pending',
+    runReadiness: 'runnable',
+    runReadinessReason: 'Ready for dry-run worker pool smoke.',
+    understandingLevel: 'known',
+    order: i,
+  });
+}
+const poolSpecPath = join(tempRoot, 'pool-refill-spec.json');
+writeFileSync(poolSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Pool refill decomposition',
+  selected: true,
+  tasks: poolTasks,
+}, null, 2));
+run(['decompose', poolRefillDir, '--task-group-id', 'tg-root', '--spec', poolSpecPath]);
+activateVersion(poolRefillDir, 'tgv-root-v2');
+const poolSync = JSON.parse(run(['queue', 'sync', poolRefillDir, '--json']).stdout);
+if (poolSync.synced !== 10 || poolSync.rows.length !== 10) {
+  console.error('queue sync should project all selected tasks, independent of maxParallel');
+  console.error(poolSync);
+  process.exit(1);
+}
+const poolWatch = JSON.parse(run([
+  'runner', 'watch', poolRefillDir,
+  '--runtime', 'dry-run',
+  '--runner-id', 'pool-refill-smoke',
+  '--max-parallel', '3',
+  '--max-waves', '20',
+  '--json'
+]).stdout);
+if (poolWatch.stopReason !== 'all_closed' || poolWatch.maxParallel !== 3 || poolWatch.claimedItems !== 10 || poolWatch.waves.length !== 10) {
+  console.error('runner watch should drain ten queued tasks with maxParallel=3 while keeping queue projection separate from concurrency');
+  console.error(poolWatch);
+  process.exit(1);
+}
+const poolDb = new DatabaseSync(join(poolRefillDir, '.taskops', 'queue.sqlite'));
+const poolCounts = {
+  queueItems: poolDb.prepare('SELECT COUNT(*) AS n FROM queue_items').get().n,
+  leases: poolDb.prepare('SELECT COUNT(*) AS n FROM leases').get().n,
+  doneLeases: poolDb.prepare("SELECT COUNT(*) AS n FROM leases WHERE status = 'done'").get().n,
+  attempts: poolDb.prepare('SELECT COUNT(*) AS n FROM runner_attempts').get().n,
+};
+poolDb.close();
+if (poolCounts.queueItems !== 10 || poolCounts.leases !== 10 || poolCounts.doneLeases !== 10 || poolCounts.attempts !== 10) {
+  console.error('worker pool smoke should leave one-shot lease/attempt evidence for every selected task');
+  console.error(poolCounts);
+  process.exit(1);
+}
 
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK: taskops CLI smoke passed');

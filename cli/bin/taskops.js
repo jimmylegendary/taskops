@@ -33,19 +33,20 @@ Usage:
   taskops review <work-dir> <run-node-id|task-id> [--json]
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
-  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--actor <name>] [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
+  taskops delegate <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
   taskops queue sync <work-dir> [--json]
   taskops queue list <work-dir> [--json]
   taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
   taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
   taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
   taskops queue reports <work-dir> [--json]
-  taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
-  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
-  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--json]
-  taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--no-start] [--dry-run] [--json]
-  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--start] [--dry-run] [--json]
+  taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
+  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
+  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--run-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
+  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+  taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--no-start] [--dry-run] [--json]
+  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--start] [--dry-run] [--json]
   taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -95,6 +96,11 @@ function parseBool(value, fallback = true) {
   if (String(value) === 'true') return true;
   if (String(value) === 'false') return false;
   fail(`Expected boolean value, got: ${value}`);
+}
+
+function daemonExitCode(result) {
+  const failureReasons = new Set(['wave_failed', 'daemon_error']);
+  return Array.isArray(result?.cycles) && result.cycles.some((cycle) => failureReasons.has(cycle.stopReason)) ? 1 : 0;
 }
 
 const { positional, flags } = parseArgs(process.argv.slice(2));
@@ -319,6 +325,46 @@ try {
   if (cmd === 'run') {
     const workDir = positional[1];
     if (!workDir) fail('Missing run work-dir');
+    const loopback = flags.loopback && flags.loopback !== true ? String(flags.loopback) : null;
+    const hasTarget = Boolean(flags['target-task-id'] && flags['target-task-id'] !== true);
+    if (loopback === 'self' && !hasTarget) {
+      const { runDaemon } = await import('../lib-daemon.js');
+      const executor = flags.executor && flags.executor !== true ? String(flags.executor) : 'dry-run';
+      const runtimeAdapter = flags.runtime && flags.runtime !== true
+        ? String(flags.runtime)
+        : (executor === 'openclaw-agent' ? 'openclaw-cli' : 'dry-run');
+      const result = await runDaemon(workDir, {
+        name: flags.name && flags.name !== true ? String(flags.name) : null,
+        runtimeAdapter,
+        runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
+        runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
+        maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
+        maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
+        maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+        loopback: 'self',
+        maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
+        timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
+        reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
+        masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
+        agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+        actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
+        pollIntervalMs: flags['poll-interval-ms'] != null && flags['poll-interval-ms'] !== true ? flags['poll-interval-ms'] : null,
+        daemonPollIntervalMs: flags['daemon-poll-interval-ms'] != null && flags['daemon-poll-interval-ms'] !== true ? flags['daemon-poll-interval-ms'] : null,
+        maxDaemonCycles: flags['max-daemon-cycles'] != null && flags['max-daemon-cycles'] !== true ? flags['max-daemon-cycles'] : 1,
+        maxWaves: flags['max-waves'] != null && flags['max-waves'] !== true ? flags['max-waves'] : null,
+        maxIdleCycles: flags['max-idle-cycles'] != null && flags['max-idle-cycles'] !== true ? flags['max-idle-cycles'] : null,
+        idleExitAfterSeconds: flags['idle-exit-after-seconds'] != null && flags['idle-exit-after-seconds'] !== true ? flags['idle-exit-after-seconds'] : null,
+        until: flags.until && flags.until !== true ? String(flags.until) : null,
+        continueOnFailure: flags['continue-on-failure'] === true,
+        onCycle: flags.json ? null : (entry) => {
+          console.log(`cycle=${entry.cycle} watchId=${entry.watchId} stopReason=${entry.stopReason} waves=${entry.claimedWaves} items=${entry.claimedItems}`);
+          if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
+        },
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`daemon=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
+      process.exit(daemonExitCode(result));
+    }
     const result = runTaskOps(workDir, {
       runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
       agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
@@ -326,7 +372,7 @@ try {
       maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
       until: flags.until && flags.until !== true ? String(flags.until) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
-      loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
+      loopback,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
       targetTaskId: flags['target-task-id'] && flags['target-task-id'] !== true ? String(flags['target-task-id']) : null,
@@ -418,11 +464,14 @@ try {
       reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
       masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
       agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+      actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
       runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
-      actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
       maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
+      maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
+      maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
     };
     if (subcmd === 'once') {
       const result = runQueueOnce(workDir, {
@@ -455,14 +504,82 @@ try {
       if (result.stopDetail) console.log(`stopDetail=${result.stopDetail}`);
       for (const wave of result.waves) {
         const queueItem = wave.queueItem?.id || '-';
-        const stopReason = wave.runResult?.stopReason || '-';
-        console.log(`- ${wave.waveId} queueItem=${queueItem} release=${wave.releaseStatus} stopReason=${stopReason}`);
+        const stopReason = wave.runResult?.stopReason || (Array.isArray(wave.workers) ? wave.workers.map((worker) => worker.runResult?.stopReason || '-').join(',') : '-');
+        const release = wave.releaseStatus || '-';
+        console.log(`- ${wave.waveId} queueItem=${queueItem} release=${release} stopReason=${stopReason}`);
       }
     }
     process.exit(result.stopReason === 'wave_failed' ? 1 : 0);
   }
 
-    if (cmd === 'daemon') {
+  if (cmd === 'delegate') {
+    const {
+      enableDaemon,
+      runDaemon,
+    } = await import('../lib-daemon.js');
+    const workDir = positional[1];
+    if (!workDir) fail('Missing delegate work-dir');
+    if (flags.loopback && flags.loopback !== true && String(flags.loopback) !== 'self') {
+      fail('taskops delegate only supports --loopback self');
+    }
+    const delegateOptions = {
+      name: flags.name && flags.name !== true ? String(flags.name) : null,
+      runtimeAdapter: flags.runtime && flags.runtime !== true ? String(flags.runtime) : 'openclaw-cli',
+      runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
+      runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
+      ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? flags['ttl-seconds'] : null,
+      maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
+      maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
+      maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      loopback: 'self',
+      maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
+      timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
+      reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
+      masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
+      agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+      actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
+      pollIntervalMs: flags['poll-interval-ms'] != null && flags['poll-interval-ms'] !== true ? flags['poll-interval-ms'] : null,
+      daemonPollIntervalMs: flags['daemon-poll-interval-ms'] != null && flags['daemon-poll-interval-ms'] !== true ? flags['daemon-poll-interval-ms'] : null,
+      failureBackoffMs: flags['failure-backoff-ms'] != null && flags['failure-backoff-ms'] !== true ? flags['failure-backoff-ms'] : null,
+      maxDaemonCycles: flags['max-daemon-cycles'] != null && flags['max-daemon-cycles'] !== true ? flags['max-daemon-cycles'] : null,
+      maxWaves: flags['max-waves'] != null && flags['max-waves'] !== true ? flags['max-waves'] : null,
+      maxIdleCycles: flags['max-idle-cycles'] != null && flags['max-idle-cycles'] !== true ? flags['max-idle-cycles'] : null,
+      idleExitAfterSeconds: flags['idle-exit-after-seconds'] != null && flags['idle-exit-after-seconds'] !== true ? flags['idle-exit-after-seconds'] : null,
+      until: flags.until && flags.until !== true ? String(flags.until) : null,
+      continueOnFailure: flags['continue-on-failure'] === true,
+    };
+    const unattended = flags.unattended === true;
+    const foreground = flags.foreground === true || !unattended;
+    if (foreground) {
+      const result = await runDaemon(workDir, {
+        ...delegateOptions,
+        maxDaemonCycles: delegateOptions.maxDaemonCycles ?? 1,
+        onCycle: flags.json ? null : (entry) => {
+          console.log(`cycle=${entry.cycle} watchId=${entry.watchId} stopReason=${entry.stopReason} waves=${entry.claimedWaves} items=${entry.claimedItems}`);
+          if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
+        },
+      });
+      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`delegate=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
+      process.exit(daemonExitCode(result));
+    }
+    const result = enableDaemon(workDir, {
+      ...delegateOptions,
+      start: flags['no-start'] === true ? false : true,
+      dryRun: flags['dry-run'] === true,
+      enable: flags.enable === false || flags.enable === 'false' ? false : true,
+    });
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`${result.dryRun ? 'would enable delegate' : 'enabled delegate'} ${result.serviceName}`);
+      console.log(result.unitPath);
+      console.log(result.activationPath);
+      console.log(`start=${result.startRequested ? 'yes' : 'no'} queueItems=${result.activation.syncedQueueItems ?? 'not-synced'}`);
+    }
+    process.exit(0);
+  }
+
+  if (cmd === 'daemon') {
     const {
       controlDaemon,
       daemonLogs,
@@ -479,13 +596,18 @@ try {
       name: flags.name && flags.name !== true ? String(flags.name) : null,
       runtimeAdapter: flags.runtime && flags.runtime !== true ? String(flags.runtime) : null,
       runnerId: flags['runner-id'] && flags['runner-id'] !== true ? String(flags['runner-id']) : null,
+      runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
       ttlSeconds: flags['ttl-seconds'] && flags['ttl-seconds'] !== true ? flags['ttl-seconds'] : null,
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
       maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
+      maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
+      maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       reportSink: flags['report-sink'] && flags['report-sink'] !== true ? String(flags['report-sink']) : null,
       masterSessionKey: flags['master-session-key'] && flags['master-session-key'] !== true ? String(flags['master-session-key']) : null,
       agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
+      actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,
       pollIntervalMs: flags['poll-interval-ms'] != null && flags['poll-interval-ms'] !== true ? flags['poll-interval-ms'] : null,
       daemonPollIntervalMs: flags['daemon-poll-interval-ms'] != null && flags['daemon-poll-interval-ms'] !== true ? flags['daemon-poll-interval-ms'] : null,
       failureBackoffMs: flags['failure-backoff-ms'] != null && flags['failure-backoff-ms'] !== true ? flags['failure-backoff-ms'] : null,
@@ -509,7 +631,7 @@ try {
       });
       if (flags.json) console.log(JSON.stringify(result, null, 2));
       else console.log(`daemon=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
-      process.exit(0);
+      process.exit(daemonExitCode(result));
     }
 
     if (subcmd === 'unit') {

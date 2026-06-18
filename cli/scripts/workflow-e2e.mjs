@@ -48,6 +48,12 @@ function replaceSnapshotVersion(workDir, fromVersionId, toVersionId) {
   writeFileSync(p, readFileSync(p, 'utf8').replace(`versionId: ${fromVersionId}`, `versionId: ${toVersionId}`), 'utf8');
 }
 
+function readJsonl(path) {
+  const raw = readFileSync(path, 'utf8').trim();
+  if (!raw) return [];
+  return raw.split('\n').map((line) => JSON.parse(line));
+}
+
 function createDecompositionWork() {
   const dir = join(tempRoot, 'tc-autonomous-decomposition');
   run(['init', dir, '--id', 'tc-autonomous-decomposition', '--title', 'TC autonomous decomposition', '--objective', 'Validate request-to-completion decomposition loop', '--language', 'en']);
@@ -92,12 +98,43 @@ function createDecompositionWork() {
   return dir;
 }
 
-function createDelegationWork(id) {
+function createDelegationWork(id, { self = false } = {}) {
   const dir = join(tempRoot, id);
   run(['init', dir, '--id', id, '--title', id, '--objective', 'Validate delegation behavior', '--language', 'en']);
+  const specPath = join(tempRoot, `${id}-spec.json`);
+  writeFileSync(specPath, JSON.stringify({
+    versionId: 'tgv-root-v2',
+    version: 'v2',
+    summary: 'Delegation fixture task',
+    selected: true,
+    tasks: [{
+      id: 'task-delegated',
+      title: 'Delegated task',
+      objective: 'Complete work after pending delegation is resolved.',
+      responsibility: 'Own the delegated path.',
+      completionCriteria: 'Task is marked done after delegation is resolved.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Fixture task is ready after delegation clears.',
+      understandingLevel: 'known'
+    }]
+  }, null, 2));
+  run(['decompose', dir, '--task-group-id', 'tg-root', '--spec', specPath]);
+  replaceSnapshotVersion(dir, 'tgv-root-v1', 'tgv-root-v2');
   writeMd(join(dir, 'runs', 'run-main', 'nodes', 'run-node-human-decision.md'), {
     taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-human-decision', runId: 'run-main', type: 'delegate',
-    title: 'Human decision', status: 'waiting', delegateeType: 'human', delegateeRef: 'jimmy', request: 'Choose the product direction.', expectedOutput: 'A clear decision.', requestedAt: '2026-05-15T00:00:00.000Z', createdAt: '2026-05-15T00:00:00.000Z'
+    title: self ? 'Self decision' : 'Human decision',
+    status: 'waiting',
+    delegateeType: self ? 'self' : 'human',
+    delegateeRef: self ? 'self' : 'jimmy',
+    selfDelegate: self,
+    sourceTaskId: 'task-delegated',
+    sourceTaskGroupVersionId: 'tgv-root-v2',
+    request: 'Choose the product direction.',
+    expectedOutput: 'A clear decision.',
+    requestedAt: '2026-05-15T00:00:00.000Z',
+    createdAt: '2026-05-15T00:00:00.000Z'
   }, '# Human decision');
   return dir;
 }
@@ -153,7 +190,7 @@ try {
   const tc3Expected = {
     loopbackPolicy: 'none', stopReason: 'delegation_pending', stepsRun: 0,
     source: { type: 'runNode', id: 'run-node-human-decision' },
-    evidence: 'Normal mode must pause and surface a request when human delegation is pending.'
+    evidence: 'Normal mode must pause and surface a request when non-self human delegation is pending.'
   };
   const tc3Dir = createDelegationWork('tc-delegation-pending');
   const tc3Run = JSON.parse(run(['run', tc3Dir, '--executor', 'dry-run', '--json']).stdout);
@@ -162,24 +199,33 @@ try {
     tc3Actual.loopbackPolicy === 'none' && tc3Actual.stopReason === 'delegation_pending' && tc3Actual.stepsRun === 0 && tc3Actual.source?.id === 'run-node-human-decision');
 
   const tc4Expected = {
-    loopbackPolicy: 'self', stopReason: 'no_runnable', loopbacksUsed: 1, action: { kind: 'loopback', status: 'completed', executedBy: 'Nova', executionMode: 'loopback' },
+    loopbackPolicy: 'self', stopReason: 'all_closed', claimedItems: 1, loopbacksUsed: 1, action: { kind: 'loopback', status: 'completed', executedBy: 'Nova', executionMode: 'loopback' },
     delegateFrontmatter: ['status: done', 'resolvedBy: loopback', 'executionMode: loopback', 'executedBy: Nova'],
-    evidence: 'Loopback mode should take a waiting delegation, execute it itself, and record who executed it.'
+    evidence: 'User-facing loopback mode should route through daemon-backed queue execution, take a self-delegation, execute it itself, and record who executed it.'
   };
-  const tc4Dir = createDelegationWork('tc-loopback-human-delegation');
-  const tc4Run = JSON.parse(run(['run', tc4Dir, '--executor', 'dry-run', '--loopback', 'self', '--actor', 'Nova', '--max-loopbacks', '2', '--max-steps', '3', '--json']).stdout);
+  const tc4Dir = createDelegationWork('tc-loopback-self-delegation', { self: true });
+  const tc4Daemon = JSON.parse(run(['run', tc4Dir, '--executor', 'dry-run', '--loopback', 'self', '--actor', 'Nova', '--max-loopbacks', '2', '--max-steps', '3', '--json']).stdout);
   const tc4Node = readFileSync(join(tc4Dir, 'runs', 'run-main', 'nodes', 'run-node-human-decision.md'), 'utf8');
-  const tc4Action = tc4Run.actions.find((a) => a.kind === 'loopback');
+  const tc4Wave = tc4Daemon.cycles[0].waveDetails[0];
+  const tc4FullWave = tc4Daemon.cycles[0];
+  const tc4Events = readJsonl(join(tc4Dir, 'runs', 'run-tgv-root-v2-task-delegated', 'events.jsonl'));
+  const tc4LoopbackEvent = tc4Events.find((event) => event.type === 'loopback_completed' && event.delegateRunNodeId === 'run-node-human-decision');
+  const tc4TaskEvent = tc4Events.find((event) => event.type === 'task_completed' && event.taskId === 'task-delegated');
+  const tc4StoppedEvent = tc4Events.find((event) => event.type === 'runner_stopped');
   const tc4Actual = {
-    loopbackPolicy: tc4Run.loopbackPolicy,
-    stopReason: tc4Run.stopReason,
-    loopbacksUsed: tc4Run.loopbacksUsed,
-    action: tc4Action ? { kind: tc4Action.kind, status: tc4Action.status, executedBy: tc4Action.executedBy, executionMode: tc4Action.executionMode } : null,
+    loopbackPolicy: tc4Wave ? 'self' : null,
+    stopReason: tc4FullWave.stopReason,
+    claimedItems: tc4FullWave.claimedItems,
+    loopbacksUsed: tc4LoopbackEvent ? 1 : 0,
+    action: tc4LoopbackEvent ? { kind: 'loopback', status: 'completed', executedBy: tc4LoopbackEvent.executedBy, executionMode: tc4LoopbackEvent.executionMode } : null,
+    taskCompletedEvent: tc4TaskEvent?.type || null,
+    runnerStoppedEvent: tc4StoppedEvent?.type || null,
     delegateFrontmatter: tc4Expected.delegateFrontmatter.filter((x) => tc4Node.includes(x))
   };
   record('TC04', '4. loopback mode executes waiting delegation as self and records executor', tc4Expected, tc4Actual,
-    tc4Actual.loopbackPolicy === 'self' && tc4Actual.stopReason === 'no_runnable' && tc4Actual.loopbacksUsed === 1 &&
+    tc4Actual.loopbackPolicy === 'self' && tc4Actual.stopReason === 'all_closed' && tc4Actual.claimedItems === 1 && tc4Actual.loopbacksUsed === 1 &&
     tc4Actual.action?.executedBy === 'Nova' && tc4Actual.action?.executionMode === 'loopback' &&
+    tc4Actual.taskCompletedEvent === 'task_completed' && tc4Actual.runnerStoppedEvent === 'runner_stopped' &&
     tc4Actual.delegateFrontmatter.length === tc4Expected.delegateFrontmatter.length);
 
   const tc5Expected = {
