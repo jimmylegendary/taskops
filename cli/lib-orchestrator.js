@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   claimQueueItems,
   claimQueueItem,
+  heartbeatLease,
   insertProgressReport,
   insertRunnerAttempt,
   listProgressReports,
@@ -265,6 +266,25 @@ function runWorkerProcess(args, timeoutMs = null) {
   });
 }
 
+function startLeaseHeartbeat(workDir, leaseId, { ttlSeconds = 300 } = {}) {
+  const ttl = Number(ttlSeconds);
+  if (!Number.isFinite(ttl) || ttl <= 0) return { stop: () => {}, errors: [] };
+  const intervalMs = Math.max(1000, Math.min(60000, Math.floor((ttl * 1000) / 3)));
+  const errors = [];
+  const timer = setInterval(() => {
+    try {
+      heartbeatLease(workDir, leaseId, { ttlSeconds: ttl });
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return {
+    errors,
+    stop: () => clearInterval(timer),
+  };
+}
+
 async function runClaimedQueueItemWorker(workDir, {
   claim,
   runtimeAdapter,
@@ -282,6 +302,7 @@ async function runClaimedQueueItemWorker(workDir, {
   maxLoopbacks,
   maxSteps,
   until,
+  ttlSeconds,
 }) {
   const item = claim.item;
   const lease = claim.lease;
@@ -327,8 +348,11 @@ async function runClaimedQueueItemWorker(workDir, {
   let runResult;
   let releaseStatus = 'failed';
   let errorSummary = null;
+  let releaseErrorSummary = null;
   let report = null;
+  const heartbeat = startLeaseHeartbeat(workDir, lease.id, { ttlSeconds });
   const worker = await runWorkerProcess(args, timeout == null ? null : Number(timeout) * 1000);
+  heartbeat.stop();
   if (worker.status === 0 && worker.stdout) {
     try {
       runResult = JSON.parse(worker.stdout);
@@ -362,8 +386,25 @@ async function runClaimedQueueItemWorker(workDir, {
   });
   try {
     releaseLease(workDir, lease.id, { status: releaseStatus });
-  } finally {
+  } catch (error) {
+    releaseErrorSummary = error instanceof Error ? error.message : String(error);
+    errorSummary = errorSummary || releaseErrorSummary;
+    releaseStatus = 'failed';
+    updateRunnerAttempt(workDir, attemptId, {
+      status: 'failed',
+      finishedAt,
+      runId: runResult?.runId || null,
+      stopReason: runResult?.stopReason || 'lease_release_failed',
+      errorSummary: releaseErrorSummary,
+    });
+  }
+  try {
     syncQueueProjection(workDir);
+  } catch (error) {
+    const syncError = error instanceof Error ? error.message : String(error);
+    errorSummary = errorSummary || syncError;
+    releaseStatus = 'failed';
+    releaseErrorSummary = releaseErrorSummary || syncError;
   }
 
   if (reportSink !== 'none') {
@@ -396,6 +437,8 @@ async function runClaimedQueueItemWorker(workDir, {
     releaseStatus,
     errorSummary,
     report,
+    releaseErrorSummary,
+    heartbeatErrors: heartbeat.errors,
     worker: {
       status: worker.status,
       signal: worker.signal || null,
@@ -451,6 +494,7 @@ export async function runQueueWave(workDir, options = {}) {
     loopbackPolicy,
     maxLoopbacks,
     maxSteps,
+    ttlSeconds,
     until: options.until || null,
   })));
   return {
@@ -648,6 +692,7 @@ export async function runQueueWatch(workDir, options = {}) {
       loopbackPolicy,
       maxLoopbacks,
       maxSteps,
+      ttlSeconds,
       until: options.until || null,
     }).then((result) => ({ waveId, result }));
     active.set(waveId, promise);

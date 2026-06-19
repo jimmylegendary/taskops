@@ -24,6 +24,7 @@ const orchestratorWorkDir = join(tempRoot, 'orchestrator-work');
 const watchWorkDir = join(tempRoot, 'watch-work');
 const retryWorkDir = join(tempRoot, 'retry-work');
 const staleRecoveryWorkDir = join(tempRoot, 'stale-recovery-work');
+const expiredSelfReleaseWorkDir = join(tempRoot, 'expired-self-release-work');
 const reportSinkWorkDir = join(tempRoot, 'report-sink-work');
 const daemonWorkDir = join(tempRoot, 'daemon-work');
 const daemonBatchWorkDir = join(tempRoot, 'daemon-batch-work');
@@ -663,6 +664,67 @@ if (staleClaimBlocked.claimed !== false) {
   process.exit(1);
 }
 run(['validate', staleRecoveryWorkDir]);
+
+run(['init', expiredSelfReleaseWorkDir, '--id', 'expired-self-release-work', '--title', 'Expired Self Release Work', '--objective', 'Smoke test late lease release from a still-running worker', '--language', 'en']);
+const expiredSelfReleaseSpecPath = join(tempRoot, 'expired-self-release-spec.json');
+writeFileSync(expiredSelfReleaseSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Expired self release decomposition',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-late-release',
+      title: 'Late release task',
+      objective: 'Let a still-running worker release its own lease even if the TTL timestamp has passed.',
+      responsibility: 'Protect live worker completion from self-staling at release time.',
+      completionCriteria: 'Expired active lease can be released by its holder without being marked stale first.',
+      status: 'pending',
+      runReadiness: 'runnable',
+      runReadinessReason: 'Ready for late release smoke.',
+      understandingLevel: 'known',
+      order: 1
+    }
+  ]
+}, null, 2));
+run(['decompose', expiredSelfReleaseWorkDir, '--task-group-id', 'tg-root', '--spec', expiredSelfReleaseSpecPath]);
+const expiredSelfReleaseSnapshotPath = join(expiredSelfReleaseWorkDir, 'snapshots', 'snapshot-root-v1.md');
+writeFileSync(expiredSelfReleaseSnapshotPath, readFileSync(expiredSelfReleaseSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
+const expiredSelfClaim = JSON.parse(run(['queue', 'claim', expiredSelfReleaseWorkDir, '--runner-id', 'expired-self-smoke', '--ttl-seconds', '1', '--json']).stdout);
+insertRunnerAttempt(expiredSelfReleaseWorkDir, {
+  id: 'attempt-expired-self-smoke',
+  queueItemId: expiredSelfClaim.item.id,
+  leaseId: expiredSelfClaim.lease.id,
+  runnerId: 'expired-self-smoke',
+  runtimeAdapter: 'dry-run',
+  status: 'running',
+  startedAt: new Date(Date.now() - 60_000).toISOString(),
+});
+const expiredSelfDb = new DatabaseSync(expiredSelfClaim.dbPath);
+expiredSelfDb.prepare(`
+  UPDATE leases
+  SET expires_at = ?
+  WHERE id = ?
+`).run(new Date(Date.now() - 10_000).toISOString(), expiredSelfClaim.lease.id);
+expiredSelfDb.close();
+const expiredSelfReleaseOut = JSON.parse(run(['queue', 'release', expiredSelfReleaseWorkDir, expiredSelfClaim.lease.id, '--status', 'done', '--json']).stdout);
+if (expiredSelfReleaseOut.lease?.status !== 'done') {
+  console.error('queue release should not mark its own active lease stale before releasing it');
+  console.error(expiredSelfReleaseOut);
+  process.exit(1);
+}
+const expiredSelfDbAfter = new DatabaseSync(expiredSelfClaim.dbPath);
+const expiredSelfRows = {
+  lease: expiredSelfDbAfter.prepare('SELECT status FROM leases WHERE id = ?').get(expiredSelfClaim.lease.id),
+  attempt: expiredSelfDbAfter.prepare('SELECT status, stop_reason FROM runner_attempts WHERE id = ?').get('attempt-expired-self-smoke'),
+};
+expiredSelfDbAfter.close();
+if (expiredSelfRows.lease?.status !== 'done' || expiredSelfRows.attempt?.status !== 'done') {
+  console.error('late self release should leave the lease and linked attempt done, not stale/failed');
+  console.error(expiredSelfRows);
+  process.exit(1);
+}
+run(['validate', expiredSelfReleaseWorkDir]);
 
 run(['init', reportSinkWorkDir, '--id', 'report-sink-work', '--title', 'Report Sink Work', '--objective', 'Smoke test report sink failure ledger', '--language', 'en']);
 const reportSinkSpecPath = join(tempRoot, 'report-sink-spec.json');

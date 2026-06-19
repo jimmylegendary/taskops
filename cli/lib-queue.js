@@ -245,14 +245,16 @@ function readLease(db, leaseId) {
   `).get(leaseId) || null;
 }
 
-function expireStaleLeases(db, now) {
+function expireStaleLeases(db, now, { excludeLeaseIds = [] } = {}) {
+  const excluded = new Set((excludeLeaseIds || []).filter(Boolean).map(String));
   const staleLeases = db.prepare(`
     SELECT id, queue_item_id, runner_id, expires_at
     FROM leases
     WHERE status = 'active'
       AND expires_at <= ?
   `).all(now);
-  if (staleLeases.length === 0) return [];
+  const expirableLeases = staleLeases.filter((lease) => !excluded.has(String(lease.id)));
+  if (expirableLeases.length === 0) return [];
 
   const markLeaseStale = db.prepare(`
     UPDATE leases
@@ -270,7 +272,7 @@ function expireStaleLeases(db, now) {
       AND status = 'running'
   `);
 
-  for (const lease of staleLeases) {
+  for (const lease of expirableLeases) {
     markLeaseStale.run(now, lease.id);
     markAttemptFailed.run(
       now,
@@ -278,7 +280,7 @@ function expireStaleLeases(db, now) {
       lease.id,
     );
   }
-  return staleLeases;
+  return expirableLeases;
 }
 
 function leaseTtlSeconds(value) {
@@ -607,7 +609,7 @@ export function releaseLease(workDir, leaseId, { status = 'done' } = {}) {
   const now = isoNow();
   db.exec('BEGIN IMMEDIATE');
   try {
-    expireStaleLeases(db, now);
+    expireStaleLeases(db, now, { excludeLeaseIds: [leaseId] });
     const current = readLease(db, leaseId);
     if (!current) throw new Error(`Lease not found: ${leaseId}`);
     if (current.status !== 'active') throw new Error(`Lease is not active: ${leaseId} (${current.status})`);
