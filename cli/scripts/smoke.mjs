@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { insertRunnerAttempt } from '../lib-queue.js';
-import { runTaskOps, sanitizeFmScalar } from '../lib-runner.js';
+import { filterConcurrentTargetValidationErrors, runTaskOps, sanitizeFmScalar } from '../lib-runner.js';
 import { parseFrontmatterText } from '../lib-taskops.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +28,28 @@ const expiredSelfReleaseWorkDir = join(tempRoot, 'expired-self-release-work');
 const reportSinkWorkDir = join(tempRoot, 'report-sink-work');
 const daemonWorkDir = join(tempRoot, 'daemon-work');
 const daemonBatchWorkDir = join(tempRoot, 'daemon-batch-work');
+
+const filteredConcurrentErrors = filterConcurrentTargetValidationErrors([
+  '/tmp/work/runs/run-current: missing index.md',
+  '/tmp/work/runs/run-other: missing index.md',
+  '/tmp/work/runs/run-other/nodes/node.md: missing frontmatter',
+  '/tmp/work/task-groups/tg-root/versions/tgv-root-v2/tasks/task-target.md: bad target task',
+  '/tmp/work/task-groups/tg-root/versions/tgv-root-v2/tasks/task-other.md: unrelated task',
+], {
+  allowConcurrentTarget: true,
+  runId: 'run-current',
+  targetTaskId: 'task-target',
+  targetTaskGroupVersionId: 'tgv-root-v2'
+});
+const expectedFilteredConcurrentErrors = [
+  '/tmp/work/runs/run-current: missing index.md',
+  '/tmp/work/task-groups/tg-root/versions/tgv-root-v2/tasks/task-target.md: bad target task'
+];
+if (JSON.stringify(filteredConcurrentErrors) !== JSON.stringify(expectedFilteredConcurrentErrors)) {
+  console.error('Concurrent target validation filtering regressed');
+  console.error(filteredConcurrentErrors);
+  process.exit(1);
+}
 
 function run(args, expected = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });

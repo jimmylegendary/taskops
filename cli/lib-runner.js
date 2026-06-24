@@ -409,11 +409,11 @@ function resolveRunId(parsed, requested) {
   return DEFAULT_RUN_ID;
 }
 
-function filterConcurrentTargetValidationErrors(errors, { allowConcurrentTarget, runId, targetTaskId, targetTaskGroupVersionId }) {
+export function filterConcurrentTargetValidationErrors(errors, { allowConcurrentTarget, runId, targetTaskId, targetTaskGroupVersionId }) {
   if (!allowConcurrentTarget || !runId) return errors;
   return errors.filter((error) => {
     const message = String(error || '');
-    const runMatch = message.match(/\/runs\/([^/]+)\//);
+    const runMatch = message.match(/\/runs\/([^/:]+)(?:[/:])/);
     if (runMatch && runMatch[1] !== runId) return false;
 
     const taskMatch = message.match(/\/task-groups\/([^/]+)\/versions\/([^/]+)\/tasks\/([^/]+)\.md:/);
