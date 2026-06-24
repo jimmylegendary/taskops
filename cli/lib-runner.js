@@ -1,7 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import {
   classifyTaskReadiness,
   discoverProjects,
@@ -11,6 +10,7 @@ import {
   parseProject,
   readBody,
 } from './lib-taskops.js';
+import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
 export const DEFAULT_RUN_ID = 'run-main';
@@ -848,24 +848,6 @@ function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifact
   ].join('\n');
 }
 
-function invokeAgent({ args, stepTimeoutMs }) {
-  const spawnOpts = { encoding: 'utf8' };
-  if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) spawnOpts.timeout = stepTimeoutMs;
-  const result = spawnSync('openclaw', args, spawnOpts);
-  const stdout = (result.stdout || '').trim();
-  const stderr = (result.stderr || '').trim();
-  if (result.error) {
-    return { ok: false, message: `openclaw agent invocation failed: ${result.error.message}`, stdout, stderr };
-  }
-  if (result.signal === 'SIGTERM' || (result.status === null && stepTimeoutMs != null)) {
-    return { ok: false, message: `openclaw agent timed out after ${stepTimeoutMs}ms`, stdout, stderr };
-  }
-  if (result.status !== 0) {
-    return { ok: false, message: stderr || stdout || `openclaw agent exited with status ${result.status}`, stdout, stderr };
-  }
-  return { ok: true, message: stdout, stdout, stderr };
-}
-
 function safeSessionPart(value, fallback = 'task') {
   const safe = String(value || fallback)
     .toLowerCase()
@@ -895,20 +877,16 @@ function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs }) {
       executor: 'dry-run',
     };
   }
-  if (executor === 'openclaw-agent') {
+  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
+  if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
     const prompt = buildAgentExecutionPrompt({ project, task });
-    const args = [
-      'agent',
-      '--agent', agentId,
-      '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'execute' }),
-      '--message', prompt,
-      '--json',
-    ];
-    if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
-      args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
-    }
-    const result = invokeAgent({ args, stepTimeoutMs });
-    return { ...result, executor: 'openclaw-agent', message: result.message || `openclaw agent completed task ${task.id}` };
+    const result = invokeRuntimeAdapter(adapter, {
+      prompt,
+      agentId,
+      sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'execute' }),
+      timeoutMs: stepTimeoutMs,
+    });
+    return { ...result, executor, message: result.message || `${adapter} completed task ${task.id}` };
   }
   return { ok: false, message: `Unknown executor '${executor}'`, executor };
 }
@@ -956,26 +934,22 @@ function performDryRunLoopback({ runDir, loopbackNodeId, delegate, actorName }) 
   return { ok: true, artifactPath, message: `Wrote dry-run loopback artifact at ${artifactPath}` };
 }
 
-function performAgentLoopback({ project, projectDir, delegate, agentId, stepTimeoutMs, runDir, runId, loopbackNodeId, actorName }) {
+function performAgentLoopback({ project, projectDir, delegate, executor, agentId, stepTimeoutMs, runDir, runId, loopbackNodeId, actorName }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${loopbackNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
   const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName });
-  const args = [
-    'agent',
-    '--agent', agentId,
-    '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: delegate.sourceTaskId || delegate.id, action: 'loopback' }),
-    '--message', prompt,
-    '--json',
-  ];
-  if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
-    args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
-  }
-  const result = invokeAgent({ args, stepTimeoutMs });
+  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
+  const result = invokeRuntimeAdapter(adapter, {
+    prompt,
+    agentId,
+    sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: delegate.sourceTaskId || delegate.id, action: 'loopback' }),
+    timeoutMs: stepTimeoutMs,
+  });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
-    return { ok: false, message: `openclaw-agent did not write expected loopback artifact at ${artifactPath}; refusing to mark loopback done` };
+    return { ok: false, message: `${adapter} did not write expected loopback artifact at ${artifactPath}; refusing to mark loopback done` };
   }
   return { ok: true, artifactPath, message: result.stdout || `Agent recorded loopback at ${artifactPath}` };
 }
@@ -1050,7 +1024,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   try {
     result = executor === 'dry-run'
       ? performDryRunLoopback({ runDir: loopbackRunDir, loopbackNodeId, delegate, actorName })
-      : performAgentLoopback({ project, projectDir, delegate, agentId, stepTimeoutMs, runDir: loopbackRunDir, runId: loopbackRunId, loopbackNodeId, actorName });
+      : performAgentLoopback({ project, projectDir, delegate, executor, agentId, stepTimeoutMs, runDir: loopbackRunDir, runId: loopbackRunId, loopbackNodeId, actorName });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -1076,7 +1050,8 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     return {
       kind: 'loopback', status: 'failed', executor, executedBy: actorName, executionMode: 'loopback',
       delegateRunNodeId: delegate.id, runNodeId: loopbackNodeId,
-      message: result.message || null, loopbackIndex,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '', loopbackIndex,
     };
   }
 
@@ -1394,7 +1369,11 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     message: result.message || null,
   });
   appendRunLog(runDir, `${finishedAt} task_failed taskId=${task.id} reason=${result.message || ''}`);
-  return { taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null };
+  return {
+    taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor,
+    message: result.message || null, adapterStatus: result.status || null,
+    stdout: result.stdout || '', stderr: result.stderr || '',
+  };
 }
 
 export function extendActiveSnapshot(parsed, addition) {
@@ -1482,27 +1461,23 @@ function performDryRunDecomposition({ projectDir, task }) {
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
 
-function performAgentDecomposition({ projectDir, project, task, agentId, stepTimeoutMs }) {
+function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs }) {
   const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
   const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
   const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId });
-  const args = [
-    'agent',
-    '--agent', agentId,
-    '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
-    '--message', prompt,
-    '--json',
-  ];
-  if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
-    args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
-  }
-  const result = invokeAgent({ args, stepTimeoutMs });
+  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
+  const result = invokeRuntimeAdapter(adapter, {
+    prompt,
+    agentId,
+    sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
+    timeoutMs: stepTimeoutMs,
+  });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(versionIndex)) {
-    return { ok: false, message: `openclaw-agent did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
+    return { ok: false, message: `${adapter} did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
   }
   return { ok: true, childTaskGroupId, versionId, message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}` };
 }
@@ -1531,7 +1506,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   try {
     result = executor === 'dry-run'
       ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, agentId, stepTimeoutMs });
+      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -1550,7 +1525,11 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
       message: result.message || null,
     });
     appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
-    return { taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor, message: result.message || null };
+    return {
+      taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '',
+    };
   }
 
   rewriteFrontmatter(task.path, (fm) => {
@@ -1610,26 +1589,22 @@ function performDryRunExploration({ runDir, runNodeId, task }) {
   return { ok: true, artifactPath, message: `Wrote dry-run exploration artifact at ${artifactPath}` };
 }
 
-function performAgentExploration({ project, projectDir, task, agentId, stepTimeoutMs, runDir, runId, runNodeId }) {
+function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
   const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath });
-  const args = [
-    'agent',
-    '--agent', agentId,
-    '--session-key', openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'explore' }),
-    '--message', prompt,
-    '--json',
-  ];
-  if (stepTimeoutMs != null && Number.isFinite(stepTimeoutMs)) {
-    args.push('--timeout', String(Math.max(1, Math.floor(stepTimeoutMs / 1000))));
-  }
-  const result = invokeAgent({ args, stepTimeoutMs });
+  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
+  const result = invokeRuntimeAdapter(adapter, {
+    prompt,
+    agentId,
+    sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'explore' }),
+    timeoutMs: stepTimeoutMs,
+  });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
-    return { ok: false, message: `openclaw-agent did not write expected exploration artifact at ${artifactPath}; refusing to mark exploration done` };
+    return { ok: false, message: `${adapter} did not write expected exploration artifact at ${artifactPath}; refusing to mark exploration done` };
   }
   return { ok: true, artifactPath, message: result.stdout || `Agent recorded exploration at ${artifactPath}` };
 }
@@ -1658,7 +1633,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   try {
     result = executor === 'dry-run'
       ? performDryRunExploration({ runDir, runNodeId, task })
-      : performAgentExploration({ project, projectDir, task, agentId, stepTimeoutMs, runDir, runId, runNodeId });
+      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -1677,7 +1652,11 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
       message: result.message || null,
     });
     appendRunLog(runDir, `${finishedAt} exploration_failed taskId=${task.id} reason=${result.message || ''}`);
-    return { taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor, message: result.message || null };
+    return {
+      taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '',
+    };
   }
 
   rewriteFrontmatter(task.path, (fm) => {
@@ -2106,8 +2085,9 @@ export function runTaskOps(workDir, options = {}) {
   const projectDir = projects[0];
 
   const executor = options.executor || 'dry-run';
-  if (!['dry-run', 'openclaw-agent'].includes(executor)) {
-    throw new Error(`Invalid --executor '${executor}'. Use 'dry-run' or 'openclaw-agent'.`);
+  const allowedExecutors = ['openclaw-agent', ...RUNTIME_ADAPTER_NAMES];
+  if (!allowedExecutors.includes(executor)) {
+    throw new Error(`Invalid --executor '${executor}'. Use ${allowedExecutors.join(', ')}.`);
   }
   const agentId = options.agent || DEFAULT_AGENT_ID;
 
@@ -2147,7 +2127,7 @@ export function runTaskOps(workDir, options = {}) {
   if (loopbackPolicy === 'none') maxLoopbacks = 0;
   const actorName = options.actor && String(options.actor).trim()
     ? String(options.actor).trim()
-    : (executor === 'openclaw-agent' ? agentId : 'taskops-runner');
+    : (executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : 'taskops-runner');
   const targetTaskId = options.targetTaskId || null;
   const targetTaskGroupVersionId = options.targetTaskGroupVersionId || null;
   const allowConcurrentTarget = options.allowConcurrentTarget === true && Boolean(targetTaskId);
@@ -2194,7 +2174,7 @@ export function runTaskOps(workDir, options = {}) {
     logEvent(eventsPath, {
       timestamp: startedAt, type: 'runner_started',
       workId: parsed.project.id, runId, executor,
-      agentId: executor === 'openclaw-agent' ? agentId : null,
+      agentId: executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : null,
       maxSteps, until: until != null ? new Date(until).toISOString() : null,
       loopbackPolicy, maxLoopbacks, actorName,
     });

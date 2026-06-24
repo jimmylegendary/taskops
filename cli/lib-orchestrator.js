@@ -12,6 +12,7 @@ import {
   updateRunnerAttempt,
 } from './lib-queue.js';
 import { DEFAULT_MAX_LOOPBACKS, explainWork, runTaskOps } from './lib-runner.js';
+import { executorForRuntime, normalizeRuntimeAdapter } from './lib-runtime-adapters.js';
 
 const DEFAULT_LOOPBACK_WORKER_MAX_STEPS = 50;
 
@@ -110,22 +111,6 @@ function parseQueueItemId(id) {
     taskGroupVersionId: raw.slice(0, idx),
     taskId: raw.slice(idx + 1),
   };
-}
-
-function normalizeRuntimeAdapter(value) {
-  const runtime = value == null || value === '' ? 'dry-run' : String(value).trim();
-  if (!['dry-run', 'openclaw-cli'].includes(runtime)) {
-    throw new Error(`Invalid runtime adapter '${value}'. Use dry-run or openclaw-cli.`);
-  }
-  return runtime;
-}
-
-function executorForRuntime(runtimeAdapter) {
-  switch (runtimeAdapter) {
-    case 'dry-run': return 'dry-run';
-    case 'openclaw-cli': return 'openclaw-agent';
-    default: throw new Error(`Unsupported runtime adapter '${runtimeAdapter}'`);
-  }
 }
 
 function safeIdPart(value) {

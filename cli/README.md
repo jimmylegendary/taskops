@@ -94,19 +94,19 @@ taskops review <work-dir> <run-node-id|task-id> [--json]
 taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
 taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
-taskops delegate <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
+taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
 taskops queue sync <work-dir> [--json]
 taskops queue list <work-dir> [--json]
 taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
 taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
-taskops runner once <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
-taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
-taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--json]
-taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--no-start] [--dry-run] [--json]
-taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--start] [--dry-run] [--json]
+taskops runner once <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
+taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--json]
+taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--no-start] [--dry-run] [--json]
+taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--start] [--dry-run] [--json]
 taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
 taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -165,7 +165,7 @@ The initial queue surface is intentionally read-only relative to markdown:
 ## Queue-backed runner
 
 `taskops runner once <work-dir>` claims one executable queue item, runs exactly that claimed task through a runtime adapter, releases the lease, refreshes the queue projection, and writes a progress report ledger row when reporting is enabled.
-Pass `--timeout <seconds>` with `--runtime openclaw-cli` to bound the worker process from inside TaskOps; timed-out attempts are finalized as failed instead of depending on an external shell timeout.
+Pass `--timeout <seconds>` with a CLI runtime to bound the worker process from inside TaskOps; timed-out attempts are finalized as failed instead of depending on an external shell timeout.
 
 ```bash
 taskops runner once ./my-work \
@@ -178,7 +178,7 @@ taskops runner once ./my-work \
 
 This command is intentionally small: it runs one claimed queue item and stops.
 
-`taskops runner watch <work-dir>` is the long-lived local runner. It syncs markdown into SQLite, keeps up to `--max-parallel` one-shot worker transactions active, and claims a replacement runnable item as soon as a worker exits. Queue projection is backlog state, not concurrency state: all selected tasks remain visible in `.taskops/queue.sqlite`, while `--max-parallel` limits active workers. For `--runtime openclaw-cli`, each worker transaction calls `openclaw agent --json` through the normal TaskOps runner target path. Watch exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached. Watch mode defaults to `--max-attempts 3`; pass `--max-attempts 0` for unlimited retries.
+`taskops runner watch <work-dir>` is the long-lived local runner. It syncs markdown into SQLite, keeps up to `--max-parallel` one-shot worker transactions active, and claims a replacement runnable item as soon as a worker exits. Queue projection is backlog state, not concurrency state: all selected tasks remain visible in `.taskops/queue.sqlite`, while `--max-parallel` limits active workers. For CLI runtimes, each worker transaction calls the selected adapter through the normal TaskOps runner target path. Watch exits with `all_closed` once the work graph is fully closed, and otherwise waits for future queueable work until a bound such as `--max-waves`, `--max-idle-cycles`, `--idle-exit-after-seconds`, or `--until` is reached. Watch mode defaults to `--max-attempts 3`; pass `--max-attempts 0` for unlimited retries.
 If a runner process dies after claiming a lease, the next queue sync/list/claim operation marks the expired lease stale, finalizes any linked running attempt as failed, and lets the normal fingerprint-based retry cap decide whether the item can be reclaimed.
 
 ```bash
@@ -242,8 +242,11 @@ Use `taskops daemon unit ./my-work --name my-work` or `taskops daemon enable ./m
 Adapter boundary:
 
 - `--runtime dry-run` maps to the existing safe synthetic executor and is used by smoke tests.
-- `--runtime openclaw-cli` maps to the existing `openclaw agent --json` executor.
-- The runner core is not OpenClaw-specific; future runtime adapters should fit behind the same claim/run/wait/release/report boundary.
+- `--runtime openclaw-cli` maps to `openclaw agent --json`.
+- `--runtime claude-code` maps to `claude --print --permission-mode bypassPermissions`.
+- `--runtime codex-cli` maps to `codex --ask-for-approval never exec --skip-git-repo-check --sandbox danger-full-access`.
+- `--runtime opencode-cli` maps to `opencode run` when an `opencode` binary is available.
+- The runtime registry reports structured success, missing binary, authentication failure, runtime failure, and timeout results so queue attempts can fail honestly without hiding why.
 
 Report boundary:
 

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { runQueueWatch } from './lib-orchestrator.js';
 import { QUEUE_DB_RELATIVE_PATH, syncQueueProjection } from './lib-queue.js';
 import { DEFAULT_MAX_LOOPBACKS } from './lib-runner.js';
+import { normalizeRuntimeAdapter } from './lib-runtime-adapters.js';
 
 function isoNow() {
   return new Date().toISOString();
@@ -97,7 +98,7 @@ export function normalizeDaemonOptions(workDir, options = {}) {
     name,
     runnerId,
     runId: options.runId || null,
-    runtimeAdapter: options.runtimeAdapter || options.runtime || 'openclaw-cli',
+    runtimeAdapter: normalizeRuntimeAdapter(options.runtimeAdapter || options.runtime || 'openclaw-cli'),
     ttlSeconds: optionalPositiveInteger(options.ttlSeconds, 'ttl seconds', 300),
     maxAttempts: optionalPositiveInteger(options.maxAttempts, 'max attempts', 3),
     maxParallel: optionalPositiveInteger(options.maxParallel, 'max parallel', 8),
