@@ -152,8 +152,11 @@ writeFileSync(runnerSpecPath, JSON.stringify({
       responsibility: 'Own the first checkable runner step.',
       completionCriteria: 'Runner marks this task done and writes EoW nodes.',
       acceptance: {
-        mode: 'informational',
+        mode: 'enforced',
         expectedOutcome: 'Runner marks this task done, records observed result evidence, reviews it, and writes EoW nodes.',
+        assertions: {
+          contentIncludes: ['dry-run executor synthetically completed task task-first']
+        },
         requiredArtifacts: [],
         requiredChecks: []
       },
@@ -283,7 +286,7 @@ if (reviewNode.type !== 'review' || reviewNode.reviewReport?.decision !== 'appro
 }
 const taskEow = parseFrontmatterText(readFileSync(taskEowPath, 'utf8'));
 const runEow = parseFrontmatterText(readFileSync(runEowPath, 'utf8'));
-if (taskEow.reason !== 'approved_result' || runEow.reason !== 'approved_result' || taskEow.approvedByReviewNodeId !== 'review-run-node-task-first' || runEow.approvedByReviewNodeId !== 'review-run-node-task-first') {
+if (taskEow.reason !== 'approved_result' || runEow.reason !== 'approved_result' || taskEow.approvedByReviewNodeId !== 'review-run-node-task-first' || runEow.approvedByReviewNodeId !== 'review-run-node-task-first' || taskEow.approvedReviewMode !== 'enforced' || runEow.approvedReviewMode !== 'enforced') {
   console.error('approved execution EoW should reference the approved review node');
   console.error({ taskEow, runEow });
   process.exit(1);
@@ -1364,6 +1367,21 @@ writeFileSync(blockerSpecPath, JSON.stringify({
       runReadinessReason: 'Waiting for task-prereq.',
       blockedBy: [{ type: 'task', id: 'task-prereq', taskGroupVersionId: 'tgv-root-v2' }],
       understandingLevel: 'known'
+    },
+    {
+      id: 'task-dependent-unknown',
+      title: 'Dependent work with stale runnable intent',
+      objective: 'Remain exploratory after the prerequisite resolves because unknowns still exist.',
+      responsibility: 'Prove blocker recheck reclassifies stale unblock readiness.',
+      completionCriteria: 'The task is reopened as needs_exploration instead of stale runnable.',
+      order: 3,
+      status: 'blocked',
+      runReadiness: 'blocked',
+      unblockRunReadiness: 'runnable',
+      runReadinessReason: 'Waiting for task-prereq.',
+      blockedBy: [{ type: 'task', id: 'task-prereq', taskGroupVersionId: 'tgv-root-v2' }],
+      understandingLevel: 'unknown',
+      unknowns: ['Still need source discovery']
     }
   ]
 }, null, 2));
@@ -1371,15 +1389,27 @@ run(['decompose', blockerWorkDir, '--task-group-id', 'tg-root', '--spec', blocke
 const blockerSnapshotPath = join(blockerWorkDir, 'snapshots', 'snapshot-root-v1.md');
 writeFileSync(blockerSnapshotPath, readFileSync(blockerSnapshotPath, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
 const unblockDryRunOut = JSON.parse(run(['unblock-check', blockerWorkDir, '--dry-run', '--json']).stdout);
-if (unblockDryRunOut.unblocked.length !== 1 || unblockDryRunOut.unblocked[0].taskId !== 'task-dependent') {
+if (unblockDryRunOut.unblocked.length !== 2 || !unblockDryRunOut.unblocked.some((item) => item.taskId === 'task-dependent') || !unblockDryRunOut.unblocked.some((item) => item.taskId === 'task-dependent-unknown')) {
   console.error('Expected unblock-check to detect resolved task dependency');
   console.error(unblockDryRunOut);
   process.exit(1);
 }
 const blockerRunOut = JSON.parse(run(['run', blockerWorkDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
 if (blockerRunOut.stopReason !== 'max_steps' || blockerRunOut.stepsRun !== 1 || blockerRunOut.actions[0]?.taskId !== 'task-dependent') {
-  console.error('Expected runner to unblock and execute task-dependent');
+  console.error('Expected runner to unblock and execute the clean dependent task first');
   console.error(blockerRunOut);
+  process.exit(1);
+}
+const blockerSecondRunOut = JSON.parse(run(['run', blockerWorkDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
+if (blockerSecondRunOut.stopReason !== 'max_steps' || blockerSecondRunOut.stepsRun !== 1 || blockerSecondRunOut.actions[0]?.taskId !== 'task-dependent-unknown' || blockerSecondRunOut.actions[0]?.kind !== 'explore') {
+  console.error('Expected runner to reclassify stale unblocked task and run exploration next');
+  console.error(blockerSecondRunOut);
+  process.exit(1);
+}
+const staleUnblockTask = parseFrontmatterText(readFileSync(join(blockerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-dependent-unknown.md'), 'utf8'));
+if (staleUnblockTask.status !== 'done' || staleUnblockTask.runReadiness !== 'needs_decomposition') {
+  console.error('explored stale unblocked task should be ready for decomposition after exploratory closure');
+  console.error(staleUnblockTask);
   process.exit(1);
 }
 

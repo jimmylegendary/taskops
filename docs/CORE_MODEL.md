@@ -96,11 +96,16 @@ Fields:
 - `executionConfidence?`
 - `childTaskGroupId?`
 - `runRefs?` (`[{ runId, runNodeId, role? }]`)
+- `acceptance?`
 
 A task may point to a child task group if it is further decomposed.
 If TaskOps does not understand the domain well enough to split a task, the task should be marked `needs_exploration` rather than forcing a fake decomposition.
 
 `runRefs` is the task-side half of bidirectional task↔run traceability. A matching run node should point back with `sourceTaskId` and, when known, `sourceTaskGroupVersionId`.
+
+`acceptance` is optional for legacy/manual work. When present, it may declare `mode: informational | enforced | guarded | runner-managed`, `expectedOutcome`, `requiredArtifacts`, `requiredChecks`, and deterministic semantic assertions under `semanticAssertions` (or the alias `assertions`). Semantic assertion fields include `contentIncludes`, `contentExcludes`, `requiredUrls`, `requiredArtifactIdentities`, `requiredSources`/`requiredCitations`, `forbiddenUrls`, `forbiddenArtifacts`, and `requiredCoverage`. Review compares these against `runNode.result.observed` fields such as `content`, `urlRefs`, `artifactRefs`, `sourceRefs`/`citationRefs`, and `coverage`; non-approved reviews block guarded/runner-managed closure while informational assertions remain advisory.
+
+Explicit readiness is contradiction-aware. A task may declare `runReadiness`, but `runReadiness: runnable` is downgraded when other task metadata proves it is not honestly runnable: blocked status, declared unknowns, exploration flags, unknown understanding, low confidence, or incomplete `guarded`/`runner-managed` acceptance. `understandingLevel: partial` on explicit runnable work is reported as a warning rather than a blanket downgrade, so scoped manual/legacy work remains compatible while uncertainty is visible.
 
 ### 2.5 EoW
 
@@ -325,6 +330,11 @@ Run-readiness classification answers:
 
 Run graph answers:
 > What actually happened in execution?
+
+Closure answers:
+> Is the graph structurally closed, policy-approved by review evidence, or only manually attested?
+
+Structural closure means every selected terminal task and terminal run path has EoW coverage with no waiting/delegated/blocked work left. Policy-approved closure is stricter: relevant EoW nodes must carry approved review hashes, reviewed acceptance/result hashes, and a policy-bearing review mode (`enforced`, `guarded`, or `runner-managed`). Informational and manual-attested closure remain valid for legacy/manual workflows, but summaries report them separately from policy-approved closure.
 
 ### 7.3 Honest divergence
 

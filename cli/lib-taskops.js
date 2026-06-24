@@ -30,6 +30,10 @@ const SUMMARY_LABELS = Object.freeze({
   runEdges: 'Run edges',
   eowNodes: 'EoW nodes',
   taskEowCoverage: 'Terminal task EoW coverage',
+  structuralClosure: 'Structural closure',
+  policyApprovedClosure: 'Policy-approved closure',
+  manualAttestedClosure: 'Manual-attested closure',
+  closureState: 'Closure state',
   waitingDelegations: 'Waiting delegations',
   openBlockers: 'Open blockers',
   workCompletion: 'Work completion',
@@ -425,7 +429,17 @@ export function parseProject(projectDir) {
             warnings.push(withPath(taskPath, 'acceptance should be an object with expectedOutcome, requiredArtifacts, and requiredChecks'));
           } else if (task.acceptance.mode && !ACCEPTANCE_MODE_VALUES.includes(task.acceptance.mode)) {
             warnings.push(withPath(taskPath, `invalid acceptance.mode '${task.acceptance.mode}'`));
+          } else {
+            for (const key of ['semanticAssertions', 'assertions']) {
+              if (task.acceptance[key] != null && (!task.acceptance[key] || typeof task.acceptance[key] !== 'object' || Array.isArray(task.acceptance[key]))) {
+                warnings.push(withPath(taskPath, `acceptance.${key} should be an object with deterministic semantic assertion fields`));
+              }
+            }
           }
+        }
+        const readinessConsistency = classifyTaskReadiness(task);
+        for (const issue of readinessConsistency.consistencyIssues || []) {
+          warnings.push(withPath(taskPath, `readiness consistency: ${issue.message}`));
         }
         const key = taskKey(v.id, task.id);
         if (tasks.has(key)) errors.push(withPath(taskPath, t.duplicateTaskKey(key)));
@@ -617,6 +631,8 @@ export function parseProject(projectDir) {
 
   let terminalTaskCount = 0;
   let terminalTaskEowCount = 0;
+  let policyApprovedTerminalTaskEowCount = 0;
+  let manualAttestedTerminalTaskEowCount = 0;
   const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
   const selectedPairs = activeSnapshot?.selectedVersions || [];
   const selectedTaskGroupIds = new Set(selectedPairs.map((pair) => pair.taskGroupId));
@@ -627,9 +643,12 @@ export function parseProject(projectDir) {
       const branchContinues = task.childTaskGroupId && selectedTaskGroupIds.has(task.childTaskGroupId);
       if (branchContinues) continue;
       terminalTaskCount += 1;
-      const hasEow = taskEowsByTaskKey.has(taskKey(version.id, task.id));
+      const terminalEows = taskEowsByTaskKey.get(taskKey(version.id, task.id)) || [];
+      const hasEow = terminalEows.length > 0;
       if (hasEow) terminalTaskEowCount += 1;
       else warnings.push(withPath(task.path, t.terminalTaskMissingEow(task.id)));
+      if (terminalEows.some(isPolicyApprovedEow)) policyApprovedTerminalTaskEowCount += 1;
+      if (terminalEows.some(isManualAttestedEow)) manualAttestedTerminalTaskEowCount += 1;
     }
   }
 
@@ -642,40 +661,120 @@ export function parseProject(projectDir) {
       if (node.status === 'waiting' || (node.type === 'delegate' && !['done', 'cancelled'].includes(node.status))) waitingDelegationCount += 1;
       if (outgoing.has(node.id) || node.status === 'cancelled') continue;
       runTerminalNodeCount += 1;
-      const hasEow = runEowsByRunNodeKey.has(runNodeKey(run.id, node.id));
+      const terminalEows = runEowsByRunNodeKey.get(runNodeKey(run.id, node.id)) || [];
+      const hasEow = terminalEows.length > 0;
       if (hasEow) runTerminalEowCount += 1;
       else if (node.status === 'done') warnings.push(withPath(node.path, t.runTerminalMissingEow(run.id, node.id)));
     }
   }
+  let runEowClosureCount = 0;
+  let policyApprovedRunEowClosureCount = 0;
+  let manualAttestedRunEowClosureCount = 0;
+  for (const eow of eowNodes.values()) {
+    if (eow.graphType !== 'run' || eow.attachedToType !== 'runNode') continue;
+    const node = runNodes.get(runNodeKey(eow.runId, eow.attachedToId));
+    if (node?.type === 'review') continue;
+    runEowClosureCount += 1;
+    if (isPolicyApprovedEow(eow)) policyApprovedRunEowClosureCount += 1;
+    if (isManualAttestedEow(eow)) manualAttestedRunEowClosureCount += 1;
+  }
   const openBlockerCount = [...tasks.values()].filter((task) => task.status === 'blocked').length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
+  const structuralComplete = terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0;
+  const policyApprovedComplete = structuralComplete
+    && terminalTaskCount === policyApprovedTerminalTaskEowCount
+    && runEowClosureCount === policyApprovedRunEowClosureCount;
+  const manualAttestedComplete = structuralComplete
+    && terminalTaskCount === manualAttestedTerminalTaskEowCount
+    && runEowClosureCount === manualAttestedRunEowClosureCount;
+  const hasManualAttestation = manualAttestedTerminalTaskEowCount > 0 || manualAttestedRunEowClosureCount > 0;
+  const closureState = policyApprovedComplete
+    ? 'policy_approved_complete'
+    : (manualAttestedComplete ? 'manual_attested_complete' : (structuralComplete ? 'structurally_complete_unapproved' : 'open'));
+  if (structuralComplete && project.status === 'active') {
+    warnings.push(withPath(projectIndex, `work status is active while graph is structurally complete (${closureState})`));
+  }
+  if (structuralComplete && hasManualAttestation && !policyApprovedComplete) {
+    warnings.push(withPath(projectIndex, 'manual_verified/manual_close EoW attests structural closure but is not policy-approved review closure'));
+  }
 
   const closure = {
     terminalTaskCount,
     terminalTaskEowCount,
     openTerminalTaskCount: Math.max(0, terminalTaskCount - terminalTaskEowCount),
+    policyApprovedTerminalTaskEowCount,
+    manualAttestedTerminalTaskEowCount,
     runTerminalNodeCount,
     runTerminalEowCount,
     openRunTerminalNodeCount: Math.max(0, runTerminalNodeCount - runTerminalEowCount),
+    runEowClosureCount,
+    policyApprovedRunEowClosureCount,
+    manualAttestedRunEowClosureCount,
     waitingDelegationCount,
     openBlockerCount,
-    complete: terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0,
+    structuralComplete,
+    policyApprovedComplete,
+    manualAttestedComplete,
+    closureState,
+    complete: structuralComplete,
   };
 
   return { projectDir, project, taskGroups, versions, tasks, snapshots, runs, runNodes, runEdges, eowNodes, errors, warnings, language, closure };
 }
 
+function isPolicyApprovedEow(eow) {
+  const policyApprovedModes = new Set(['enforced', 'guarded', 'runner-managed']);
+  return Boolean(
+    eow
+    && eow.reason === 'approved_result'
+    && eow.approvedByReviewNodeId
+    && eow.approvedReviewReportHash
+    && eow.reviewedAcceptanceHash
+    && eow.reviewedResultHash
+    && policyApprovedModes.has(String(eow.approvedReviewMode || '').trim())
+  );
+}
+
+function isManualAttestedEow(eow) {
+  return Boolean(eow && ['manual_verified', 'manual_close'].includes(eow.reason));
+}
+
 export function classifyTaskReadiness(task) {
   if (!task || typeof task !== 'object') throw new Error('Task is required');
+  const semanticReadiness = inferTaskReadiness(task);
+  const consistencyIssues = explicitReadinessConsistencyIssues(task, semanticReadiness);
   if (task.runReadiness && RUN_READINESS_VALUES.includes(task.runReadiness)) {
+    const downgrade = strongestReadinessDowngrade(task.runReadiness, consistencyIssues);
+    if (downgrade) {
+      return {
+        taskId: task.id,
+        runReadiness: downgrade.runReadiness,
+        originalRunReadiness: task.runReadiness,
+        source: 'explicit_with_consistency_downgrade',
+        reason: downgrade.reason,
+        nextAction: nextActionForRunReadiness(downgrade.runReadiness),
+        consistencyIssues,
+        compatibilityPolicy: 'semantic contradictions downgrade explicit runnable; legacy/manual acceptance gaps warn unless guarded or runner-managed',
+      };
+    }
     return {
       taskId: task.id,
       runReadiness: task.runReadiness,
       source: 'explicit',
       reason: task.runReadinessReason || 'Task declares runReadiness explicitly.',
       nextAction: nextActionForRunReadiness(task.runReadiness),
+      consistencyIssues,
+      compatibilityPolicy: 'semantic contradictions downgrade explicit runnable; legacy/manual acceptance gaps warn unless guarded or runner-managed',
     };
   }
 
+  return {
+    ...semanticReadiness,
+    consistencyIssues,
+    compatibilityPolicy: 'semantic contradictions downgrade explicit runnable; legacy/manual acceptance gaps warn unless guarded or runner-managed',
+  };
+}
+
+function inferTaskReadiness(task) {
   const unknowns = Array.isArray(task.unknowns) ? task.unknowns : (task.unknowns ? [task.unknowns] : []);
   const understanding = task.understandingLevel ? String(task.understandingLevel) : '';
   const explorationNeeded = task.explorationNeeded === true || task.needsExploration === true;
@@ -707,6 +806,131 @@ export function classifyTaskReadiness(task) {
     reason: 'The task is not blocked or unknown, but it lacks enough single-responsibility run criteria.',
     nextAction: nextActionForRunReadiness('needs_decomposition'),
   };
+}
+
+function explicitReadinessConsistencyIssues(task, semanticReadiness) {
+  if (task.runReadiness !== 'runnable') return [];
+  const issues = [];
+  const unknowns = Array.isArray(task.unknowns) ? task.unknowns : (task.unknowns ? [task.unknowns] : []);
+  const understanding = task.understandingLevel ? String(task.understandingLevel) : '';
+  const explorationNeeded = task.explorationNeeded === true || task.needsExploration === true;
+
+  if (task.status === 'blocked') {
+    issues.push({
+      code: 'explicit_runnable_blocked_status',
+      severity: 'error',
+      downgradeTo: 'blocked',
+      message: "explicit runReadiness 'runnable' conflicts with blocked task status",
+    });
+  }
+  if (explorationNeeded) {
+    issues.push({
+      code: 'explicit_runnable_exploration_flag',
+      severity: 'error',
+      downgradeTo: 'needs_exploration',
+      message: "explicit runReadiness 'runnable' conflicts with explorationNeeded/needsExploration",
+    });
+  }
+  if (understanding === 'unknown') {
+    issues.push({
+      code: 'explicit_runnable_unknown_understanding',
+      severity: 'error',
+      downgradeTo: 'needs_exploration',
+      message: "explicit runReadiness 'runnable' conflicts with understandingLevel 'unknown'",
+    });
+  } else if (understanding === 'partial') {
+    issues.push({
+      code: 'explicit_runnable_partial_understanding',
+      severity: 'warning',
+      downgradeTo: null,
+      message: "explicit runReadiness 'runnable' has partial understanding; keep only with concrete scope or acceptance evidence",
+    });
+  }
+  if (unknowns.length > 0) {
+    issues.push({
+      code: 'explicit_runnable_declared_unknowns',
+      severity: 'error',
+      downgradeTo: 'needs_exploration',
+      message: "explicit runReadiness 'runnable' conflicts with declared unknowns",
+    });
+  }
+  const lowConfidence = lowConfidenceFields(task);
+  for (const field of lowConfidence) {
+    issues.push({
+      code: `explicit_runnable_low_${field}`,
+      severity: 'error',
+      downgradeTo: 'needs_exploration',
+      message: `explicit runReadiness 'runnable' conflicts with low ${field}`,
+    });
+  }
+
+  const acceptance = task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)
+    ? task.acceptance
+    : null;
+  const acceptanceMode = String(acceptance?.mode || '').trim();
+  if (acceptance && ['guarded', 'runner-managed'].includes(acceptanceMode)) {
+    const missing = missingConcreteAcceptanceFields(acceptance);
+    if (missing.length > 0) {
+      issues.push({
+        code: 'explicit_runnable_incomplete_guarded_acceptance',
+        severity: 'error',
+        downgradeTo: 'blocked',
+        message: `explicit runReadiness 'runnable' with ${acceptanceMode} acceptance is missing concrete acceptance: ${missing.join(', ')}`,
+      });
+    }
+  }
+
+  if (semanticReadiness.runReadiness !== 'runnable' && issues.length === 0) {
+    issues.push({
+      code: 'explicit_runnable_semantic_mismatch',
+      severity: 'error',
+      downgradeTo: semanticReadiness.runReadiness,
+      message: `explicit runReadiness 'runnable' conflicts with semantic readiness '${semanticReadiness.runReadiness}'`,
+    });
+  }
+
+  return issues;
+}
+
+function missingConcreteAcceptanceFields(acceptance) {
+  const missing = [];
+  const hasExpectedOutcome = typeof acceptance.expectedOutcome === 'string' && acceptance.expectedOutcome.trim().length > 0;
+  const requiredArtifacts = Array.isArray(acceptance.requiredArtifacts) ? acceptance.requiredArtifacts : (acceptance.requiredArtifacts ? [acceptance.requiredArtifacts] : []);
+  const requiredChecks = Array.isArray(acceptance.requiredChecks) ? acceptance.requiredChecks : (acceptance.requiredChecks ? [acceptance.requiredChecks] : []);
+  if (!hasExpectedOutcome) missing.push('expectedOutcome');
+  if (requiredArtifacts.length === 0 && requiredChecks.length === 0) missing.push('requiredArtifacts or requiredChecks');
+  return missing;
+}
+
+function lowConfidenceFields(task) {
+  const fields = [];
+  for (const field of ['executionConfidence', 'decompositionConfidence']) {
+    if (!(field in task)) continue;
+    if (isLowConfidence(task[field])) fields.push(field);
+  }
+  return fields;
+}
+
+function isLowConfidence(value) {
+  if (typeof value === 'number') return value > 0 && value < 0.7;
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return false;
+  if (['low', 'weak', 'unsupported', 'uncertain'].includes(text)) return true;
+  const numeric = Number(text);
+  return Number.isFinite(numeric) && numeric > 0 && numeric < 0.7;
+}
+
+function strongestReadinessDowngrade(originalRunReadiness, issues) {
+  if (originalRunReadiness !== 'runnable') return null;
+  const downgrades = issues.filter((issue) => issue.severity === 'error' && RUN_READINESS_VALUES.includes(issue.downgradeTo));
+  if (downgrades.length === 0) return null;
+  const precedence = ['blocked', 'needs_exploration', 'needs_decomposition'];
+  for (const value of precedence) {
+    const issue = downgrades.find((candidate) => candidate.downgradeTo === value);
+    if (issue) return { runReadiness: value, reason: issue.message };
+  }
+  const first = downgrades[0];
+  return { runReadiness: first.downgradeTo, reason: first.message };
 }
 
 function nextActionForRunReadiness(runReadiness) {
@@ -757,6 +981,10 @@ export function summarizeProject(parsed) {
     `- ${SUMMARY_LABELS.runEdges}: ${runEdges.length}`,
     `- ${SUMMARY_LABELS.eowNodes}: ${eowNodes.length}`,
     `- ${SUMMARY_LABELS.taskEowCoverage}: ${closure.terminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}`,
+    `- ${SUMMARY_LABELS.structuralClosure}: ${closure.structuralComplete === true ? 'complete' : 'open'}`,
+    `- ${SUMMARY_LABELS.policyApprovedClosure}: ${closure.policyApprovedComplete === true ? 'complete' : 'incomplete'} (tasks ${closure.policyApprovedTerminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}, run closures ${closure.policyApprovedRunEowClosureCount ?? 0}/${closure.runEowClosureCount ?? 0})`,
+    `- ${SUMMARY_LABELS.manualAttestedClosure}: ${closure.manualAttestedComplete === true ? 'complete' : 'incomplete'} (tasks ${closure.manualAttestedTerminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}, run closures ${closure.manualAttestedRunEowClosureCount ?? 0}/${closure.runEowClosureCount ?? 0})`,
+    `- ${SUMMARY_LABELS.closureState}: ${closure.closureState || (closure.complete === true ? 'structurally_complete' : 'open')}`,
     `- ${SUMMARY_LABELS.waitingDelegations}: ${closure.waitingDelegationCount ?? 0}`,
     `- ${SUMMARY_LABELS.openBlockers}: ${closure.openBlockerCount ?? 0}`,
     `- ${SUMMARY_LABELS.workCompletion}: ${closure.complete === true ? 'complete' : 'open'}`,

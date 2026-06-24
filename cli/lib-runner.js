@@ -51,6 +51,7 @@ function writeTextFileAtomic(filePath, text) {
 const FM_SCALAR_MAX_LEN = 500;
 const FM_SCALAR_FALLBACK = 'executor_failed';
 const ACCEPTANCE_MODES = new Set(['informational', 'enforced', 'guarded', 'runner-managed']);
+const POLICY_APPROVING_ACCEPTANCE_MODES = new Set(['enforced', 'guarded', 'runner-managed']);
 
 export function sanitizeFmScalar(value, { maxLen = FM_SCALAR_MAX_LEN, fallback = FM_SCALAR_FALLBACK } = {}) {
   if (value == null) return fallback;
@@ -95,6 +96,68 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
+function stringList(value) {
+  return asArray(value)
+    .map((item) => {
+      if (item && typeof item === 'object') {
+        const entries = Object.entries(item);
+        if (entries.length === 1) return `${entries[0][0]}:${entries[0][1]}`;
+        return String(item.value || item.text || item.url || item.path || item.ref || item.id || item.name || item.topic || item.source || item.citation || '');
+      }
+      return String(item || '');
+    })
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function semanticAssertionsFrom(raw) {
+  const source = raw.semanticAssertions && typeof raw.semanticAssertions === 'object' && !Array.isArray(raw.semanticAssertions)
+    ? raw.semanticAssertions
+    : (raw.assertions && typeof raw.assertions === 'object' && !Array.isArray(raw.assertions) ? raw.assertions : {});
+  return {
+    contentIncludes: [
+      ...stringList(source.contentIncludes),
+      ...stringList(source.requiredContent),
+      ...stringList(source.content),
+    ],
+    contentExcludes: [
+      ...stringList(source.contentExcludes),
+      ...stringList(source.forbiddenContent),
+    ],
+    requiredUrls: [
+      ...stringList(source.requiredUrls),
+      ...stringList(source.urlIdentity),
+      ...stringList(source.urls),
+    ],
+    requiredArtifactIdentities: [
+      ...stringList(source.requiredArtifactIdentities),
+      ...stringList(source.artifactIdentity),
+      ...stringList(source.artifactIdentities),
+    ],
+    requiredSources: [
+      ...stringList(source.requiredSources),
+      ...stringList(source.requiredCitations),
+      ...stringList(source.sources),
+      ...stringList(source.citations),
+    ],
+    forbiddenUrls: stringList(source.forbiddenUrls),
+    forbiddenArtifacts: [
+      ...stringList(source.forbiddenArtifacts),
+      ...stringList(source.forbiddenArtifactIdentities),
+    ],
+    requiredCoverage: [
+      ...stringList(source.requiredCoverage),
+      ...stringList(source.coverage),
+      ...stringList(source.coverageAssertions),
+    ],
+  };
+}
+
+function extractUrls(text) {
+  const matches = String(text || '').match(/https?:\/\/[^\s"'<>),\]]+/g);
+  return (matches || []).map((url) => url.replace(/[.;:!?]+$/, ''));
+}
+
 function normalizeAcceptance(task) {
   const raw = task && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance) ? task.acceptance : {};
   const mode = ACCEPTANCE_MODES.has(String(raw.mode || '').trim()) ? String(raw.mode).trim() : 'informational';
@@ -103,18 +166,41 @@ function normalizeAcceptance(task) {
     expectedOutcome: raw.expectedOutcome || task?.completionCriteria || '',
     requiredArtifacts: asArray(raw.requiredArtifacts),
     requiredChecks: asArray(raw.requiredChecks),
+    semanticAssertions: semanticAssertionsFrom(raw),
   };
 }
 
 function normalizeResult(runNode) {
   const raw = runNode && typeof runNode.result === 'object' && !Array.isArray(runNode.result) ? runNode.result : {};
   const observed = raw.observed && typeof raw.observed === 'object' && !Array.isArray(raw.observed) ? raw.observed : {};
+  const executorSummary = raw.executorSummary || '';
+  const outcomeSummary = observed.outcomeSummary || '';
+  const content = [
+    executorSummary,
+    outcomeSummary,
+    ...stringList(observed.content),
+    ...stringList(observed.contentText),
+    ...stringList(observed.text),
+  ].filter(Boolean).join('\n');
   return {
-    executorSummary: raw.executorSummary || '',
+    executorSummary,
     observed: {
-      outcomeSummary: observed.outcomeSummary || '',
+      outcomeSummary,
+      content,
       artifactRefs: asArray(observed.artifactRefs),
       evidenceRefs: asArray(observed.evidenceRefs),
+      urlRefs: [
+        ...asArray(observed.urlRefs),
+        ...asArray(observed.urls),
+        ...extractUrls(content),
+      ],
+      sourceRefs: [
+        ...asArray(observed.sourceRefs),
+        ...asArray(observed.citationRefs),
+        ...asArray(observed.sources),
+        ...asArray(observed.citations),
+      ],
+      coverage: asArray(observed.coverage),
       checkResults: asArray(observed.checkResults),
     },
   };
@@ -135,6 +221,70 @@ function checkStatus(value) {
   return '';
 }
 
+function normalizeIdentity(value) {
+  return String(value || '').trim();
+}
+
+function normalizeUrl(value) {
+  const raw = normalizeIdentity(value);
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    url.hash = '';
+    if ((url.protocol === 'https:' && url.port === '443') || (url.protocol === 'http:' && url.port === '80')) url.port = '';
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString();
+  } catch {
+    return raw.replace(/\/+$/, '');
+  }
+}
+
+function identityText(value) {
+  if (value && typeof value === 'object') {
+    const preferred = value.url || value.path || value.ref || value.id || value.name || value.source || value.citation || value.topic;
+    if (preferred) return String(preferred);
+    const entries = Object.entries(value);
+    if (entries.length === 1) return `${entries[0][0]}:${entries[0][1]}`;
+    return '';
+  }
+  return String(value || '');
+}
+
+function observedArtifactIdentities(result) {
+  return [
+    ...result.observed.artifactRefs,
+    ...result.observed.evidenceRefs,
+  ].map(identityText).map(normalizeIdentity).filter(Boolean);
+}
+
+function observedUrlIdentities(result) {
+  return [
+    ...result.observed.urlRefs,
+    ...result.observed.evidenceRefs,
+  ].map(identityText).map(normalizeUrl).filter(Boolean);
+}
+
+function observedSourceIdentities(result) {
+  return [
+    ...result.observed.sourceRefs,
+    ...result.observed.evidenceRefs,
+  ].map(identityText).map(normalizeIdentity).filter(Boolean);
+}
+
+function observedCoverageIdentities(result) {
+  return result.observed.coverage.map(identityText).map(normalizeIdentity).filter(Boolean);
+}
+
+function listHasIdentity(haystack, needle) {
+  const normalizedNeedle = normalizeIdentity(needle);
+  return !normalizedNeedle || haystack.includes(normalizedNeedle);
+}
+
+function listHasUrl(haystack, needle) {
+  const normalizedNeedle = normalizeUrl(needle);
+  return !normalizedNeedle || haystack.includes(normalizedNeedle);
+}
+
 function evidenceContainsRef(result, expectedRef, projectDir = process.cwd()) {
   const needle = refText(expectedRef);
   if (!needle) return true;
@@ -144,6 +294,40 @@ function evidenceContainsRef(result, expectedRef, projectDir = process.cwd()) {
   ];
   if (observedRefs.includes(needle)) return true;
   return existsSync(resolve(projectDir, needle)) || existsSync(resolve(needle)) || observedRefs.some((ref) => ref.endsWith(needle));
+}
+
+function applySemanticAssertions({ acceptance, result, missingExpected, failedChecks }) {
+  const assertions = acceptance.semanticAssertions || {};
+  const content = String(result.observed.content || '');
+  const artifacts = observedArtifactIdentities(result);
+  const urls = observedUrlIdentities(result);
+  const sources = observedSourceIdentities(result);
+  const coverage = observedCoverageIdentities(result);
+
+  for (const expected of assertions.contentIncludes || []) {
+    if (!content.includes(expected)) failedChecks.push(`content assertion not satisfied: ${expected}`);
+  }
+  for (const forbidden of assertions.contentExcludes || []) {
+    if (forbidden && content.includes(forbidden)) failedChecks.push(`forbidden content observed: ${forbidden}`);
+  }
+  for (const expected of assertions.requiredUrls || []) {
+    if (!listHasUrl(urls, expected)) failedChecks.push(`required URL identity mismatch: expected ${expected}`);
+  }
+  for (const expected of assertions.requiredArtifactIdentities || []) {
+    if (!listHasIdentity(artifacts, expected)) failedChecks.push(`required artifact identity mismatch: expected ${expected}`);
+  }
+  for (const expected of assertions.requiredSources || []) {
+    if (!listHasIdentity(sources, expected)) failedChecks.push(`required source/citation not observed: ${expected}`);
+  }
+  for (const forbidden of assertions.forbiddenUrls || []) {
+    if (listHasUrl(urls, forbidden)) failedChecks.push(`forbidden URL observed: ${forbidden}`);
+  }
+  for (const forbidden of assertions.forbiddenArtifacts || []) {
+    if (listHasIdentity(artifacts, forbidden)) failedChecks.push(`forbidden artifact observed: ${forbidden}`);
+  }
+  for (const expected of assertions.requiredCoverage || []) {
+    if (!listHasIdentity(coverage, expected)) missingExpected.push(`required coverage not observed: ${expected}`);
+  }
 }
 
 function buildExecutionResult({ task, runId, runNodeId, executorResult }) {
@@ -192,6 +376,8 @@ function buildReviewReport({ projectDir, task, runNode }) {
       failedChecks.push(`${command}: ${status}`);
     }
   }
+
+  applySemanticAssertions({ acceptance, result, missingExpected, failedChecks });
 
   if (result.executorSummary && !result.observed.outcomeSummary && result.observed.artifactRefs.length === 0 && result.observed.evidenceRefs.length === 0) {
     unsupportedObserved.push('executorSummary exists without observed outcome or evidence refs');
@@ -443,7 +629,15 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
         if (fm.unblockRunReadiness) fm.runReadiness = fm.unblockRunReadiness;
         else delete fm.runReadiness;
       }
-      fm.runReadinessReason = sanitizeFmScalar(`Blockers resolved by taskops blocker recheck at ${now}.`);
+      const reclassified = classifyTaskReadiness({
+        ...task,
+        ...fm,
+        status: fm.status,
+        runReadiness: fm.runReadiness,
+      });
+      fm.runReadiness = reclassified.runReadiness;
+      if (reclassified.runReadiness === 'blocked') fm.status = 'blocked';
+      fm.runReadinessReason = sanitizeFmScalar(`Blockers resolved by taskops blocker recheck at ${now}; reclassified as ${reclassified.runReadiness}. ${reclassified.reason || ''}`);
       delete fm.lastRunFailureReason;
       return fm;
     });
@@ -998,6 +1192,7 @@ function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, app
     };
     if (approvedReview) {
       eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+      eowFm.approvedReviewMode = approvedReview.reviewMode;
       eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
       eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
       eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
@@ -1044,6 +1239,7 @@ function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
     };
     if (approvedReview) {
       eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+      eowFm.approvedReviewMode = approvedReview.reviewMode;
       eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
       eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
       eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
@@ -1100,8 +1296,9 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
     reviewNodePath,
     reviewReport: report,
     reviewReportHash,
-    approvedReview: report.decision === 'approved' ? {
+    approvedReview: report.decision === 'approved' && POLICY_APPROVING_ACCEPTANCE_MODES.has(report.mode) ? {
       reviewNodeId,
+      reviewMode: report.mode,
       reviewReportHash,
       reviewedAcceptanceHash: report.reviewedAcceptanceHash,
       reviewedResultHash: report.reviewedResultHash,
@@ -1705,6 +1902,7 @@ function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedRev
     if (!taskMatch && !runMatch) continue;
     rewriteFrontmatter(eow.path, (fm) => {
       fm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+      fm.approvedReviewMode = approvedReview.reviewMode;
       fm.approvedReviewReportHash = approvedReview.reviewReportHash;
       fm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
       fm.reviewedResultHash = approvedReview.reviewedResultHash;

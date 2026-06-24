@@ -123,7 +123,7 @@ These read-only/guarded commands are the "honest loop" surface. They never lie a
 
 - `taskops next <work-dir> [--json]` — return the one next honest action: `execute`, `decompose`, `explore`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. The output also includes the target task or run node and a recommended command. It does not mutate state.
 - `taskops explain <work-dir> [--json]` — explain why the work is or is not done. Reports the closure summary, the next honest action, and the concrete reasons the work is still open (missing terminal EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors). It does not mutate state.
-- `taskops review <work-dir> <run-node-id|task-id> [--json]` — write or refresh a `type: review` run node with `reviewReport`. The report compares task `acceptance` (or `completionCriteria` fallback) against the run node's observed result, records `approved | rejected | needs_verification`, and attaches approved review hashes to existing EoW nodes when possible.
+- `taskops review <work-dir> <run-node-id|task-id> [--json]` — write or refresh a `type: review` run node with `reviewReport`. The report compares task `acceptance` (or `completionCriteria` fallback) against the run node's observed result, records `approved | rejected | needs_verification`, and attaches approved review hashes to existing EoW nodes when possible. `acceptance.semanticAssertions` (alias: `acceptance.assertions`) supports deterministic review fields: `contentIncludes`, `contentExcludes`, `requiredUrls`, `requiredArtifactIdentities`, `requiredSources`/`requiredCitations`, `forbiddenUrls`, `forbiddenArtifacts`, and `requiredCoverage`.
 - `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. Refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied (in which case the task status is also flipped to `done` so closure counts stay honest). Refuses to close a run node that is not `done`/`cancelled` unless an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied; refuses delegated/waiting nodes unless one of `manual_verified|cancelled|superseded` is given. On success it writes an EoW file (and a `closes_with` run edge for run nodes).
 
 ```bash
@@ -132,6 +132,8 @@ taskops explain ./my-work
 taskops review ./my-work task-foo --json
 taskops close ./my-work task-foo --reason manual_verified
 ```
+
+Semantic review assertions compare against `runNode.result.observed`: `content`/`contentText`/`outcomeSummary` for content, `urlRefs`/`urls` for URL identity, `artifactRefs` for artifact identity, `sourceRefs`/`citationRefs` for sources, and `coverage` for required coverage labels. For `enforced`, `guarded`, and `runner-managed` acceptance, a non-approved review blocks runner-managed closure; `informational` remains advisory for legacy/manual workflows.
 
 ## Queue projection
 
@@ -391,6 +393,8 @@ TaskOps classifies each task before execution:
 - `needs_exploration` — run/search/try/debug first to learn enough for honest decomposition.
 - `blocked` — resolve the dependency before continuing.
 
+Explicit `runReadiness: runnable` is treated as a claim, not an unconditional override. Contradictory metadata such as declared unknowns, exploration flags, blocked status, low confidence, or incomplete guarded/runner-managed acceptance downgrades the task before runner selection. Manual and legacy workflows stay readable: missing acceptance remains advisory unless the task opts into `guarded` or `runner-managed`.
+
 ## Closure and delegation
 
 TaskOps does not treat `done` as the same thing as closure.
@@ -399,10 +403,16 @@ A branch is closed when an explicit EoW node is attached. The summary reports cl
 
 ```text
 Terminal task EoW coverage: 4/4
+Structural closure: complete
+Policy-approved closure: incomplete (tasks 0/4, run closures 0/4)
+Manual-attested closure: complete (tasks 4/4, run closures 4/4)
+Closure state: manual_attested_complete
 Waiting delegations: 0
 Open blockers: 0
 Work completion: complete
 ```
+
+`Work completion` is structural: terminal task branches and terminal run paths have EoW coverage, with no waiting/delegated/blocked work left. `Closure state` adds policy meaning. `policy_approved_complete` requires EoW nodes backed by approved review metadata from a policy-bearing mode (`enforced`, `guarded`, or `runner-managed`); `informational` review remains advisory. `manual_attested_complete` means manual verification closed the graph but did not satisfy policy-approved review; `structurally_complete_unapproved` means the graph is closed only structurally. This preserves legacy/manual closure while making review policy visible.
 
 Delegation is represented in the run graph rather than hidden as a vague blocker:
 

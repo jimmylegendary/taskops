@@ -212,8 +212,12 @@ try {
     if (flags.json) console.log(JSON.stringify(payload, null, 2));
     else {
       console.log(`${task.id}: ${classification.runReadiness}`);
+      if (classification.originalRunReadiness) console.log(`original_runReadiness: ${classification.originalRunReadiness}`);
       console.log(`reason: ${classification.reason}`);
       console.log(`next_action: ${classification.nextAction}`);
+      for (const issue of classification.consistencyIssues || []) {
+        console.log(`${issue.severity || 'warning'}: ${issue.message}`);
+      }
     }
     process.exit(parsed.errors.length === 0 ? 0 : 1);
   }
@@ -246,6 +250,7 @@ try {
       const c = result.closure || {};
       console.log(`work=${result.workId} status=${result.status} complete=${result.complete}`);
       console.log(`closure: terminalTaskEow=${c.terminalTaskEowCount ?? 0}/${c.terminalTaskCount ?? 0} runTerminalEow=${c.runTerminalEowCount ?? 0}/${c.runTerminalNodeCount ?? 0} blockers=${c.openBlockerCount ?? 0} waiting=${c.waitingDelegationCount ?? 0}`);
+      console.log(`closureState=${c.closureState || (c.complete === true ? 'structurally_complete' : 'open')} structural=${c.structuralComplete === true} policyApproved=${c.policyApprovedComplete === true} manualAttested=${c.manualAttestedComplete === true}`);
       if (result.complete) {
         console.log('All branches closed by EoW. Work is complete.');
       } else {

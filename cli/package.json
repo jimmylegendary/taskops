@@ -1,6 +1,6 @@
 {
   "name": "taskops",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Markdown-first task/run graph CLI with EoW closure, delegation, and Obsidian-friendly TaskOps work trees.",
   "bin": {
     "taskops": "./bin/taskops.js"
@@ -9,7 +9,10 @@
   "scripts": {
     "build": "node -e \"console.log('taskops CLI is plain ESM; no build step needed')\"",
     "typecheck": "node -e \"console.log('taskops CLI uses runtime smoke verification; no static typecheck configured')\"",
-    "test": "node ./scripts/smoke.mjs",
+    "test": "node ./scripts/smoke.mjs && node ./scripts/readiness-gate.mjs && node ./scripts/semantic-acceptance-review.mjs && node ./scripts/closure-summary-policy.mjs",
+    "test:readiness-gate": "node ./scripts/readiness-gate.mjs",
+    "test:semantic-acceptance": "node ./scripts/semantic-acceptance-review.mjs",
+    "test:closure-summary-policy": "node ./scripts/closure-summary-policy.mjs",
     "test:workflow": "node ./scripts/workflow-e2e.mjs"
   },
   "files": [
@@ -20,6 +23,9 @@
     "lib-orchestrator.js",
     "lib-daemon.js",
     "README.md",
+    "scripts/readiness-gate.mjs",
+    "scripts/semantic-acceptance-review.mjs",
+    "scripts/closure-summary-policy.mjs",
     "scripts/smoke.mjs",
     "scripts/workflow-e2e.mjs"
   ],

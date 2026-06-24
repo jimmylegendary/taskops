@@ -150,6 +150,7 @@ Suggested fields:
 - `executionConfidence?`
 - `childTaskGroupId?`
 - `runRefs?`
+- `acceptance?`
 - `createdAt`
 
 Example task↔run reference:
@@ -160,6 +161,31 @@ runRefs:
     runNodeId: run-node-verify
     role: verification
 ```
+
+Example semantic acceptance assertions:
+
+```yaml
+acceptance:
+  mode: runner-managed
+  expectedOutcome: Published report matches the current artifact and cites the required source.
+  semanticAssertions:
+    contentIncludes:
+      - semantic-controller
+    requiredUrls:
+      - https://example.com/current-report
+    requiredArtifactIdentities:
+      - reports/current/index.html
+    requiredSources:
+      - docs/RUN_READINESS.md
+    forbiddenUrls:
+      - https://example.com/stale-report
+    forbiddenArtifacts:
+      - reports/stale/index.html
+    requiredCoverage:
+      - runner-managed-acceptance
+```
+
+The review command checks these against `runNode.result.observed` (`content`/`contentText`, `urlRefs`/`urls`, `artifactRefs`, `sourceRefs`/`citationRefs`, and `coverage`). The stricter closure policy applies to `enforced`, `guarded`, and `runner-managed`; `informational` remains advisory for manual/legacy tasks.
 
 Example exploratory task metadata:
 
@@ -360,6 +386,18 @@ Validator should check at least:
 - task `runRefs` and run-node `sourceTaskId` agree bidirectionally
 - delegated/waiting nodes include enough request/delegatee metadata
 - done terminal run paths have EoW nodes
+
+### Policy-aware closure
+- structural closure is reported separately from policy-approved closure
+- `approved_result` EoW nodes should carry approved review node/report hashes, reviewed acceptance/result hashes, and a policy-bearing `approvedReviewMode`
+- `manual_verified` / `manual_close` EoW nodes count as manual attestation, not policy-approved review
+- `informational` review remains advisory and does not count as policy-approved closure
+- summaries should surface mismatches such as active work with structurally complete graphs
+
+### Legacy compatibility
+- legacy `entityType: project` and `run/` layouts remain readable
+- tasks without `acceptance`, or with `acceptance.mode: informational`, stay advisory/manual-compatible
+- stricter acceptance and semantic assertion gates apply to `enforced`, `guarded`, and `runner-managed` paths rather than breaking old informational notes
 
 ## Selection model
 

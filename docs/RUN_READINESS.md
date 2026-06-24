@@ -17,6 +17,10 @@ Minimum conditions:
 - responsibility is singular
 - running it will not change the meaning of downstream tasks
 
+An explicit `runReadiness: runnable` is not allowed to override contradictory task metadata. If the same task declares `unknowns`, `explorationNeeded`, `needsExploration`, `understandingLevel: unknown`, low execution/decomposition confidence, or `status: blocked`, the classifier downgrades it to the honest readiness (`needs_exploration`, `needs_decomposition`, or `blocked`) and reports the consistency issue. `understandingLevel: partial` on explicit runnable work remains compatible for scoped manual/legacy tasks, but it emits a warning unless the task has concrete scope or acceptance evidence. This keeps stale frontmatter from silently pushing uncertain work into execution while avoiding a blanket hard block for deliberately scoped partial work.
+
+For `acceptance.mode: guarded` or `acceptance.mode: runner-managed`, runnable work must also carry concrete acceptance shape: an `expectedOutcome` plus at least one `requiredArtifacts` or `requiredChecks` entry. Missing concrete acceptance blocks runner-managed execution instead of treating vague acceptance as good enough. Legacy/manual tasks without acceptance, or with `mode: informational`, remain compatible; their acceptance gaps are advisory rather than a hard readiness gate.
+
 ### `needs_decomposition`
 
 The task is too large for a single run, and the system understands the domain well enough to split it into child responsibility units.
@@ -87,6 +91,8 @@ The command returns the current readiness, reason, and next action:
 - `decompose_task_group`
 - `create_exploratory_run`
 - `resolve_blocker`
+
+When explicit readiness is downgraded, JSON output includes `originalRunReadiness`, `consistencyIssues`, and a compatibility policy note. Plain text output prints the original readiness and each warning/error after the reason.
 
 ## Delegated waiting in the run graph
 
