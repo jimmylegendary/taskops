@@ -1,6 +1,6 @@
 {
   "name": "taskops-obsidian",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "description": "Obsidian plugin MVP for the md-first TaskOps protocol.",
   "main": "main.js",
   "scripts": {
