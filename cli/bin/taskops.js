@@ -82,6 +82,16 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+function flagHasValue(flags, key) {
+  return flags[key] != null && flags[key] !== true;
+}
+
+function maxStepsExplicitFlag(flags) {
+  const internalTargetRun = flagHasValue(flags, 'target-task-id') && flags['allow-concurrent-target'] === true;
+  if (internalTargetRun) return flags['max-steps-explicit'] === true || flags['max-steps-explicit'] === 'true';
+  return flagHasValue(flags, 'max-steps') || flags['max-steps-explicit'] === true || flags['max-steps-explicit'] === 'true';
+}
+
 function requireFlag(flags, key) {
   if (!flags[key] || flags[key] === true) fail(`Missing required --${key}`);
   return String(flags[key]);
@@ -351,6 +361,7 @@ try {
     if (!workDir) fail('Missing run work-dir');
     const loopback = flags.loopback && flags.loopback !== true ? String(flags.loopback) : null;
     const hasTarget = Boolean(flags['target-task-id'] && flags['target-task-id'] !== true);
+    const runMaxStepsExplicit = maxStepsExplicitFlag(flags);
     if (loopback === 'self' && !hasTarget) {
       const { runDaemon } = await import('../lib-daemon.js');
       const executor = flags.executor && flags.executor !== true ? String(flags.executor) : 'dry-run';
@@ -365,6 +376,7 @@ try {
         maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
         maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
         maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+        maxStepsExplicit: runMaxStepsExplicit,
         loopback: 'self',
         maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
         timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
@@ -394,6 +406,7 @@ try {
       agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
       executor: flags.executor && flags.executor !== true ? String(flags.executor) : null,
       maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      maxStepsExplicit: runMaxStepsExplicit,
       until: flags.until && flags.until !== true ? String(flags.until) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       loopback,
@@ -494,6 +507,7 @@ try {
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
       maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
       maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      maxStepsExplicit: maxStepsExplicitFlag(flags),
       loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
     };
@@ -555,6 +569,7 @@ try {
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
       maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
       maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      maxStepsExplicit: maxStepsExplicitFlag(flags),
       loopback: 'self',
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
@@ -625,6 +640,7 @@ try {
       maxAttempts: flags['max-attempts'] != null && flags['max-attempts'] !== true ? flags['max-attempts'] : null,
       maxParallel: flags['max-parallel'] != null && flags['max-parallel'] !== true ? flags['max-parallel'] : null,
       maxSteps: flags['max-steps'] != null && flags['max-steps'] !== true ? flags['max-steps'] : null,
+      maxStepsExplicit: maxStepsExplicitFlag(flags),
       loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,

@@ -54,6 +54,12 @@ function normalizeBool(value, fallback) {
   throw new Error(`Invalid boolean value: ${value}`);
 }
 
+function normalizeMaxStepsExplicit(options = {}) {
+  if (options.maxStepsExplicit === true || options.maxStepsExplicit === 'true') return true;
+  if (options.maxStepsExplicit === false || options.maxStepsExplicit === 'false') return false;
+  return options.maxSteps != null && options.maxSteps !== '';
+}
+
 function normalizeLoopbackPolicy(value) {
   const policy = value == null || value === '' ? 'none' : String(value).trim().toLowerCase();
   if (!['none', 'self'].includes(policy)) throw new Error(`Invalid loopback policy '${value}'. Use none or self.`);
@@ -103,6 +109,7 @@ export function normalizeDaemonOptions(workDir, options = {}) {
     maxAttempts: optionalPositiveInteger(options.maxAttempts, 'max attempts', 3),
     maxParallel: optionalPositiveInteger(options.maxParallel, 'max parallel', 8),
     maxSteps: optionalPositiveInteger(options.maxSteps, 'max steps'),
+    maxStepsExplicit: normalizeMaxStepsExplicit(options),
     loopbackPolicy,
     maxLoopbacks: normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy),
     timeout: options.timeout == null || options.timeout === '' ? 300 : Number(options.timeout),
@@ -173,6 +180,7 @@ function runnerArgs(opts) {
   if (opts.maxWaves != null) args.push('--max-waves', String(opts.maxWaves));
   if (opts.maxParallel != null) args.push('--max-parallel', String(opts.maxParallel));
   if (opts.maxSteps != null) args.push('--max-steps', String(opts.maxSteps));
+  if (opts.maxStepsExplicit) args.push('--max-steps-explicit');
   if (opts.loopbackPolicy !== 'none') args.push('--loopback', opts.loopbackPolicy, '--max-loopbacks', String(opts.maxLoopbacks));
   if (opts.maxIdleCycles != null) args.push('--max-idle-cycles', String(opts.maxIdleCycles));
   if (opts.idleExitAfterSeconds != null) args.push('--idle-exit-after-seconds', String(opts.idleExitAfterSeconds));
@@ -266,6 +274,7 @@ function runnerActivationConfig(rendered, queue, { started, dryRun }) {
     syncedQueueItems: queue?.synced ?? null,
     maxParallel: rendered.options.maxParallel,
     maxSteps: rendered.options.maxSteps,
+    maxStepsExplicit: rendered.options.maxStepsExplicit,
     loopbackPolicy: rendered.options.loopbackPolicy,
     maxLoopbacks: rendered.options.maxLoopbacks,
     started: Boolean(started),
@@ -379,6 +388,7 @@ export async function runDaemon(workDir, options = {}) {
         maxAttempts: opts.maxAttempts,
         maxParallel: opts.maxParallel,
         maxSteps: opts.maxSteps,
+        maxStepsExplicit: opts.maxStepsExplicit,
         loopback: opts.loopbackPolicy,
         maxLoopbacks: opts.maxLoopbacks,
         timeout: opts.timeout,

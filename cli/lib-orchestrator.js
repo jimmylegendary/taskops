@@ -101,6 +101,12 @@ function normalizeWorkerMaxSteps(value, { loopbackPolicy }) {
   return 1;
 }
 
+function normalizeWorkerMaxStepsExplicit(options = {}) {
+  if (options.maxStepsExplicit === true || options.maxStepsExplicit === 'true') return true;
+  if (options.maxStepsExplicit === false || options.maxStepsExplicit === 'false') return false;
+  return options.maxSteps != null && options.maxSteps !== '';
+}
+
 function parseQueueItemId(id) {
   const raw = String(id || '');
   const idx = raw.indexOf(':');
@@ -286,6 +292,7 @@ async function runClaimedQueueItemWorker(workDir, {
   loopbackPolicy,
   maxLoopbacks,
   maxSteps,
+  maxStepsExplicit,
   until,
   ttlSeconds,
 }) {
@@ -324,6 +331,7 @@ async function runClaimedQueueItemWorker(workDir, {
     workerRunId,
     '--json',
   ];
+  if (maxStepsExplicit) args.push('--max-steps-explicit');
   if (agent) args.push('--agent', agent);
   if (timeout != null) args.push('--timeout', String(timeout));
   if (actor) args.push('--actor', actor);
@@ -415,6 +423,7 @@ async function runClaimedQueueItemWorker(workDir, {
     attemptId,
     runtimeAdapter,
     maxSteps,
+    maxStepsExplicit,
     loopbackPolicy,
     maxLoopbacks,
     targetCompleted: targetCompleted(runResult, target),
@@ -444,6 +453,7 @@ export async function runQueueWave(workDir, options = {}) {
   const loopbackPolicy = normalizeLoopbackPolicy(options.loopback);
   const maxLoopbacks = normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy);
   const maxSteps = normalizeWorkerMaxSteps(options.maxSteps, { loopbackPolicy, maxLoopbacks });
+  const maxStepsExplicit = normalizeWorkerMaxStepsExplicit(options);
   const waveId = options.waveId || `wave-${randomUUID()}`;
   const claim = claimQueueItems(workDir, { runnerId, ttlSeconds, maxAttempts, limit: maxParallel });
   if (!claim.claimed || claim.claims.length === 0) {
@@ -457,6 +467,7 @@ export async function runQueueWave(workDir, options = {}) {
       maxAttempts,
       maxParallel,
       maxSteps,
+      maxStepsExplicit,
       loopbackPolicy,
       maxLoopbacks,
       workers: [],
@@ -479,6 +490,7 @@ export async function runQueueWave(workDir, options = {}) {
     loopbackPolicy,
     maxLoopbacks,
     maxSteps,
+    maxStepsExplicit,
     ttlSeconds,
     until: options.until || null,
   })));
@@ -492,6 +504,7 @@ export async function runQueueWave(workDir, options = {}) {
     maxAttempts,
     maxParallel,
     maxSteps,
+    maxStepsExplicit,
     loopbackPolicy,
     maxLoopbacks,
     claimedCount: claim.claims.length,
@@ -509,6 +522,7 @@ export function runQueueOnce(workDir, options = {}) {
   const loopbackPolicy = normalizeLoopbackPolicy(options.loopback);
   const maxLoopbacks = normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy);
   const maxSteps = normalizeWorkerMaxSteps(options.maxSteps, { loopbackPolicy, maxLoopbacks });
+  const maxStepsExplicit = normalizeWorkerMaxStepsExplicit(options);
   const waveId = options.waveId || `wave-${randomUUID()}`;
 
   const claim = claimQueueItem(workDir, { runnerId, ttlSeconds, maxAttempts });
@@ -524,6 +538,7 @@ export function runQueueOnce(workDir, options = {}) {
       loopbackPolicy,
       maxLoopbacks,
       maxSteps,
+      maxStepsExplicit,
     };
   }
 
@@ -551,6 +566,7 @@ export function runQueueOnce(workDir, options = {}) {
       agent: options.agent || null,
       runId: options.runId || null,
       maxSteps,
+      maxStepsExplicit,
       timeout: options.timeout || null,
       until: options.until || null,
       loopback: loopbackPolicy,
@@ -615,6 +631,7 @@ export function runQueueOnce(workDir, options = {}) {
     runtimeAdapter,
     maxAttempts,
     maxSteps,
+    maxStepsExplicit,
     loopbackPolicy,
     maxLoopbacks,
     targetCompleted: targetCompleted(runResult, target),
@@ -635,6 +652,7 @@ export async function runQueueWatch(workDir, options = {}) {
   const loopbackPolicy = normalizeLoopbackPolicy(options.loopback);
   const maxLoopbacks = normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy);
   const maxSteps = normalizeWorkerMaxSteps(options.maxSteps, { loopbackPolicy, maxLoopbacks });
+  const maxStepsExplicit = normalizeWorkerMaxStepsExplicit(options);
   const pollIntervalMs = optionalPositiveInteger(options.pollIntervalMs, 'poll interval ms') ?? 5000;
   const maxWaves = optionalPositiveInteger(options.maxWaves, 'max waves');
   const maxIdleCycles = optionalPositiveInteger(options.maxIdleCycles, 'max idle cycles');
@@ -677,6 +695,7 @@ export async function runQueueWatch(workDir, options = {}) {
       loopbackPolicy,
       maxLoopbacks,
       maxSteps,
+      maxStepsExplicit,
       ttlSeconds,
       until: options.until || null,
     }).then((result) => ({ waveId, result }));
@@ -788,6 +807,7 @@ export async function runQueueWatch(workDir, options = {}) {
     maxAttempts,
     maxParallel,
     maxSteps,
+    maxStepsExplicit,
     loopbackPolicy,
     maxLoopbacks,
     idleExitAfterSeconds,

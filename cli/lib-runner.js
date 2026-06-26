@@ -31,6 +31,34 @@ export const STOP_REASONS = Object.freeze({
   ERROR: 'error',
 });
 
+export const FINISHING_MODE_RESERVE = (maxSteps) => {
+  const n = Number(maxSteps);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.max(2, Math.ceil(Math.floor(n) * 0.2));
+};
+
+export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled = false } = {}) {
+  if (!budgetEnabled || maxSteps == null) {
+    return { enabled: false, finishingMode: false };
+  }
+  const normalizedMaxSteps = Math.floor(Number(maxSteps));
+  const normalizedStepsRun = Math.floor(Number(stepsRun));
+  if (!Number.isFinite(normalizedMaxSteps) || normalizedMaxSteps < 0 || !Number.isFinite(normalizedStepsRun) || normalizedStepsRun < 0) {
+    return { enabled: false, finishingMode: false };
+  }
+  const remaining = normalizedMaxSteps - normalizedStepsRun;
+  const reserve = FINISHING_MODE_RESERVE(normalizedMaxSteps);
+  // This is intentionally worker-local for now. A future global/wave budget can
+  // extend this object with a scope field without changing prompt consumers.
+  return {
+    enabled: true,
+    stepsRun: normalizedStepsRun,
+    maxSteps: normalizedMaxSteps,
+    remaining,
+    finishingMode: remaining <= reserve,
+  };
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -769,8 +797,21 @@ export function pickNextAction(parsed, target = {}) {
   return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE };
 }
 
-function buildAgentExecutionPrompt({ project, task }) {
+function budgetPromptLines(budget) {
+  if (!budget || budget.enabled !== true || budget.finishingMode !== true) return [];
   return [
+    '',
+    'Budget / finishing mode:',
+    `남은 step이 얼마 없다 (remaining ${budget.remaining} / ${budget.maxSteps}). 새 작업 범위를 시작하지 마라. 진행 중인 것을 정직하게 마무리하고, 끝내지 못한 나머지는 follow-up으로 명시한 뒤 partial 상태로 닫을 준비를 해라. 무리하게 done으로 표시하지 마라.`,
+  ];
+}
+
+function promptWithBudget(lines, budget) {
+  return [...lines, ...budgetPromptLines(budget)].join('\n');
+}
+
+export function buildAgentExecutionPrompt({ project, task, budget = null }) {
+  return promptWithBudget([
     'You are a TaskOps worker agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
@@ -784,11 +825,11 @@ function buildAgentExecutionPrompt({ project, task }) {
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
-  ].join('\n');
+  ], budget);
 }
 
-function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId }) {
-  return [
+export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget = null }) {
+  return promptWithBudget([
     'You are a TaskOps decomposition agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
@@ -805,11 +846,11 @@ function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versio
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
-  ].join('\n');
+  ], budget);
 }
 
-function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName }) {
-  return [
+export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget = null }) {
+  return promptWithBudget([
     'You are a TaskOps loopback resolution agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
@@ -825,11 +866,11 @@ function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, ar
     `Run id: ${runId}, loopback resolution run node id: ${loopbackNodeId}.`,
     `Write the loopback resolution artifact at: ${artifactRelPath}`,
     'Record the work taken, any decisions made, and what should happen next. Do not recursively invoke `taskops run`.',
-  ].join('\n');
+  ], budget);
 }
 
-function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath }) {
-  return [
+export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget = null }) {
+  return promptWithBudget([
     'You are a TaskOps exploration agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
@@ -845,7 +886,7 @@ function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifact
     `Write the exploration artifact at: ${artifactRelPath}`,
     `Run id: ${runId}, run node id: ${runNodeId}.`,
     'Do not mark the parent task as done; the runner manages task graph state. Do not recursively invoke `taskops run`.',
-  ].join('\n');
+  ], budget);
 }
 
 function safeSessionPart(value, fallback = 'task') {
@@ -869,7 +910,7 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs }) {
+function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget = null }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
@@ -879,7 +920,7 @@ function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs }) {
   }
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
-    const prompt = buildAgentExecutionPrompt({ project, task });
+    const prompt = buildAgentExecutionPrompt({ project, task, budget });
     const result = invokeRuntimeAdapter(adapter, {
       prompt,
       agentId,
@@ -934,12 +975,12 @@ function performDryRunLoopback({ runDir, loopbackNodeId, delegate, actorName }) 
   return { ok: true, artifactPath, message: `Wrote dry-run loopback artifact at ${artifactPath}` };
 }
 
-function performAgentLoopback({ project, projectDir, delegate, executor, agentId, stepTimeoutMs, runDir, runId, loopbackNodeId, actorName }) {
+function performAgentLoopback({ project, projectDir, delegate, executor, agentId, stepTimeoutMs, runDir, runId, loopbackNodeId, actorName, budget = null }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${loopbackNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName });
+  const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -973,7 +1014,7 @@ function writeRunEdge({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeT
   return edgePath;
 }
 
-function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, loopbackIndex, actorName }) {
+function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, loopbackIndex, actorName, budget = null }) {
   const startedAt = isoNow();
   const safeDelegateId = String(delegate.id).replace(/[^a-zA-Z0-9._-]/g, '-');
   const loopbackNodeId = `run-node-loopback-${safeDelegateId}${loopbackIndex > 1 ? `-${loopbackIndex}` : ''}`;
@@ -1024,7 +1065,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   try {
     result = executor === 'dry-run'
       ? performDryRunLoopback({ runDir: loopbackRunDir, loopbackNodeId, delegate, actorName })
-      : performAgentLoopback({ project, projectDir, delegate, executor, agentId, stepTimeoutMs, runDir: loopbackRunDir, runId: loopbackRunId, loopbackNodeId, actorName });
+      : performAgentLoopback({ project, projectDir, delegate, executor, agentId, stepTimeoutMs, runDir: loopbackRunDir, runId: loopbackRunId, loopbackNodeId, actorName, budget });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -1052,6 +1093,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
       delegateRunNodeId: delegate.id, runNodeId: loopbackNodeId,
       message: result.message || null, adapterStatus: result.status || null,
       stdout: result.stdout || '', stderr: result.stderr || '', loopbackIndex,
+      budget,
     };
   }
 
@@ -1092,6 +1134,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     artifactPath: result.artifactPath || null,
     message: result.message || null,
     loopbackIndex,
+    budget,
   };
 }
 
@@ -1281,7 +1324,7 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
   };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const projectDir = dirname(dirname(runDir));
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
@@ -1309,7 +1352,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, task, executor, agentId, stepTimeoutMs });
+    result = invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err), executor };
   }
@@ -1339,7 +1382,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         decision: review.reviewReport.decision,
       });
       appendRunLog(runDir, `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`);
-      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision };
+      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget };
     }
     const approvedReview = review.approvedReview;
     const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
@@ -1354,7 +1397,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       message: result.message || null,
     });
     appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
-    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision };
+    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget };
   }
 
   rewriteFrontmatter(task.path, (fm) => {
@@ -1373,6 +1416,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor,
     message: result.message || null, adapterStatus: result.status || null,
     stdout: result.stdout || '', stderr: result.stderr || '',
+    budget,
   };
 }
 
@@ -1461,13 +1505,13 @@ function performDryRunDecomposition({ projectDir, task }) {
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
 
-function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs }) {
+function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null }) {
   const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
   const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
-  const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId });
+  const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -1482,7 +1526,7 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
   return { ok: true, childTaskGroupId, versionId, message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}` };
 }
 
-function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs }) {
+function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -1506,7 +1550,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   try {
     result = executor === 'dry-run'
       ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs });
+      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -1526,9 +1570,10 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     });
     appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
     return {
-      taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
-      message: result.message || null, adapterStatus: result.status || null,
-      stdout: result.stdout || '', stderr: result.stderr || '',
+    taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+    message: result.message || null, adapterStatus: result.status || null,
+    stdout: result.stdout || '', stderr: result.stderr || '',
+    budget,
     };
   }
 
@@ -1554,6 +1599,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   return {
     taskId: task.id, runNodeId, kind: 'decompose', status: 'completed', executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, message: result.message || null,
+    budget,
   };
 }
 
@@ -1589,12 +1635,12 @@ function performDryRunExploration({ runDir, runNodeId, task }) {
   return { ok: true, artifactPath, message: `Wrote dry-run exploration artifact at ${artifactPath}` };
 }
 
-function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId }) {
+function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath });
+  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -1609,7 +1655,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
   return { ok: true, artifactPath, message: result.stdout || `Agent recorded exploration at ${artifactPath}` };
 }
 
-function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs }) {
+function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -1633,7 +1679,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   try {
     result = executor === 'dry-run'
       ? performDryRunExploration({ runDir, runNodeId, task })
-      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId });
+      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -1653,9 +1699,10 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     });
     appendRunLog(runDir, `${finishedAt} exploration_failed taskId=${task.id} reason=${result.message || ''}`);
     return {
-      taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
-      message: result.message || null, adapterStatus: result.status || null,
-      stdout: result.stdout || '', stderr: result.stderr || '',
+    taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
+    message: result.message || null, adapterStatus: result.status || null,
+    stdout: result.stdout || '', stderr: result.stderr || '',
+    budget,
     };
   }
 
@@ -1679,6 +1726,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   return {
     taskId: task.id, runNodeId, kind: 'explore', status: 'completed', executor,
     artifactPath: result.artifactPath || null, message: result.message || null,
+    budget,
   };
 }
 
@@ -2128,6 +2176,8 @@ export function runTaskOps(workDir, options = {}) {
   const actorName = options.actor && String(options.actor).trim()
     ? String(options.actor).trim()
     : (executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : 'taskops-runner');
+  const maxStepsExplicit = options.maxStepsExplicit === true || options.maxStepsExplicit === 'true';
+  const budgetEnabled = maxStepsExplicit && maxSteps != null;
   const targetTaskId = options.targetTaskId || null;
   const targetTaskGroupVersionId = options.targetTaskGroupVersionId || null;
   const allowConcurrentTarget = options.allowConcurrentTarget === true && Boolean(targetTaskId);
@@ -2176,6 +2226,7 @@ export function runTaskOps(workDir, options = {}) {
       workId: parsed.project.id, runId, executor,
       agentId: executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : null,
       maxSteps, until: until != null ? new Date(until).toISOString() : null,
+      maxStepsExplicit, budgetEnabled,
       loopbackPolicy, maxLoopbacks, actorName,
     });
     appendRunLog(runDir, `${startedAt} runner_started workId=${parsed.project.id} runId=${runId} executor=${executor}${loopbackPolicy !== 'none' ? ` loopbackPolicy=${loopbackPolicy} maxLoopbacks=${maxLoopbacks}` : ''}`);
@@ -2185,9 +2236,11 @@ export function runTaskOps(workDir, options = {}) {
     let stopReason = null;
     let stopDetail = null;
     let stopSource = null;
+    let finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
     const actions = [];
 
     while (true) {
+      finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
       if (until != null && Date.now() >= until) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
       if (maxSteps != null && stepsRun >= maxSteps) { stopReason = STOP_REASONS.MAX_STEPS; break; }
 
@@ -2239,6 +2292,7 @@ export function runTaskOps(workDir, options = {}) {
               projectDir, project: parsed.project, delegate,
               runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
               loopbackIndex: loopbacksUsed, actorName,
+              budget: finalBudget,
             });
             actions.push(loopbackResult);
             stepsRun += 1;
@@ -2273,11 +2327,13 @@ export function runTaskOps(workDir, options = {}) {
         stepResult = executeRunnableTask({
           project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
+          budget: finalBudget,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
+          budget: finalBudget,
         });
         if (
           stepResult.status === 'completed'
@@ -2303,6 +2359,7 @@ export function runTaskOps(workDir, options = {}) {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
+          budget: finalBudget,
         });
       } else {
         throw new Error(`Unhandled action kind: ${next.kind}`);
@@ -2315,6 +2372,7 @@ export function runTaskOps(workDir, options = {}) {
     }
 
     if (!stopReason) stopReason = STOP_REASONS.NO_RUNNABLE;
+    finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
 
     const stoppedAt = isoNow();
     logEvent(eventsPath, {
@@ -2326,7 +2384,7 @@ export function runTaskOps(workDir, options = {}) {
     return {
       workId: parsed.project.id, runId,
       stopReason, stopDetail, stopSource,
-      stepsRun, maxSteps,
+      stepsRun, maxSteps, maxStepsExplicit, finalBudget,
       until: until != null ? new Date(until).toISOString() : null,
       executor,
       loopbackPolicy, maxLoopbacks, loopbacksUsed, actorName,
