@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isPartialUnresolved } from './lib-taskops.js';
 
 const DEFAULT_MAX_FLAT_TASKS = 12;
 
@@ -83,6 +84,10 @@ function partialMarkers(parsed) {
   return [...(parsed.partialNodes?.values() || [])];
 }
 
+function unresolvedPartialMarkers(parsed) {
+  return partialMarkers(parsed).filter((partial) => isPartialUnresolved(partial));
+}
+
 function objectiveLooksComplex(parsed) {
   const text = [
     parsed.project?.title,
@@ -133,7 +138,7 @@ function auditClosureIntegrity(parsed) {
   const issues = [];
   const closure = parsed.closure || {};
   const manuals = manualEows(parsed);
-  const partials = partialMarkers(parsed);
+  const partials = unresolvedPartialMarkers(parsed);
 
   if (partials.length > 0) {
     issues.push(issue({
@@ -269,10 +274,11 @@ export function auditParsedWork(parsed, options = {}) {
   ];
   const counts = severityCounts(issues);
   const partialCount = partialMarkers(parsed).length;
+  const unresolvedPartialCount = unresolvedPartialMarkers(parsed).length;
   const claimSafe = (counts.error || 0) === 0
     && parsed.errors.length === 0
     && parsed.closure?.policyApprovedComplete === true
-    && partialCount === 0;
+    && unresolvedPartialCount === 0;
   return {
     workId: parsed.project?.id || null,
     projectDir: parsed.projectDir,
@@ -287,6 +293,7 @@ export function auditParsedWork(parsed, options = {}) {
       taskGroupVersionCount: parsed.versions.size,
       manualEowCount: manualEows(parsed).length,
       partialCount,
+      unresolvedPartialCount,
       closureState: parsed.closure?.closureState || 'open',
       policyApprovedComplete: parsed.closure?.policyApprovedComplete === true,
       structuralComplete: parsed.closure?.structuralComplete === true,
@@ -302,7 +309,7 @@ export function renderAuditText(audit) {
     `work=${audit.workId || 'unknown'} claimSafe=${audit.claimSafe}`,
     `counts error=${audit.counts.error || 0} warning=${audit.counts.warning || 0} info=${audit.counts.info || 0}`,
     `metrics selectedTasks=${audit.metrics.selectedTaskCount} terminalTasks=${audit.metrics.terminalSelectedTaskCount} selectedGroups=${audit.metrics.selectedTaskGroupCount} childGroups=${audit.metrics.selectedChildTaskGroupCount} versions=${audit.metrics.taskGroupVersionCount}`,
-    `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount} partial=${audit.metrics.partialCount}`,
+    `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount} partial=${audit.metrics.unresolvedPartialCount}/${audit.metrics.partialCount}`,
   ];
   if (audit.validationErrors.length > 0) {
     lines.push('validation errors:');

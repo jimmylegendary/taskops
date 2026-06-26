@@ -72,6 +72,18 @@ writeFileSync(specPath, JSON.stringify({
       runReadiness: 'runnable',
       understandingLevel: 'known',
     },
+    {
+      id: 'task-depth',
+      title: 'Depth capped task',
+      objective: 'Already a follow-up task.',
+      responsibility: 'Verify depth cap skip.',
+      completionCriteria: 'Would exceed the default follow-up cap.',
+      order: 4,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+      followUpDepth: 1,
+    },
   ],
 }), 'utf8');
 
@@ -85,7 +97,7 @@ writeFileSync(
   'utf8',
 );
 
-json([
+const primaryClose = json([
   'close',
   workDir,
   'task-main',
@@ -98,8 +110,86 @@ json([
   '--budget-json',
   '{"enabled":true,"stepsRun":8,"maxSteps":10,"remaining":2,"finishingMode":true}',
 ]);
+assert.ok(primaryClose.partialId, 'primary close should return a partial id');
 
-const plan = json(['promote-partials', workDir, '--dry-run']);
+const resolvedClose = json([
+  'close',
+  workDir,
+  'task-downstream',
+  '--reason',
+  'partial_complete',
+  '--completed-summary',
+  'Downstream work was partly started.',
+  '--incomplete-summary',
+  'This should be skipped because it is already superseded.',
+]);
+writeFileSync(
+  resolvedClose.partialPath,
+  readFileSync(resolvedClose.partialPath, 'utf8').replace('supersededBy: null', 'supersededBy: task:tgv-root-v3/task-downstream-followup'),
+  'utf8',
+);
+
+const depthClose = json([
+  'close',
+  workDir,
+  'task-depth',
+  '--reason',
+  'partial_complete',
+  '--completed-summary',
+  'Depth-capped task started.',
+  '--incomplete-summary',
+  'This would require a second follow-up level.',
+]);
+
+const oldSpecPath = join(tempRoot, 'old-spec.json');
+writeFileSync(oldSpecPath, JSON.stringify({
+  versionId: 'tgv-root-old',
+  version: 'old',
+  summary: 'Non selected historical version',
+  selected: false,
+  tasks: [
+    {
+      id: 'task-old',
+      title: 'Old version task',
+      objective: 'Historical non-selected work.',
+      responsibility: 'Verify selected-only skip.',
+      completionCriteria: 'Should not be promoted.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+    },
+  ],
+}), 'utf8');
+run(['decompose', workDir, '--task-group-id', 'tg-root', '--spec', oldSpecPath]);
+const oldClose = json([
+  'close',
+  workDir,
+  'task-old',
+  '--reason',
+  'partial_complete',
+  '--completed-summary',
+  'Old version partial.',
+  '--incomplete-summary',
+  'This should not be promoted because the version is not selected.',
+]);
+
+const resolvedPlan = json(['promote-partials', workDir, '--dry-run', '--partial-id', resolvedClose.partialId]);
+assert.equal(resolvedPlan.promotionCount, 0);
+assert.equal(resolvedPlan.skippedCount, 1);
+assert.equal(resolvedPlan.skipped[0].reason, 'already_superseded');
+
+const depthPlan = json(['promote-partials', workDir, '--dry-run', '--partial-id', depthClose.partialId, '--max-follow-up-depth', '1']);
+assert.equal(depthPlan.promotionCount, 0);
+assert.equal(depthPlan.skippedCount, 1);
+assert.equal(depthPlan.skipped[0].reason, 'exceeded_follow_up_depth');
+
+const nonSelectedPlan = json(['promote-partials', workDir, '--dry-run', '--partial-id', oldClose.partialId]);
+assert.equal(nonSelectedPlan.promotionCount, 0);
+assert.equal(nonSelectedPlan.skippedCount, 1);
+assert.equal(nonSelectedPlan.skipped[0].reason, 'not_in_selected_version');
+
+const plan = json(['promote-partials', workDir, '--dry-run', '--partial-id', primaryClose.partialId]);
 assert.equal(plan.dryRun, true);
 assert.equal(plan.promotionCount, 1);
 assert.equal(plan.skippedCount, 0);
@@ -130,12 +220,44 @@ assert.equal(followUp.followUpBudget.finishingMode, true);
 assert.match(followUp.objective, /verification gates/);
 
 const specTaskIds = versionPlan.specPreview.tasks.map((task) => task.id);
-assert.deepEqual(specTaskIds, ['task-upstream', 'task-main', 'task-task-main-followup', 'task-downstream']);
+assert.deepEqual(specTaskIds, ['task-upstream', 'task-main', 'task-task-main-followup', 'task-downstream', 'task-depth']);
 assert.equal(versionPlan.specPreview.tasks.find((task) => task.id === 'task-main').status, 'blocked');
 assert.equal(versionPlan.specPreview.tasks.find((task) => task.id === 'task-task-main-followup').order, 3);
 assert.equal(versionPlan.specPreview.tasks.find((task) => task.id === 'task-downstream').order, 4);
+assert.equal(versionPlan.specPreview.tasks.find((task) => task.id === 'task-depth').order, 5);
 assert.equal(versionPlan.specPreview.eows.length, 1);
 assert.equal(versionPlan.specPreview.eows[0].preservedFromEowId, 'eow-task-upstream');
 assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), false, 'dry-run must not create the planned version directory');
+
+const applied = json(['promote-partials', workDir, '--apply', '--partial-id', primaryClose.partialId]);
+assert.equal(applied.dryRun, false);
+assert.equal(applied.applied, true);
+assert.equal(applied.promotionCount, 1);
+assert.equal(applied.appliedVersionPlans[0].toVersionId, 'tgv-root-v3');
+assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), true, 'apply must create the planned version directory');
+
+const oldVersionIndex = readFileSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'index.md'), 'utf8');
+assert.match(oldVersionIndex, /selected: false/);
+assert.match(oldVersionIndex, /supersededByVersionId: tgv-root-v3/);
+assert.match(readFileSync(join(workDir, 'task-groups', 'tg-root', 'index.md'), 'utf8'), /activeVersionId: tgv-root-v3/);
+assert.match(readFileSync(snapshotPath, 'utf8'), /versionId: tgv-root-v3/);
+
+const promotedPartial = readFileSync(primaryClose.partialPath, 'utf8');
+assert.match(promotedPartial, /supersededBy: task:tgv-root-v3\/task-task-main-followup/);
+assert.match(promotedPartial, /followUpTaskId: task-task-main-followup/);
+
+const followUpTaskText = readFileSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-task-main-followup.md'), 'utf8');
+assert.match(followUpTaskText, /followUpFromPartialId:/);
+assert.match(followUpTaskText, /followUpForTaskId: task-main/);
+assert.match(followUpTaskText, /followUpDepth: 1/);
+
+const blockedSourceText = readFileSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-main.md'), 'utf8');
+assert.match(blockedSourceText, /status: blocked/);
+assert.match(blockedSourceText, /runReadiness: blocked/);
+assert.match(blockedSourceText, /id: task-task-main-followup/);
+
+const audit = json(['audit', workDir]);
+assert.equal(audit.issues.some((issue) => issue.code === 'work_has_partial_completions' && issue.evidence.examples.some((partial) => partial.id === primaryClose.partialId)), false);
+assert.equal(audit.issues.some((issue) => issue.code === 'work_has_partial_completions'), true, 'other unresolved partials should still warn');
 
 console.log('partial promotion plan smoke passed');

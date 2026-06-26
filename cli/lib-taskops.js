@@ -1914,6 +1914,116 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
   };
 }
 
+function appendTextFile(path, text) {
+  if (existsSync(path)) writeFileSync(path, readFileSync(path, 'utf8') + text, 'utf8');
+  else writeFileSync(path, text, 'utf8');
+}
+
+function appendWorkLog(projectDir, line) {
+  const workLogPath = join(projectDir, 'work-log.md');
+  appendTextFile(workLogPath, existsSync(workLogPath) ? line : `# Work log\n\n${line}`);
+}
+
+export function promotePartialCompletions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH, dryRun = true } = {}) {
+  const plan = planPartialPromotions(workDir, { partialId, maxFollowUpDepth });
+  if (dryRun) return plan;
+  if (plan.promotionCount === 0) {
+    return {
+      ...plan,
+      dryRun: false,
+      applied: false,
+      appliedAt: null,
+      appliedVersionPlans: [],
+    };
+  }
+
+  const parsed = parseProject(plan.projectDir);
+  if (parsed.errors.length > 0) {
+    throw new Error(`Cannot promote partials: project has validation errors:\n- ${parsed.errors.join('\n- ')}`);
+  }
+  const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
+  if (!activeSnapshot) throw new Error('Cannot promote partials: project has no active snapshot');
+
+  const now = isoNow();
+  const appliedVersionPlans = [];
+
+  for (const versionPlan of plan.versionPlans) {
+    const sourceVersion = parsed.versions.get(versionPlan.fromVersionId);
+    if (!sourceVersion) throw new Error(`Cannot promote partials: source version '${versionPlan.fromVersionId}' not found`);
+    const taskGroup = parsed.taskGroups.get(versionPlan.taskGroupId);
+    if (!taskGroup) throw new Error(`Cannot promote partials: task group '${versionPlan.taskGroupId}' not found`);
+
+    const newVersionDir = writeVersionFromSpec(plan.projectDir, versionPlan.taskGroupId, versionPlan.specPreview, {
+      supersedesVersionId: versionPlan.fromVersionId,
+    });
+
+    rewriteFrontmatterInPlace(join(sourceVersion.path, 'index.md'), (fm) => {
+      fm.selected = false;
+      fm.supersededByVersionId = versionPlan.toVersionId;
+      fm.supersededAt = now;
+      fm.supersededReason = 'partial_follow_up_promotion';
+      return fm;
+    });
+
+    rewriteFrontmatterInPlace(join(taskGroup.path, 'index.md'), (fm) => {
+      fm.activeVersionId = versionPlan.toVersionId;
+      return fm;
+    });
+
+    rewriteFrontmatterInPlace(activeSnapshot.path, (fm) => {
+      const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
+      fm.selectedVersions = list.map((p) => {
+        if (!p || typeof p !== 'object') return p;
+        if (p.taskGroupId === versionPlan.taskGroupId && p.versionId === versionPlan.fromVersionId) {
+          return { taskGroupId: p.taskGroupId, versionId: versionPlan.toVersionId };
+        }
+        return p;
+      });
+      return fm;
+    });
+
+    const decompositionLogPath = join(newVersionDir, 'decomposition-log.md');
+    const promotedIds = versionPlan.promotions.map((promotion) => promotion.partialId).join(', ');
+    appendTextFile(
+      decompositionLogPath,
+      `- ${now} partial-driven follow-up promotion from=${versionPlan.fromVersionId} to=${versionPlan.toVersionId} partials=${promotedIds}\n`,
+    );
+
+    for (const promotion of versionPlan.promotions) {
+      const partial = parsed.partialNodes.get(promotion.partialId);
+      if (!partial) throw new Error(`Cannot promote partials: partial '${promotion.partialId}' disappeared before apply`);
+      rewriteFrontmatterInPlace(partial.path, (fm) => {
+        fm.supersededBy = promotion.supersededBy;
+        fm.supersededAt = now;
+        fm.supersededReason = 'partial_follow_up_promotion';
+        fm.followUpTaskId = promotion.followUpTaskId;
+        fm.followUpTaskGroupVersionId = versionPlan.toVersionId;
+        return fm;
+      });
+    }
+
+    appliedVersionPlans.push({
+      taskGroupId: versionPlan.taskGroupId,
+      fromVersionId: versionPlan.fromVersionId,
+      toVersionId: versionPlan.toVersionId,
+      newVersionDir,
+      promotionCount: versionPlan.promotions.length,
+      promotedPartialIds: versionPlan.promotions.map((promotion) => promotion.partialId),
+    });
+  }
+
+  const logLine = `- ${now} promote partials work=${plan.workId} promotions=${plan.promotionCount} skipped=${plan.skippedCount} versions=${appliedVersionPlans.map((p) => `${p.fromVersionId}->${p.toVersionId}`).join(',')}\n`;
+  appendWorkLog(plan.projectDir, logLine);
+
+  return {
+    ...plan,
+    dryRun: false,
+    applied: true,
+    appliedAt: now,
+    appliedVersionPlans,
+  };
+}
+
 export function restartFromTask(workDir, { fromTaskId, instruction = null, instructionFile = null, reason = null } = {}) {
   if (!fromTaskId) throw new Error('Missing required fromTaskId');
   const projectDir = resolve(workDir);

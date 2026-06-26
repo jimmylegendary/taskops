@@ -10,6 +10,7 @@ import {
   initVaultRepo,
   parseProject,
   planPartialPromotions,
+  promotePartialCompletions,
   restartFromTask,
   summarizeProject,
   syncVaultRepo,
@@ -35,7 +36,7 @@ Usage:
   taskops explain <work-dir> [--json]
   taskops review <work-dir> <run-node-id|task-id> [--json]
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
-  taskops promote-partials <work-dir> [--dry-run] [--partial-id <id>] [--max-follow-up-depth <n>] [--json]
+  taskops promote-partials <work-dir> [--dry-run|--apply] [--partial-id <id>] [--max-follow-up-depth <n>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
   taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
@@ -373,12 +374,16 @@ try {
     if (maxFollowUpDepth !== undefined && (!Number.isFinite(maxFollowUpDepth) || maxFollowUpDepth < 0)) {
       fail(`Invalid --max-follow-up-depth '${flags['max-follow-up-depth']}'`);
     }
-    const result = planPartialPromotions(workDir, { partialId, maxFollowUpDepth });
+    if (flags.apply === true && flags['dry-run'] === true) fail('Use only one of --apply or --dry-run');
+    const apply = flags.apply === true;
+    const result = apply
+      ? promotePartialCompletions(workDir, { partialId, maxFollowUpDepth, dryRun: false })
+      : planPartialPromotions(workDir, { partialId, maxFollowUpDepth });
     if (flags.json) console.log(JSON.stringify(result, null, 2));
     else {
-      console.log(`workId=${result.workId} dryRun=true promotionCount=${result.promotionCount} skippedCount=${result.skippedCount}`);
-      if (!flags['dry-run']) {
-        console.log('note=promote-partials is dry-run only in this build; no files were changed.');
+      console.log(`workId=${result.workId} dryRun=${result.dryRun === true} promotionCount=${result.promotionCount} skippedCount=${result.skippedCount}`);
+      if (!apply) {
+        console.log('note=default is dry-run; pass --apply to write a new selected version and mark promoted partials superseded.');
       }
       for (const plan of result.versionPlans) {
         console.log(`versionPlan taskGroup=${plan.taskGroupId} from=${plan.fromVersionId} to=${plan.toVersionId} promotions=${plan.promotions.length}`);
@@ -390,6 +395,12 @@ try {
         console.log('skipped:');
         for (const skipped of result.skipped) {
           console.log(`- partial=${skipped.partialId || '(unknown)'} reason=${skipped.reason}${skipped.detail ? ` detail=${skipped.detail}` : ''}`);
+        }
+      }
+      if (result.appliedVersionPlans?.length > 0) {
+        console.log('applied:');
+        for (const applied of result.appliedVersionPlans) {
+          console.log(`- taskGroup=${applied.taskGroupId} from=${applied.fromVersionId} to=${applied.toVersionId} promotions=${applied.promotionCount}`);
         }
       }
     }
