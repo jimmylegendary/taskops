@@ -59,6 +59,89 @@ export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled
   };
 }
 
+export const PARTIAL_REQUEST_PREFIX = 'TASKOPS_PARTIAL_REQUEST:';
+
+function looksLikeJson(value) {
+  const text = String(value || '').trim();
+  return text.startsWith('{') || text.startsWith('[');
+}
+
+function collectPartialRequestTexts(value, texts = [], seen = new Set()) {
+  if (value == null) return texts;
+  if (typeof value === 'string') {
+    texts.push(value);
+    if (looksLikeJson(value)) {
+      try {
+        collectPartialRequestTexts(JSON.parse(value), texts, seen);
+      } catch {
+        // Plain worker text often is not JSON. Sentinel parsing below handles it.
+      }
+    }
+    return texts;
+  }
+  if (typeof value !== 'object' || seen.has(value)) return texts;
+  seen.add(value);
+
+  for (const key of ['finalAssistantRawText', 'finalAssistantVisibleText', 'text', 'message', 'stdout', 'stderr']) {
+    if (typeof value[key] === 'string') collectPartialRequestTexts(value[key], texts, seen);
+  }
+  const payloads = Array.isArray(value.payloads)
+    ? value.payloads
+    : (Array.isArray(value.result?.payloads) ? value.result.payloads : []);
+  for (const payload of payloads) collectPartialRequestTexts(payload, texts, seen);
+  if (value.result && typeof value.result === 'object') collectPartialRequestTexts(value.result, texts, seen);
+  return texts;
+}
+
+function parsePartialRequestText(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  let malformed = null;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith(PARTIAL_REQUEST_PREFIX)) continue;
+    const jsonText = trimmed.slice(PARTIAL_REQUEST_PREFIX.length).trim();
+    try {
+      const payload = JSON.parse(jsonText);
+      if (!payload || payload.partialRequested !== true) {
+        return {
+          partialRequested: false,
+          markerFound: true,
+          ignoredReason: 'partial_requested_not_true',
+          rawLine: line,
+        };
+      }
+      return {
+        partialRequested: true,
+        markerFound: true,
+        completedSummary: typeof payload.completedSummary === 'string' ? payload.completedSummary : '',
+        incompleteSummary: typeof payload.incompleteSummary === 'string' ? payload.incompleteSummary : '',
+        followUpNeeded: payload.followUpNeeded !== false,
+        rawLine: line,
+      };
+    } catch (error) {
+      malformed = {
+        partialRequested: false,
+        markerFound: true,
+        parseError: error instanceof Error ? error.message : String(error),
+        rawLine: line,
+      };
+    }
+  }
+  return malformed || { partialRequested: false, markerFound: false };
+}
+
+export function parsePartialRequestFromExecutorResult(executorResult) {
+  const texts = collectPartialRequestTexts(executorResult);
+  let malformed = null;
+  for (const text of texts) {
+    const parsed = parsePartialRequestText(text);
+    if (parsed.partialRequested === true) return parsed;
+    if (parsed.markerFound && parsed.parseError && !malformed) malformed = parsed;
+    if (parsed.markerFound && parsed.ignoredReason && !malformed) malformed = parsed;
+  }
+  return malformed || { partialRequested: false, markerFound: false };
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -797,17 +880,27 @@ export function pickNextAction(parsed, target = {}) {
   return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE };
 }
 
-function budgetPromptLines(budget) {
+function budgetPromptLines(budget, { allowPartialRequest = false } = {}) {
   if (!budget || budget.enabled !== true || budget.finishingMode !== true) return [];
-  return [
+  const lines = [
     '',
     'Budget / finishing mode:',
     `남은 step이 얼마 없다 (remaining ${budget.remaining} / ${budget.maxSteps}). 새 작업 범위를 시작하지 마라. 진행 중인 것을 정직하게 마무리하고, 끝내지 못한 나머지는 follow-up으로 명시한 뒤 partial 상태로 닫을 준비를 해라. 무리하게 done으로 표시하지 마라.`,
   ];
+  if (allowPartialRequest) {
+    lines.push(
+      'Execution partial request protocol:',
+      'Look at the full task scope. If you can finish this task completely and honestly in this turn, finish it normally.',
+      'If you can only complete part of it, do only the completed part honestly and leave the rest for follow-up. Do not claim the whole task is done.',
+      'Do not call closure or graph-control commands such as `taskops close`; the runner owns closure and graph mutation.',
+      `To request runner-owned partial completion, include exactly one final-response line with this prefix and valid JSON: ${PARTIAL_REQUEST_PREFIX} {"partialRequested": true, "completedSummary": "what you completed", "incompleteSummary": "what remains"}`,
+    );
+  }
+  return lines;
 }
 
-function promptWithBudget(lines, budget) {
-  return [...lines, ...budgetPromptLines(budget)].join('\n');
+function promptWithBudget(lines, budget, options = {}) {
+  return [...lines, ...budgetPromptLines(budget, options)].join('\n');
 }
 
 export function buildAgentExecutionPrompt({ project, task, budget = null }) {
@@ -825,7 +918,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null }) {
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
-  ], budget);
+  ], budget, { allowPartialRequest: true });
 }
 
 export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget = null }) {
