@@ -260,4 +260,32 @@ const audit = json(['audit', workDir]);
 assert.equal(audit.issues.some((issue) => issue.code === 'work_has_partial_completions' && issue.evidence.examples.some((partial) => partial.id === primaryClose.partialId)), false);
 assert.equal(audit.issues.some((issue) => issue.code === 'work_has_partial_completions'), true, 'other unresolved partials should still warn');
 
+const rerunApply = json(['promote-partials', workDir, '--apply', '--partial-id', primaryClose.partialId]);
+assert.equal(rerunApply.dryRun, false);
+assert.equal(rerunApply.applied, false);
+assert.equal(rerunApply.promotionCount, 0);
+assert.equal(rerunApply.skippedCount, 1);
+assert.equal(rerunApply.skipped[0].reason, 'already_superseded');
+assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v4')), false, 'idempotent rerun must not create a duplicate follow-up version');
+
+const followUpTaskPath = join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-task-main-followup.md');
+writeFileSync(
+  followUpTaskPath,
+  readFileSync(followUpTaskPath, 'utf8').replace('status: pending', 'status: done'),
+  'utf8',
+);
+const followUpClose = json(['close', workDir, 'task-task-main-followup', '--reason', 'approved_result']);
+assert.equal(followUpClose.closed, true);
+assert.equal(followUpClose.eowId, 'eow-task-task-main-followup');
+
+const recheck = json(['unblock-check', workDir]);
+assert.equal(recheck.unblocked.length, 1);
+assert.equal(recheck.unblocked[0].taskId, 'task-main');
+assert.equal(recheck.unblocked[0].taskGroupVersionId, 'tgv-root-v3');
+
+const reopenedSourceText = readFileSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-main.md'), 'utf8');
+assert.match(reopenedSourceText, /status: pending/);
+assert.match(reopenedSourceText, /runReadiness: runnable/);
+assert.match(reopenedSourceText, /Blockers resolved by taskops blocker recheck/);
+
 console.log('partial promotion plan smoke passed');
