@@ -7,7 +7,7 @@ export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_e
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
 export const REVIEW_DECISION_VALUES = ['approved', 'rejected', 'needs_verification'];
 export const ACCEPTANCE_MODE_VALUES = ['informational', 'enforced', 'guarded', 'runner-managed'];
-export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow'];
+export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow', 'partial'];
 export const WORK_ENTITY_TYPES = ['work', 'project'];
 export const EOW_GRAPH_TYPES = ['task', 'run'];
 export const EOW_ATTACHED_TO_TYPES = ['task', 'runNode'];
@@ -29,6 +29,7 @@ const SUMMARY_LABELS = Object.freeze({
   runNodes: 'Run nodes',
   runEdges: 'Run edges',
   eowNodes: 'EoW nodes',
+  partialNodes: 'Partial markers',
   taskEowCoverage: 'Terminal task EoW coverage',
   structuralClosure: 'Structural closure',
   policyApprovedClosure: 'Policy-approved closure',
@@ -378,12 +379,17 @@ export function parseProject(projectDir) {
   const runNodes = new Map();
   const runEdges = new Map();
   const eowNodes = new Map();
+  const partialNodes = new Map();
   const taskEowsByTaskKey = new Map();
   const runEowsByRunNodeKey = new Map();
 
   const addEow = (eow, filePath) => {
     if (eowNodes.has(eow.id)) errors.push(withPath(filePath, `duplicate EoW id '${eow.id}'`));
     eowNodes.set(eow.id, { ...eow, path: filePath });
+  };
+  const addPartial = (partial, filePath) => {
+    if (partialNodes.has(partial.id)) errors.push(withPath(filePath, `duplicate partial id '${partial.id}'`));
+    partialNodes.set(partial.id, { ...partial, path: filePath });
   };
 
   const normalizeRunRefs = (task) => Array.isArray(task.runRefs) ? task.runRefs : [];
@@ -467,6 +473,22 @@ export function parseProject(projectDir) {
         if (!taskEowsByTaskKey.has(attachedKey)) taskEowsByTaskKey.set(attachedKey, []);
         taskEowsByTaskKey.get(attachedKey).push(eowRecord);
       }
+
+      for (const partialPath of listMd(join(versionDir, 'partials'))) {
+        const partial = parseMarkdownFile(partialPath);
+        checkFields(partial, ['taskOpsVersion', 'entityType', 'id', 'graphType', 'attachedToType', 'attachedToId', 'reason', 'declaredBy', 'declaredAt', 'createdAt', 'status', 'completedSummary', 'incompleteSummary', 'followUpNeeded', 'supersededBy', 'budget'], partialPath, errors, language);
+        if (partial.entityType !== 'partial') errors.push(withPath(partialPath, t.entityTypeMustBe('partial')));
+        if (partial.id !== basename(partialPath, '.md')) errors.push(withPath(partialPath, t.idMustMatchFileName(basename(partialPath, '.md'))));
+        if (!STATUS_VALUES.includes(partial.status)) errors.push(withPath(partialPath, t.invalidStatus(partial.status)));
+        if (!EOW_GRAPH_TYPES.includes(partial.graphType)) errors.push(withPath(partialPath, t.invalidEowGraphType(partial.graphType)));
+        if (!EOW_ATTACHED_TO_TYPES.includes(partial.attachedToType)) errors.push(withPath(partialPath, t.invalidEowAttachedToType(partial.attachedToType)));
+        if (partial.graphType !== 'task') errors.push(withPath(partialPath, t.invalidEowGraphType(partial.graphType)));
+        if (partial.attachedToType !== 'task') errors.push(withPath(partialPath, t.invalidEowAttachedToType(partial.attachedToType)));
+        if (partial.taskGroupVersionId && partial.taskGroupVersionId !== v.id) errors.push(withPath(partialPath, t.taskGroupVersionIdMustBe(v.id)));
+        const attachedKey = taskKey(v.id, partial.attachedToId);
+        if (!tasks.has(attachedKey)) errors.push(withPath(partialPath, t.eowAttachedTaskNotFound(partial.attachedToId)));
+        addPartial({ ...partial, path: partialPath, taskGroupId: tg.id, taskGroupVersionId: v.id }, partialPath);
+      }
     }
   }
 
@@ -506,7 +528,7 @@ export function parseProject(projectDir) {
     else if (ownerId !== project.id) errors.push(withPath(runIndex, t.projectIdMustBe(project.id)));
     if (!STATUS_VALUES.includes(run.status)) errors.push(withPath(runIndex, t.invalidStatus(run.status)));
 
-    const runRecord = { ...run, path: runDir, nodes: [], edges: [], eows: [], legacy };
+    const runRecord = { ...run, path: runDir, nodes: [], edges: [], eows: [], partials: [], legacy };
     if (runs.has(run.id)) errors.push(withPath(runIndex, `duplicate run id '${run.id}'`));
     runs.set(run.id, runRecord);
     const graphNodes = new Map();
@@ -580,6 +602,23 @@ export function parseProject(projectDir) {
       if (!graphNodes.has(eow.attachedToId) || graphNodes.get(eow.attachedToId).entityType !== 'runNode') {
         errors.push(withPath(eow.path, t.eowAttachedRunNodeNotFound(eow.attachedToId)));
       }
+    }
+
+    for (const partialPath of listMd(join(runDir, 'partials'))) {
+      const partial = parseMarkdownFile(partialPath);
+      checkFields(partial, ['taskOpsVersion', 'entityType', 'id', 'runId', 'graphType', 'attachedToType', 'attachedToId', 'reason', 'declaredBy', 'declaredAt', 'createdAt', 'status', 'completedSummary', 'incompleteSummary', 'followUpNeeded', 'supersededBy', 'budget'], partialPath, errors, language);
+      if (partial.entityType !== 'partial') errors.push(withPath(partialPath, t.entityTypeMustBe('partial')));
+      if (partial.id !== basename(partialPath, '.md')) errors.push(withPath(partialPath, t.idMustMatchFileName(basename(partialPath, '.md'))));
+      if (partial.runId !== run.id) errors.push(withPath(partialPath, t.runIdMustBe(run.id)));
+      if (!STATUS_VALUES.includes(partial.status)) errors.push(withPath(partialPath, t.invalidStatus(partial.status)));
+      if (partial.graphType !== 'run') errors.push(withPath(partialPath, t.invalidEowGraphType(partial.graphType)));
+      if (partial.attachedToType !== 'runNode') errors.push(withPath(partialPath, t.invalidEowAttachedToType(partial.attachedToType)));
+      if (!graphNodes.has(partial.attachedToId) || graphNodes.get(partial.attachedToId).entityType !== 'runNode') {
+        errors.push(withPath(partialPath, t.eowAttachedRunNodeNotFound(partial.attachedToId)));
+      }
+      const partialRecord = { ...partial, path: partialPath };
+      addPartial(partialRecord, partialPath);
+      runRecord.partials.push(partialRecord);
     }
   };
 
@@ -678,6 +717,9 @@ export function parseProject(projectDir) {
     if (isPolicyApprovedEow(eow)) policyApprovedRunEowClosureCount += 1;
     if (isManualAttestedEow(eow)) manualAttestedRunEowClosureCount += 1;
   }
+  const partialTaskCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'task' && partial.attachedToType === 'task').length;
+  const partialRunCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'run' && partial.attachedToType === 'runNode').length;
+  const partialCount = partialTaskCount + partialRunCount;
   const openBlockerCount = [...tasks.values()].filter((task) => task.status === 'blocked').length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
   const structuralComplete = terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0;
   const policyApprovedComplete = structuralComplete
@@ -709,6 +751,9 @@ export function parseProject(projectDir) {
     runEowClosureCount,
     policyApprovedRunEowClosureCount,
     manualAttestedRunEowClosureCount,
+    partialTaskCount,
+    partialRunCount,
+    partialCount,
     waitingDelegationCount,
     openBlockerCount,
     structuralComplete,
@@ -718,7 +763,7 @@ export function parseProject(projectDir) {
     complete: structuralComplete,
   };
 
-  return { projectDir, project, taskGroups, versions, tasks, snapshots, runs, runNodes, runEdges, eowNodes, errors, warnings, language, closure };
+  return { projectDir, project, taskGroups, versions, tasks, snapshots, runs, runNodes, runEdges, eowNodes, partialNodes, errors, warnings, language, closure };
 }
 
 function isPolicyApprovedEow(eow) {
@@ -960,6 +1005,7 @@ export function summarizeProject(parsed) {
   const runNodes = [...parsed.runNodes.values()];
   const runEdges = [...parsed.runEdges.values()];
   const eowNodes = [...(parsed.eowNodes?.values() || [])];
+  const partialNodes = [...(parsed.partialNodes?.values() || [])];
   const countsByStatus = STATUS_VALUES.map((status) => [status, tasks.filter((t) => t.status === status).length]);
   const countsByReadiness = RUN_READINESS_VALUES.map((value) => [value, tasks.filter((task) => classifyTaskReadiness(task).runReadiness === value).length]);
   const activeSnapshot = project.activeSnapshotId ? parsed.snapshots.get(project.activeSnapshotId) : null;
@@ -980,6 +1026,7 @@ export function summarizeProject(parsed) {
     `- ${SUMMARY_LABELS.runNodes}: ${runNodes.length}`,
     `- ${SUMMARY_LABELS.runEdges}: ${runEdges.length}`,
     `- ${SUMMARY_LABELS.eowNodes}: ${eowNodes.length}`,
+    `- ${SUMMARY_LABELS.partialNodes}: ${partialNodes.length}`,
     `- ${SUMMARY_LABELS.taskEowCoverage}: ${closure.terminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}`,
     `- ${SUMMARY_LABELS.structuralClosure}: ${closure.structuralComplete === true ? 'complete' : 'open'}`,
     `- ${SUMMARY_LABELS.policyApprovedClosure}: ${closure.policyApprovedComplete === true ? 'complete' : 'incomplete'} (tasks ${closure.policyApprovedTerminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}, run closures ${closure.policyApprovedRunEowClosureCount ?? 0}/${closure.runEowClosureCount ?? 0})`,
@@ -988,6 +1035,7 @@ export function summarizeProject(parsed) {
     `- ${SUMMARY_LABELS.waitingDelegations}: ${closure.waitingDelegationCount ?? 0}`,
     `- ${SUMMARY_LABELS.openBlockers}: ${closure.openBlockerCount ?? 0}`,
     `- ${SUMMARY_LABELS.workCompletion}: ${closure.complete === true ? 'complete' : 'open'}`,
+    `- ${SUMMARY_LABELS.partialNodes}: ${closure.partialCount ?? partialNodes.length}`,
     '',
     `## ${SUMMARY_LABELS.taskStatusCounts}`,
     ...countsByStatus.map(([status, count]) => `- ${status}: ${count}`),
@@ -1035,6 +1083,14 @@ export function summarizeProject(parsed) {
     for (const eow of eowNodes.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
       const target = eow.runId ? `${eow.runId}/${eow.attachedToId}` : eow.attachedToId;
       lines.push(`- EoW ${eow.id} [${eow.graphType}] -> ${eow.attachedToType}:${target} (${eow.reason})`);
+    }
+  }
+  lines.push('', '## Partial markers');
+  if (partialNodes.length === 0) lines.push(`- ${t.none}`);
+  else {
+    for (const partial of partialNodes.sort((a,b)=>String(a.id).localeCompare(String(b.id)))) {
+      const target = partial.runId ? `${partial.runId}/${partial.attachedToId}` : partial.attachedToId;
+      lines.push(`- Partial ${partial.id} [${partial.graphType}] -> ${partial.attachedToType}:${target} (${partial.reason})`);
     }
   }
   if (parsed.errors.length) {

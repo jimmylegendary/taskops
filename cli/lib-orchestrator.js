@@ -365,6 +365,7 @@ async function runClaimedQueueItemWorker(workDir, {
       stopReason: worker.timedOut ? 'timeout' : 'error',
       stopDetail: errorSummary,
       stepsRun: 0,
+      partialCompletions: [],
       actions: [],
     };
   }
@@ -586,6 +587,7 @@ export function runQueueOnce(workDir, options = {}) {
       stopDetail: errorSummary,
       stepsRun: 0,
       tasks: [],
+      partialCompletions: [],
       actions: [],
     };
   } finally {

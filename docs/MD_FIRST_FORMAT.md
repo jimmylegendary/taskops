@@ -33,6 +33,8 @@ Derived artifacts such as canvas views, summaries, or exports must stay explicit
             <task-id>.md
           eow/
             <eow-id>.md
+          partials/
+            <partial-id>.md
   snapshots/
     <snapshot-id>.md
   runs/
@@ -43,6 +45,8 @@ Derived artifacts such as canvas views, summaries, or exports must stay explicit
         <eow-id>.md
       edges/
         <run-edge-id>.md
+      partials/
+        <partial-id>.md
       run-log.md
   derived/
     canvases/
@@ -326,6 +330,35 @@ Suggested fields:
 
 Run EoW nodes should usually be connected by a `runEdge` with `edgeType: closes_with`.
 
+### Partial markers
+
+Partial markers record honest unfinished progress. They are deliberately **not** EoW nodes:
+they do not close task branches, do not close run paths, and do not occupy canonical
+`eow-<id>` slots.
+
+Paths:
+- `task-groups/<task-group-id>/versions/<version-id>/partials/<partial-id>.md`
+- `runs/<run-id>/partials/<partial-id>.md`
+
+Suggested fields:
+- `entityType: partial`
+- `id`
+- `graphType: task | run`
+- `attachedToType: task | runNode`
+- `attachedToId`
+- `taskGroupVersionId` for task partials
+- `runId` for run partials
+- `reason: partial_complete`
+- `completedSummary`
+- `incompleteSummary`
+- `followUpNeeded: true`
+- `supersededBy: null`
+- `budget`
+- `declaredBy`
+- `declaredAt`
+- `createdAt`
+- `status: active`
+
 ### RunEdge
 
 Path:
@@ -372,6 +405,7 @@ Validator should check at least:
 - optional invariant warnings for coverage / orthogonality / closure quality
 - only one active version per task group unless explicitly marked otherwise
 - active-snapshot terminal task branches have EoW nodes
+- partial markers do not satisfy EoW coverage
 
 ### Snapshots
 - selected task groups exist
@@ -386,6 +420,7 @@ Validator should check at least:
 - task `runRefs` and run-node `sourceTaskId` agree bidirectionally
 - delegated/waiting nodes include enough request/delegatee metadata
 - done terminal run paths have EoW nodes
+- run partial markers do not create `closes_with` edges
 
 ### Policy-aware closure
 - structural closure is reported separately from policy-approved closure

@@ -33,7 +33,7 @@ Usage:
   taskops next <work-dir> [--json]
   taskops explain <work-dir> [--json]
   taskops review <work-dir> <run-node-id|task-id> [--json]
-  taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
+  taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
   taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
@@ -220,6 +220,7 @@ try {
       runNodes: [...parsed.runNodes.values()],
       runEdges: [...parsed.runEdges.values()],
       eowNodes: [...parsed.eowNodes.values()],
+      partialNodes: [...(parsed.partialNodes?.values() || [])],
       closure: parsed.closure,
       errors: parsed.errors,
       warnings: parsed.warnings,
@@ -306,13 +307,30 @@ try {
     if (!workDir) fail('Missing close work-dir');
     if (!targetId) fail('Missing close target id');
     const reason = flags.reason && flags.reason !== true ? String(flags.reason) : null;
-    const result = closeTarget(workDir, targetId, { reason });
+    const followUpNeeded = flags['follow-up-needed'] == null
+      ? true
+      : !(flags['follow-up-needed'] === false || flags['follow-up-needed'] === 'false');
+    const budget = flags['budget-json'] && flags['budget-json'] !== true
+      ? JSON.parse(String(flags['budget-json']))
+      : null;
+    const result = closeTarget(workDir, targetId, {
+      reason,
+      completedSummary: flags['completed-summary'] && flags['completed-summary'] !== true ? String(flags['completed-summary']) : null,
+      incompleteSummary: flags['incomplete-summary'] && flags['incomplete-summary'] !== true ? String(flags['incomplete-summary']) : null,
+      followUpNeeded,
+      budget,
+    });
     if (flags.json) console.log(JSON.stringify(result, null, 2));
     else {
       const t = result.target;
       const targetStr = t.type === 'runNode' ? `runNode ${t.runId}/${t.id}` : `task ${t.id} (version ${t.taskGroupVersionId})`;
-      console.log(`closed ${targetStr} via EoW '${result.eowId}' (reason=${result.reason})`);
-      console.log(result.eowPath);
+      if (result.partial) {
+        console.log(`recorded partial ${targetStr} via marker '${result.partialId}' (reason=${result.reason})`);
+        console.log(result.partialPath);
+      } else {
+        console.log(`closed ${targetStr} via EoW '${result.eowId}' (reason=${result.reason})`);
+        console.log(result.eowPath);
+      }
     }
     process.exit(0);
   }

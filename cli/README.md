@@ -26,6 +26,7 @@ TaskOps keeps those layers separate so an agent or human can make honest decisio
 - `snapshots/` — selected version paths through the task graph.
 - `runs/<run-id>/` — independent execution graphs.
 - `eow` — explicit **End of Work** nodes attached to terminal task/run branches.
+- `partial` — honest unfinished progress markers; they do not satisfy EoW closure.
 - `runRefs` — task-side references to run nodes.
 - `sourceTaskId` / `sourceTaskGroupVersionId` — run-side references back to the task graph.
 - `type: delegate` + `status: waiting` — explicit human/AI/agent delegation points.
@@ -92,7 +93,7 @@ taskops classify-runnable <work-dir> <task-id> [--json]
 taskops next <work-dir> [--json]
 taskops explain <work-dir> [--json]
 taskops review <work-dir> <run-node-id|task-id> [--json]
-taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
+taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
 taskops unblock-check <work-dir> [--dry-run] [--json]
 taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
 taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
@@ -125,7 +126,7 @@ These read-only/guarded commands are the "honest loop" surface. They never lie a
 - `taskops next <work-dir> [--json]` — return the one next honest action: `execute`, `decompose`, `explore`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. The output also includes the target task or run node and a recommended command. It does not mutate state.
 - `taskops explain <work-dir> [--json]` — explain why the work is or is not done. Reports the closure summary, the next honest action, and the concrete reasons the work is still open (missing terminal EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors). It does not mutate state.
 - `taskops review <work-dir> <run-node-id|task-id> [--json]` — write or refresh a `type: review` run node with `reviewReport`. The report compares task `acceptance` (or `completionCriteria` fallback) against the run node's observed result, records `approved | rejected | needs_verification`, and attaches approved review hashes to existing EoW nodes when possible. `acceptance.semanticAssertions` (alias: `acceptance.assertions`) supports deterministic review fields: `contentIncludes`, `contentExcludes`, `requiredUrls`, `requiredArtifactIdentities`, `requiredSources`/`requiredCitations`, `forbiddenUrls`, `forbiddenArtifacts`, and `requiredCoverage`.
-- `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. Refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied (in which case the task status is also flipped to `done` so closure counts stay honest). Refuses to close a run node that is not `done`/`cancelled` unless an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied; refuses delegated/waiting nodes unless one of `manual_verified|cancelled|superseded` is given. On success it writes an EoW file (and a `closes_with` run edge for run nodes).
+- `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. Refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied (in which case the task status is also flipped to `done` so closure counts stay honest). Refuses to close a run node that is not `done`/`cancelled` unless an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied; refuses delegated/waiting nodes unless one of `manual_verified|cancelled|superseded` is given. On success it writes an EoW file (and a `closes_with` run edge for run nodes). `--reason partial_complete` is different: it writes an `entityType: partial` marker under `partials/`, leaves status unchanged, does not create EoW coverage, and keeps later canonical EoW closure possible.
 
 ```bash
 taskops next ./my-work --json
@@ -133,6 +134,7 @@ taskops explain ./my-work
 taskops audit ./my-work --strict
 taskops review ./my-work task-foo --json
 taskops close ./my-work task-foo --reason manual_verified
+taskops close ./my-work task-foo --reason partial_complete --completed-summary "Built draft parser" --incomplete-summary "Needs follow-up tests and review"
 ```
 
 Semantic review assertions compare against `runNode.result.observed`: `content`/`contentText`/`outcomeSummary` for content, `urlRefs`/`urls` for URL identity, `artifactRefs` for artifact identity, `sourceRefs`/`citationRefs` for sources, and `coverage` for required coverage labels. For `enforced`, `guarded`, and `runner-managed` acceptance, a non-approved review blocks runner-managed closure; `informational` remains advisory for legacy/manual workflows.
@@ -382,6 +384,8 @@ Restart semantics:
             <task-id>.md
           eow/
             <eow-id>.md
+          partials/
+            <partial-id>.md
   snapshots/
     <snapshot-id>.md
   runs/
@@ -392,6 +396,8 @@ Restart semantics:
         <eow-id>.md
       edges/
         <run-edge-id>.md
+      partials/
+        <partial-id>.md
   derived/
     canvases/
     views/

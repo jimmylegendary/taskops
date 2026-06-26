@@ -129,6 +129,13 @@ Rules:
 - A run path is not execution-closed until its terminal run node has an attached run-graph EoW node.
 - EoW does not mean the whole work is complete by itself; it closes one branch/path.
 
+### 2.5.1 Partial
+
+Partial markers record honest unfinished progress for a task or run node. They are separate
+`entityType: partial` records, not EoW nodes. A partial marker says "some real progress
+exists, but follow-up is still needed"; it must not flip task status to `done`, must not
+occupy the canonical EoW slot, and must not satisfy terminal EoW coverage.
+
 ### 2.6 VersionSnapshot
 
 A selected version path across connected task groups.
@@ -334,7 +341,7 @@ Run graph answers:
 Closure answers:
 > Is the graph structurally closed, policy-approved by review evidence, or only manually attested?
 
-Structural closure means every selected terminal task and terminal run path has EoW coverage with no waiting/delegated/blocked work left. Policy-approved closure is stricter: relevant EoW nodes must carry approved review hashes, reviewed acceptance/result hashes, and a policy-bearing review mode (`enforced`, `guarded`, or `runner-managed`). Informational and manual-attested closure remain valid for legacy/manual workflows, but summaries report them separately from policy-approved closure.
+Structural closure means every selected terminal task and terminal run path has EoW coverage with no waiting/delegated/blocked work left. Partial markers are not EoW coverage; a work with only partial progress remains open until real terminal closure or follow-up resolution exists. Policy-approved closure is stricter: relevant EoW nodes must carry approved review hashes, reviewed acceptance/result hashes, and a policy-bearing review mode (`enforced`, `guarded`, or `runner-managed`). Informational and manual-attested closure remain valid for legacy/manual workflows, but summaries report them separately from policy-approved closure.
 
 ### 7.3 Honest divergence
 

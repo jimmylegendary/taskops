@@ -1266,6 +1266,104 @@ function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
   }
 }
 
+function partialIdTimestamp(iso) {
+  return new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+function safeIdPart(value) {
+  return String(value || 'target').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'target';
+}
+
+function uniquePartialPath(dir, baseId) {
+  let id = baseId;
+  let path = join(dir, `${id}.md`);
+  let counter = 2;
+  while (existsSync(path)) {
+    id = `${baseId}-${counter}`;
+    path = join(dir, `${id}.md`);
+    counter += 1;
+  }
+  return { id, path };
+}
+
+function normalizePartialOptions({ targetLabel, declaredAt, options = {} }) {
+  return {
+    completedSummary: sanitizeFmScalar(
+      options.completedSummary,
+      { maxLen: 1000, fallback: `Partial progress recorded for ${targetLabel} at ${declaredAt}.` },
+    ),
+    incompleteSummary: sanitizeFmScalar(
+      options.incompleteSummary,
+      { maxLen: 1000, fallback: `Remaining work for ${targetLabel} still requires follow-up.` },
+    ),
+    followUpNeeded: options.followUpNeeded !== false,
+    budget: options.budget && typeof options.budget === 'object' && !Array.isArray(options.budget)
+      ? options.budget
+      : { enabled: false },
+  };
+}
+
+function writeTaskPartialMarker({ task, declaredAt, options = {} }) {
+  const versionDir = dirname(dirname(task.path));
+  const partialDir = join(versionDir, 'partials');
+  ensureDir(partialDir);
+  const partialOptions = normalizePartialOptions({ targetLabel: `task ${task.id}`, declaredAt, options });
+  const baseId = `partial-${safeIdPart(task.id)}-${partialIdTimestamp(declaredAt)}`;
+  const { id: partialId, path: partialPath } = uniquePartialPath(partialDir, baseId);
+  const partialFm = {
+    taskOpsVersion: 'v1',
+    entityType: 'partial',
+    id: partialId,
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: task.id,
+    taskGroupVersionId: task.taskGroupVersionId,
+    reason: 'partial_complete',
+    declaredBy: 'taskops-close',
+    declaredAt,
+    createdAt: declaredAt,
+    status: 'active',
+    completedSummary: partialOptions.completedSummary,
+    incompleteSummary: partialOptions.incompleteSummary,
+    followUpNeeded: partialOptions.followUpNeeded,
+    supersededBy: 'null',
+    budget: partialOptions.budget,
+  };
+  writeTextFileAtomic(partialPath, fmBlock(partialFm) + `# Partial: ${task.id}\n`);
+  return { partialId, partialPath, partial: partialFm };
+}
+
+function writeRunPartialMarker({ projectDir, runNode, declaredAt, options = {} }) {
+  const runDir = join(projectDir, 'runs', runNode.runId);
+  const partialDir = join(runDir, 'partials');
+  ensureDir(partialDir);
+  const targetLabel = `run node ${runNode.runId}/${runNode.id}`;
+  const partialOptions = normalizePartialOptions({ targetLabel, declaredAt, options });
+  const baseId = `partial-${safeIdPart(runNode.id)}-${partialIdTimestamp(declaredAt)}`;
+  const { id: partialId, path: partialPath } = uniquePartialPath(partialDir, baseId);
+  const partialFm = {
+    taskOpsVersion: 'v1',
+    entityType: 'partial',
+    id: partialId,
+    runId: runNode.runId,
+    graphType: 'run',
+    attachedToType: 'runNode',
+    attachedToId: runNode.id,
+    reason: 'partial_complete',
+    declaredBy: 'taskops-close',
+    declaredAt,
+    createdAt: declaredAt,
+    status: 'active',
+    completedSummary: partialOptions.completedSummary,
+    incompleteSummary: partialOptions.incompleteSummary,
+    followUpNeeded: partialOptions.followUpNeeded,
+    supersededBy: 'null',
+    budget: partialOptions.budget,
+  };
+  writeTextFileAtomic(partialPath, fmBlock(partialFm) + `# Partial: ${runNode.id}\n`);
+  return { partialId, partialPath, partial: partialFm };
+}
+
 function writeReviewForRunNode({ projectDir, task, runNode }) {
   const runDir = join(projectDir, 'runs', runNode.runId);
   const reviewNodeId = `review-${runNode.id}`;
@@ -1979,7 +2077,13 @@ export function reviewTarget(workDir, targetId) {
 const RUN_NODE_OVERRIDE_REASONS = new Set(['manual_verified', 'manual_close', 'failure', 'superseded', 'cancelled']);
 const DELEGATION_OVERRIDE_REASONS = new Set(['manual_verified', 'cancelled', 'superseded']);
 
-export function closeTarget(workDir, targetId, { reason = null } = {}) {
+export function closeTarget(workDir, targetId, {
+  reason = null,
+  completedSummary = null,
+  incompleteSummary = null,
+  followUpNeeded = true,
+  budget = null,
+} = {}) {
   if (!targetId) throw new Error('Missing close target id');
   const projectDir = resolveSingleProject(workDir);
   const parsed = parseProject(projectDir);
@@ -1994,6 +2098,26 @@ export function closeTarget(workDir, targetId, { reason = null } = {}) {
     const task = target.task;
     const existing = [...parsed.eowNodes.values()].find((e) => e.graphType === 'task' && e.attachedToId === task.id && e.taskGroupVersionId === task.taskGroupVersionId);
     if (existing) throw new Error(`Task '${task.id}' (version ${task.taskGroupVersionId}) already closed by EoW '${existing.id}'`);
+
+    if (declaredReason === 'partial_complete') {
+      const marker = writeTaskPartialMarker({
+        task,
+        declaredAt,
+        options: { completedSummary, incompleteSummary, followUpNeeded, budget },
+      });
+      return {
+        workId: parsed.project.id,
+        projectDir,
+        target: { type: 'task', id: task.id, taskGroupId: task.taskGroupId, taskGroupVersionId: task.taskGroupVersionId },
+        reason: declaredReason,
+        partial: true,
+        closed: false,
+        statusFlipped: false,
+        partialCompletion: marker.partial,
+        partialId: marker.partialId,
+        partialPath: marker.partialPath,
+      };
+    }
 
     if (task.childTaskGroupId) {
       const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
@@ -2067,6 +2191,26 @@ export function closeTarget(workDir, targetId, { reason = null } = {}) {
   const node = target.runNode;
   const existing = [...parsed.eowNodes.values()].find((e) => e.graphType === 'run' && e.runId === node.runId && e.attachedToId === node.id);
   if (existing) throw new Error(`Run node '${node.runId}/${node.id}' already closed by EoW '${existing.id}'`);
+
+  if (declaredReason === 'partial_complete') {
+    const marker = writeRunPartialMarker({
+      projectDir,
+      runNode: node,
+      declaredAt,
+      options: { completedSummary, incompleteSummary, followUpNeeded, budget },
+    });
+    return {
+      workId: parsed.project.id,
+      projectDir,
+      target: { type: 'runNode', runId: node.runId, id: node.id },
+      reason: declaredReason,
+      partial: true,
+      closed: false,
+      partialCompletion: marker.partial,
+      partialId: marker.partialId,
+      partialPath: marker.partialPath,
+    };
+  }
 
   const statusOk = ['done', 'cancelled'].includes(node.status);
   if (!statusOk && !RUN_NODE_OVERRIDE_REASONS.has(declaredReason)) {
@@ -2373,6 +2517,9 @@ export function runTaskOps(workDir, options = {}) {
 
     if (!stopReason) stopReason = STOP_REASONS.NO_RUNNABLE;
     finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
+    const partialCompletions = actions
+      .map((action) => action?.partialCompletion)
+      .filter(Boolean);
 
     const stoppedAt = isoNow();
     logEvent(eventsPath, {
@@ -2388,6 +2535,7 @@ export function runTaskOps(workDir, options = {}) {
       until: until != null ? new Date(until).toISOString() : null,
       executor,
       loopbackPolicy, maxLoopbacks, loopbacksUsed, actorName,
+      partialCompletions,
       eventsPath,
       tasks: actions,
       actions,

@@ -79,6 +79,10 @@ function manualEows(parsed) {
   return [...parsed.eowNodes.values()].filter((eow) => ['manual_verified', 'manual_close'].includes(eow.reason));
 }
 
+function partialMarkers(parsed) {
+  return [...(parsed.partialNodes?.values() || [])];
+}
+
 function objectiveLooksComplex(parsed) {
   const text = [
     parsed.project?.title,
@@ -129,6 +133,25 @@ function auditClosureIntegrity(parsed) {
   const issues = [];
   const closure = parsed.closure || {};
   const manuals = manualEows(parsed);
+  const partials = partialMarkers(parsed);
+
+  if (partials.length > 0) {
+    issues.push(issue({
+      code: 'work_has_partial_completions',
+      severity: 'warning',
+      message: `${partials.length} partial completion marker(s) are present; this is honest unfinished work and cannot support a completion claim until superseded by follow-up or approved closure.`,
+      evidence: {
+        partialCount: partials.length,
+        examples: partials.slice(0, 5).map((partial) => ({
+          id: partial.id,
+          graphType: partial.graphType,
+          attachedToId: partial.attachedToId,
+          supersededBy: partial.supersededBy ?? null,
+          path: partial.path,
+        })),
+      },
+    }));
+  }
 
   if (manuals.length > 0) {
     issues.push(issue({
@@ -245,9 +268,11 @@ export function auditParsedWork(parsed, options = {}) {
     ...auditProjectionConsistency(parsed, options),
   ];
   const counts = severityCounts(issues);
+  const partialCount = partialMarkers(parsed).length;
   const claimSafe = (counts.error || 0) === 0
     && parsed.errors.length === 0
-    && parsed.closure?.policyApprovedComplete === true;
+    && parsed.closure?.policyApprovedComplete === true
+    && partialCount === 0;
   return {
     workId: parsed.project?.id || null,
     projectDir: parsed.projectDir,
@@ -261,6 +286,7 @@ export function auditParsedWork(parsed, options = {}) {
       selectedChildTaskGroupCount: selectedChildTaskGroupCount(parsed),
       taskGroupVersionCount: parsed.versions.size,
       manualEowCount: manualEows(parsed).length,
+      partialCount,
       closureState: parsed.closure?.closureState || 'open',
       policyApprovedComplete: parsed.closure?.policyApprovedComplete === true,
       structuralComplete: parsed.closure?.structuralComplete === true,
@@ -276,7 +302,7 @@ export function renderAuditText(audit) {
     `work=${audit.workId || 'unknown'} claimSafe=${audit.claimSafe}`,
     `counts error=${audit.counts.error || 0} warning=${audit.counts.warning || 0} info=${audit.counts.info || 0}`,
     `metrics selectedTasks=${audit.metrics.selectedTaskCount} terminalTasks=${audit.metrics.terminalSelectedTaskCount} selectedGroups=${audit.metrics.selectedTaskGroupCount} childGroups=${audit.metrics.selectedChildTaskGroupCount} versions=${audit.metrics.taskGroupVersionCount}`,
-    `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount}`,
+    `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount} partial=${audit.metrics.partialCount}`,
   ];
   if (audit.validationErrors.length > 0) {
     lines.push('validation errors:');
