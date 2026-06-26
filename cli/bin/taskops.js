@@ -16,6 +16,7 @@ import {
   writeSummary,
   writeVersionFromSpec,
 } from '../lib-taskops.js';
+import { auditParsedWork, renderAuditText } from '../lib-audit.js';
 import { closeTarget, computeNextAction, explainWork, recheckBlockedTasks, reviewTarget, runTaskOps } from '../lib-runner.js';
 
 function usage() {
@@ -25,6 +26,7 @@ Usage:
   taskops init <dir> --id <work-id> --title <title> --objective <objective> [--language <code>]
   taskops vault-init <vault-dir> [--repo-url <url>] [--branch <branch>] [--auto-sync true|false] [--language <code>] [--debounce-ms <ms>] [--commit-message <msg>]
   taskops validate <path>
+  taskops audit <work-dir> [--strict] [--max-tasks-flat <n>] [--json]
   taskops summary <path> [--write]
   taskops show <path> [--json]
   taskops classify-runnable <work-dir> <task-id> [--json]
@@ -157,6 +159,23 @@ try {
       for (const warning of parsed.warnings) console.error(`WARN ${warning}`);
     }
     process.exit(errorCount === 0 ? 0 : 1);
+  }
+
+  if (cmd === 'audit') {
+    const pathArg = positional[1];
+    if (!pathArg) fail('Missing audit work-dir');
+    const parsed = parseOne(pathArg);
+    const maxFlatTasks = flags['max-tasks-flat'] && flags['max-tasks-flat'] !== true
+      ? Number(flags['max-tasks-flat'])
+      : undefined;
+    if (maxFlatTasks != null && (!Number.isFinite(maxFlatTasks) || maxFlatTasks < 1)) {
+      fail(`Invalid --max-tasks-flat value: ${flags['max-tasks-flat']}`);
+    }
+    const audit = auditParsedWork(parsed, { maxFlatTasks });
+    if (flags.json) console.log(JSON.stringify(audit, null, 2));
+    else process.stdout.write(renderAuditText(audit));
+    const strict = flags.strict === true;
+    process.exit(strict && !audit.claimSafe ? 1 : 0);
   }
 
   if (cmd === 'summary') {

@@ -85,6 +85,7 @@ TaskOps tells agents how the work is actually getting done.
 ```bash
 taskops init <dir> --id <id> --title <title> --objective <objective> [--language en|ko]
 taskops validate <path>
+taskops audit <work-dir> [--strict] [--max-tasks-flat <n>] [--json]
 taskops summary <path> [--write]
 taskops show <path> [--json]
 taskops classify-runnable <work-dir> <task-id> [--json]
@@ -129,11 +130,20 @@ These read-only/guarded commands are the "honest loop" surface. They never lie a
 ```bash
 taskops next ./my-work --json
 taskops explain ./my-work
+taskops audit ./my-work --strict
 taskops review ./my-work task-foo --json
 taskops close ./my-work task-foo --reason manual_verified
 ```
 
 Semantic review assertions compare against `runNode.result.observed`: `content`/`contentText`/`outcomeSummary` for content, `urlRefs`/`urls` for URL identity, `artifactRefs` for artifact identity, `sourceRefs`/`citationRefs` for sources, and `coverage` for required coverage labels. For `enforced`, `guarded`, and `runner-managed` acceptance, a non-approved review blocks runner-managed closure; `informational` remains advisory for legacy/manual workflows.
+
+`taskops audit <work-dir>` is a read-only work-level claim gate layered on top of schema validation. It checks whether a work tree is safe to cite as strong progress or completion:
+
+- complex objectives with only a small flat selected task list and no selected child task groups are flagged as inadequate decomposition
+- `manual_verified` / `manual_close` EoW nodes make `claimSafe=false`, even when structural closure is complete
+- SQLite queue rows, active leases, or running attempts that contradict closed markdown tasks are reported as projection mismatches
+
+Use `--strict` before benchmark claims, paper claims, release notes, or unattended-work reports; strict mode exits non-zero when `claimSafe=false`. `--max-tasks-flat <n>` controls the complex-objective flat task threshold and defaults to 12.
 
 ## Queue projection
 

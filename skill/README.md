@@ -35,6 +35,7 @@ Derived canvas/views are not.
 ```bash
 taskops init <work-dir> --id <id> --title <title> --objective <objective>
 taskops validate <work-dir>
+taskops audit <work-dir> --strict
 taskops summary <work-dir>
 taskops classify-runnable <work-dir> <task-id> --json
 taskops run <work-dir> --executor dry-run --max-steps 1 --json
@@ -58,8 +59,11 @@ Prefer the CLI for current validation and summaries:
 
 ```bash
 taskops validate <work-dir>
+taskops audit <work-dir> --strict
 taskops summary <work-dir>
 ```
+
+Use `taskops audit --strict` before treating TaskOps output as a strong paper, benchmark, release, or unattended-work completion claim. It is the work-level claim gate for shallow flat decomposition, manual EoW closure, structural-but-unapproved completion, and queue projection mismatches.
 
 For a git-backed Obsidian vault workflow:
 

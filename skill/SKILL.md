@@ -61,6 +61,7 @@ Use the npm CLI first:
 
 ```bash
 taskops validate <path>
+taskops audit <work-dir> [--strict] [--max-tasks-flat <n>] [--json]
 taskops summary <path>
 taskops show <path> --json
 taskops classify-runnable <work-dir> <task-id> --json
@@ -94,10 +95,11 @@ taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instructio
 
 ## Honest-loop commands
 
-These three commands are the small surface area that keeps long-running agents honest. They never silently mutate progress:
+These commands are the small surface area that keeps long-running agents honest. They never silently mutate progress:
 
 - `taskops next <work-dir> --json` — returns the one next honest action: `execute`, `decompose`, `explore`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. Use it instead of guessing what to do next.
 - `taskops explain <work-dir> --json` — explains why work is or is not closed: closure summary, next honest action, and concrete open reasons (missing EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors).
+- `taskops audit <work-dir> [--strict] [--max-tasks-flat <n>] [--json]` — checks whether a work tree is safe to cite as a strong progress/completion claim. It flags shallow flat decomposition for complex objectives, manual EoW closure, structural-but-unapproved completion, stale queue projection rows, and closed markdown tasks that still have active queue rows/leases/attempts. Use `--strict` before paper, benchmark, release, or unattended-work claims.
 - `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. It refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied. It refuses to close a run node unless its status is `done`/`cancelled` or an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied. Use this rather than editing EoW files by hand.
 
 ## Running TaskOps work
@@ -166,6 +168,7 @@ Run:
 
 ```bash
 taskops validate <work-dir>
+taskops audit <work-dir> --strict
 taskops summary <work-dir>
 ```
 
