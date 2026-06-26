@@ -9,6 +9,7 @@ import {
   initProject,
   initVaultRepo,
   parseProject,
+  planPartialPromotions,
   restartFromTask,
   summarizeProject,
   syncVaultRepo,
@@ -34,6 +35,7 @@ Usage:
   taskops explain <work-dir> [--json]
   taskops review <work-dir> <run-node-id|task-id> [--json]
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
+  taskops promote-partials <work-dir> [--dry-run] [--partial-id <id>] [--max-follow-up-depth <n>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
   taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
@@ -356,6 +358,39 @@ try {
       if (result.reviewReport.failedChecks.length > 0) {
         console.log('failed checks:');
         for (const item of result.reviewReport.failedChecks) console.log(`- ${item}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (cmd === 'promote-partials') {
+    const workDir = positional[1];
+    if (!workDir) fail('Missing promote-partials work-dir');
+    const partialId = flags['partial-id'] && flags['partial-id'] !== true ? String(flags['partial-id']) : null;
+    const maxFollowUpDepth = flags['max-follow-up-depth'] && flags['max-follow-up-depth'] !== true
+      ? Number(flags['max-follow-up-depth'])
+      : undefined;
+    if (maxFollowUpDepth !== undefined && (!Number.isFinite(maxFollowUpDepth) || maxFollowUpDepth < 0)) {
+      fail(`Invalid --max-follow-up-depth '${flags['max-follow-up-depth']}'`);
+    }
+    const result = planPartialPromotions(workDir, { partialId, maxFollowUpDepth });
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`workId=${result.workId} dryRun=true promotionCount=${result.promotionCount} skippedCount=${result.skippedCount}`);
+      if (!flags['dry-run']) {
+        console.log('note=promote-partials is dry-run only in this build; no files were changed.');
+      }
+      for (const plan of result.versionPlans) {
+        console.log(`versionPlan taskGroup=${plan.taskGroupId} from=${plan.fromVersionId} to=${plan.toVersionId} promotions=${plan.promotions.length}`);
+        for (const promotion of plan.promotions) {
+          console.log(`- partial=${promotion.partialId} sourceTask=${promotion.sourceTaskId} followUp=${promotion.followUpTaskId} depth=${promotion.followUpDepth}`);
+        }
+      }
+      if (result.skipped.length > 0) {
+        console.log('skipped:');
+        for (const skipped of result.skipped) {
+          console.log(`- partial=${skipped.partialId || '(unknown)'} reason=${skipped.reason}${skipped.detail ? ` detail=${skipped.detail}` : ''}`);
+        }
       }
     }
     process.exit(0);

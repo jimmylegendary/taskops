@@ -14,6 +14,7 @@ export const EOW_ATTACHED_TO_TYPES = ['task', 'runNode'];
 export const TASKOPS_SYNC_DIR = '.taskops';
 export const TASKOPS_SYNC_CONFIG = 'taskops-sync.json';
 export const DEFAULT_LANGUAGE = 'en';
+export const DEFAULT_MAX_FOLLOW_UP_DEPTH = 1;
 
 const SUMMARY_LABELS = Object.freeze({
   projectId: 'Work ID',
@@ -189,6 +190,13 @@ function localeBundle(language = DEFAULT_LANGUAGE) {
 
 function withPath(filePath, message) {
   return `${filePath}: ${message}`;
+}
+
+export function isPartialUnresolved(partial) {
+  const value = partial?.supersededBy;
+  if (value == null) return true;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized === '' || normalized === 'null';
 }
 
 export function parseScalar(value) {
@@ -1426,13 +1434,15 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary']) {
       if (task[key] !== undefined && task[key] !== null && task[key] !== '') fm[key] = task[key];
     }
     if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
+    if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
+    if (Array.isArray(task.followUpBlockedByPartialIds)) fm.followUpBlockedByPartialIds = task.followUpBlockedByPartialIds;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');
   });
   for (const eow of spec.eows || []) {
@@ -1476,6 +1486,432 @@ function deriveRestartVersionId(taskGroup, sourceVersionId) {
   let n = 1;
   while (existingIds.has(`${sourceVersionId}-restart-${n}`)) n += 1;
   return `${sourceVersionId}-restart-${n}`;
+}
+
+function safeTaskIdPart(value) {
+  return String(value || 'target')
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'target';
+}
+
+function uniqueTaskId(baseId, usedIds) {
+  let id = baseId;
+  let counter = 2;
+  while (usedIds.has(id)) {
+    id = `${baseId}-${counter}`;
+    counter += 1;
+  }
+  usedIds.add(id);
+  return id;
+}
+
+function truncateForTitle(value, maxLen = 72) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, Math.max(0, maxLen - 3)).trim()}...`;
+}
+
+function numericFollowUpDepth(task) {
+  const n = Number(task?.followUpDepth || 0);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+
+function cloneTaskForPromotion(task) {
+  const cloned = {
+    id: task.id,
+    title: task.title,
+    objective: task.objective,
+    responsibility: task.responsibility,
+    completionCriteria: task.completionCriteria,
+    order: task.order,
+    status: task.status ?? 'pending',
+  };
+  const preserveKeys = [
+    'role',
+    'purpose',
+    'runReadiness',
+    'runReadinessReason',
+    'unblockRunReadiness',
+    'understandingLevel',
+    'decompositionConfidence',
+    'executionConfidence',
+    'explorationNeeded',
+    'nextLearningGoal',
+    'childTaskGroupId',
+    'preservedUpstream',
+    'preservedFromVersionId',
+    'preservedFromTaskId',
+    'restartedFromVersionId',
+    'restartedFromTaskId',
+    'restartInstruction',
+    'restartReason',
+    'restartedAt',
+    'followUpFromPartialId',
+    'followUpForTaskId',
+    'followUpForTaskGroupVersionId',
+    'followUpDepth',
+    'sourceRunId',
+    'sourceRunNodeId',
+    'followUpCompletedSummary',
+    'followUpIncompleteSummary',
+  ];
+  for (const key of preserveKeys) {
+    if (task[key] !== undefined && task[key] !== null && task[key] !== '') cloned[key] = task[key];
+  }
+  if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
+  if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
+  if (Array.isArray(task.runRefs)) cloned.runRefs = [...task.runRefs];
+  if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
+  if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
+  if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) cloned.followUpBudget = task.followUpBudget;
+  return cloned;
+}
+
+function taskKey(versionId, taskId) {
+  return `${versionId}:${taskId}`;
+}
+
+function runNodeKey(runId, nodeId) {
+  return `${runId}:${nodeId}`;
+}
+
+function selectedVersionPairs(parsed) {
+  const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
+  return Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions.filter(Boolean) : [];
+}
+
+function selectedVersionIds(parsed) {
+  return new Set(selectedVersionPairs(parsed).map((pair) => pair.versionId).filter(Boolean));
+}
+
+function partialSkip(partial, reason, detail = null) {
+  return {
+    partialId: partial?.id || null,
+    graphType: partial?.graphType || null,
+    attachedToId: partial?.attachedToId || null,
+    reason,
+    detail,
+    path: partial?.path || null,
+  };
+}
+
+function resolvePartialSource(parsed, partial) {
+  if (partial.graphType === 'task' && partial.attachedToType === 'task') {
+    const versionId = partial.taskGroupVersionId;
+    const task = parsed.tasks.get(taskKey(versionId, partial.attachedToId));
+    if (!task) return { ok: false, reason: 'missing_attached_task', detail: `Task ${versionId}:${partial.attachedToId} not found.` };
+    return { ok: true, task, source: { type: 'task', taskId: task.id, taskGroupVersionId: task.taskGroupVersionId } };
+  }
+
+  if (partial.graphType === 'run' && partial.attachedToType === 'runNode') {
+    const node = parsed.runNodes.get(runNodeKey(partial.runId, partial.attachedToId));
+    if (!node) return { ok: false, reason: 'missing_attached_run_node', detail: `Run node ${partial.runId}:${partial.attachedToId} not found.` };
+    if (!node.sourceTaskId || !node.sourceTaskGroupVersionId) {
+      return {
+        ok: false,
+        reason: 'needs_manual_mapping',
+        detail: `Run node ${partial.runId}/${node.id} has no exact sourceTaskId/sourceTaskGroupVersionId.`,
+      };
+    }
+    const task = parsed.tasks.get(taskKey(node.sourceTaskGroupVersionId, node.sourceTaskId));
+    if (!task) {
+      return {
+        ok: false,
+        reason: 'needs_manual_mapping',
+        detail: `Source task ${node.sourceTaskGroupVersionId}:${node.sourceTaskId} was not found for run node ${partial.runId}/${node.id}.`,
+      };
+    }
+    return {
+      ok: true,
+      task,
+      runNode: node,
+      source: {
+        type: 'runNode',
+        runId: partial.runId,
+        runNodeId: node.id,
+        taskId: task.id,
+        taskGroupVersionId: task.taskGroupVersionId,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    reason: 'unsupported_partial_target',
+    detail: `Unsupported partial target ${partial.graphType}/${partial.attachedToType}.`,
+  };
+}
+
+function buildFollowUpTask({ partial, sourceTask, sourceVersion, newVersionId, followUpTaskId, followUpDepth, runNode = null }) {
+  const clipped = truncateForTitle(partial.incompleteSummary || sourceTask.title || partial.id);
+  const followUpTask = {
+    id: followUpTaskId,
+    title: `Follow up ${sourceTask.id}: ${clipped}`,
+    objective: partial.incompleteSummary || `Complete remaining work recorded by partial marker ${partial.id}.`,
+    responsibility: `Complete the unfinished work recorded by partial marker ${partial.id} for source task ${sourceTask.id}.`,
+    completionCriteria: `The incomplete work from partial marker ${partial.id} is completed with evidence, and source task ${sourceTask.id} can be unblocked for final closure.`,
+    status: 'pending',
+    runReadiness: 'runnable',
+    runReadinessReason: `Promoted from unresolved partial marker ${partial.id}; complete the recorded follow-up before returning to ${sourceTask.id}.`,
+    understandingLevel: sourceTask.understandingLevel || 'partial',
+    followUpFromPartialId: partial.id,
+    followUpForTaskId: sourceTask.id,
+    followUpForTaskGroupVersionId: sourceVersion.id,
+    followUpDepth,
+    followUpCompletedSummary: partial.completedSummary || '',
+    followUpIncompleteSummary: partial.incompleteSummary || '',
+    followUpBudget: partial.budget && typeof partial.budget === 'object' && !Array.isArray(partial.budget)
+      ? partial.budget
+      : { enabled: false },
+  };
+  if (runNode) {
+    followUpTask.sourceRunId = runNode.runId;
+    followUpTask.sourceRunNodeId = runNode.id;
+  }
+  return followUpTask;
+}
+
+function preservedEowsForPromotion(sourceVersion, newVersionId) {
+  const eows = [];
+  const sourceEowDir = join(sourceVersion.path, 'eow');
+  for (const task of sourceVersion.tasks) {
+    if ((task.status ?? 'pending') !== 'done') continue;
+    if (task.childTaskGroupId) continue;
+    const sourceEowPath = join(sourceEowDir, `eow-${task.id}.md`);
+    if (!existsSync(sourceEowPath)) continue;
+    const eowFm = parseMarkdownFile(sourceEowPath);
+    eows.push({
+      id: `eow-${task.id}-${newVersionId}`,
+      graphType: 'task',
+      attachedToType: 'task',
+      attachedToId: task.id,
+      reason: 'preserved_upstream_after_restart',
+      declaredBy: 'taskops-promote-partials',
+      status: 'done',
+      preservedFromVersionId: sourceVersion.id,
+      preservedFromEowId: eowFm.id || `eow-${task.id}`,
+    });
+  }
+  return eows;
+}
+
+function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedPair, promotions }) {
+  const newVersionId = deriveRestartVersionId(taskGroup, sourceVersion.id);
+  const usedIds = new Set(sourceVersion.tasks.map((task) => task.id));
+  const orderedTasks = [...sourceVersion.tasks].sort((a, b) => (Number(a.order ?? 0) - Number(b.order ?? 0)) || String(a.id).localeCompare(String(b.id)));
+  const promotionsByTaskId = new Map();
+
+  const plannedPromotions = promotions.map((promotion) => {
+    const baseId = `task-${safeTaskIdPart(promotion.sourceTask.id)}-followup`;
+    const followUpTaskId = uniqueTaskId(baseId, usedIds);
+    const followUpTask = buildFollowUpTask({
+      partial: promotion.partial,
+      sourceTask: promotion.sourceTask,
+      sourceVersion,
+      newVersionId,
+      followUpTaskId,
+      followUpDepth: promotion.followUpDepth,
+      runNode: promotion.runNode || null,
+    });
+    const item = {
+      ...promotion,
+      followUpTaskId,
+      followUpTask,
+      supersededBy: `task:${newVersionId}/${followUpTaskId}`,
+    };
+    const list = promotionsByTaskId.get(promotion.sourceTask.id) || [];
+    list.push(item);
+    promotionsByTaskId.set(promotion.sourceTask.id, list);
+    return item;
+  });
+
+  let nextOrder = 1;
+  const specTasks = [];
+  const sourceTaskPatches = [];
+  for (const task of orderedTasks) {
+    const cloned = cloneTaskForPromotion(task);
+    cloned.order = nextOrder;
+    nextOrder += 1;
+
+    const taskPromotions = promotionsByTaskId.get(task.id) || [];
+    if (taskPromotions.length > 0) {
+      const blockers = Array.isArray(cloned.blockedBy) ? [...cloned.blockedBy] : [];
+      const partialIds = Array.isArray(cloned.followUpBlockedByPartialIds) ? [...cloned.followUpBlockedByPartialIds] : [];
+      for (const promotion of taskPromotions) {
+        blockers.push({ type: 'task', id: promotion.followUpTaskId, taskGroupVersionId: newVersionId });
+        partialIds.push(promotion.partial.id);
+      }
+      cloned.status = 'blocked';
+      cloned.runReadiness = 'blocked';
+      cloned.unblockRunReadiness = cloned.unblockRunReadiness || 'runnable';
+      cloned.runReadinessReason = `Blocked by partial-driven follow-up task(s): ${taskPromotions.map((p) => p.followUpTaskId).join(', ')}.`;
+      cloned.blockedBy = blockers;
+      cloned.followUpBlockedByPartialIds = partialIds;
+      sourceTaskPatches.push({
+        taskId: task.id,
+        taskGroupVersionId: sourceVersion.id,
+        newTaskGroupVersionId: newVersionId,
+        status: 'blocked',
+        runReadiness: 'blocked',
+        unblockRunReadiness: cloned.unblockRunReadiness,
+        blockedByAppend: taskPromotions.map((promotion) => ({
+          type: 'task',
+          id: promotion.followUpTaskId,
+          taskGroupVersionId: newVersionId,
+          partialId: promotion.partial.id,
+        })),
+      });
+    }
+    specTasks.push(cloned);
+
+    for (const promotion of taskPromotions) {
+      promotion.followUpTask.order = nextOrder;
+      nextOrder += 1;
+      specTasks.push(promotion.followUpTask);
+    }
+  }
+
+  const specPreview = {
+    versionId: newVersionId,
+    version: newVersionId,
+    summary: `Partial-driven follow-up promotion from ${sourceVersion.id}`,
+    selected: true,
+    tasks: specTasks,
+    eows: preservedEowsForPromotion(sourceVersion, newVersionId),
+    logSeedLine: `Partial-driven follow-up promotion supersedes version ${sourceVersion.id}.`,
+  };
+
+  return {
+    taskGroupId: taskGroup.id,
+    fromVersionId: sourceVersion.id,
+    toVersionId: newVersionId,
+    snapshotId: parsed.project.activeSnapshotId || null,
+    selectedPair,
+    supersedesVersionId: sourceVersion.id,
+    reason: 'partial_follow_up_promotion',
+    promotions: plannedPromotions.map((promotion) => ({
+      partialId: promotion.partial.id,
+      graphType: promotion.partial.graphType,
+      sourceTaskId: promotion.sourceTask.id,
+      sourceTaskGroupVersionId: sourceVersion.id,
+      sourceRunId: promotion.runNode?.runId || null,
+      sourceRunNodeId: promotion.runNode?.id || null,
+      followUpTaskId: promotion.followUpTaskId,
+      followUpDepth: promotion.followUpDepth,
+      supersededBy: promotion.supersededBy,
+      incompleteSummary: promotion.partial.incompleteSummary || '',
+    })),
+    sourceTaskPatches,
+    followUpTasks: plannedPromotions.map((promotion) => promotion.followUpTask),
+    specPreview,
+  };
+}
+
+export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH } = {}) {
+  const projectDir = resolve(workDir);
+  const parsed = parseProject(projectDir);
+  if (parsed.errors.length > 0) {
+    throw new Error(`Cannot promote partials: project has validation errors:\n- ${parsed.errors.join('\n- ')}`);
+  }
+
+  const maxDepth = Math.max(0, Math.floor(Number(maxFollowUpDepth ?? DEFAULT_MAX_FOLLOW_UP_DEPTH)));
+  if (!Number.isFinite(maxDepth)) throw new Error(`Invalid --max-follow-up-depth '${maxFollowUpDepth}'`);
+
+  const pairs = selectedVersionPairs(parsed);
+  const selected = selectedVersionIds(parsed);
+  const selectedPairByVersion = new Map(pairs.map((pair) => [pair.versionId, pair]));
+  const candidates = [...parsed.partialNodes.values()]
+    .filter((partial) => !partialId || partial.id === partialId)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  if (partialId && candidates.length === 0) throw new Error(`Partial '${partialId}' not found`);
+
+  const skipped = [];
+  const groups = new Map();
+  for (const partial of candidates) {
+    if (!isPartialUnresolved(partial)) {
+      skipped.push(partialSkip(partial, 'already_superseded', `supersededBy=${partial.supersededBy}`));
+      continue;
+    }
+    if (partial.followUpNeeded === false || String(partial.followUpNeeded).trim().toLowerCase() === 'false') {
+      skipped.push(partialSkip(partial, 'follow_up_not_needed'));
+      continue;
+    }
+
+    const resolved = resolvePartialSource(parsed, partial);
+    if (!resolved.ok) {
+      skipped.push(partialSkip(partial, resolved.reason, resolved.detail));
+      continue;
+    }
+
+    const sourceTask = resolved.task;
+    const sourceVersion = parsed.versions.get(sourceTask.taskGroupVersionId);
+    if (!sourceVersion) {
+      skipped.push(partialSkip(partial, 'missing_source_version', `Version ${sourceTask.taskGroupVersionId} not found.`));
+      continue;
+    }
+    if (!selected.has(sourceVersion.id)) {
+      skipped.push(partialSkip(partial, 'not_in_selected_version', `Version ${sourceVersion.id} is not selected in active snapshot.`));
+      continue;
+    }
+
+    const sourceDepth = numericFollowUpDepth(sourceTask);
+    const followUpDepth = sourceDepth + 1;
+    if (followUpDepth > maxDepth) {
+      skipped.push(partialSkip(
+        partial,
+        'exceeded_follow_up_depth',
+        `Promotion would create followUpDepth=${followUpDepth}, exceeding maxFollowUpDepth=${maxDepth}.`,
+      ));
+      continue;
+    }
+
+    const taskGroup = parsed.taskGroups.get(sourceVersion.taskGroupId);
+    if (!taskGroup) {
+      skipped.push(partialSkip(partial, 'missing_task_group', `Task group ${sourceVersion.taskGroupId} not found.`));
+      continue;
+    }
+
+    const groupKey = `${taskGroup.id}:${sourceVersion.id}`;
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, {
+        taskGroup,
+        sourceVersion,
+        selectedPair: selectedPairByVersion.get(sourceVersion.id) || null,
+        promotions: [],
+      });
+    }
+    groups.get(groupKey).promotions.push({
+      partial,
+      sourceTask,
+      sourceVersion,
+      followUpDepth,
+      runNode: resolved.runNode || null,
+    });
+  }
+
+  const versionPlans = [...groups.values()]
+    .sort((a, b) => String(a.sourceVersion.id).localeCompare(String(b.sourceVersion.id)))
+    .map((group) => buildPromotionVersionPlan({
+      parsed,
+      sourceVersion: group.sourceVersion,
+      taskGroup: group.taskGroup,
+      selectedPair: group.selectedPair,
+      promotions: group.promotions,
+    }));
+
+  return {
+    workId: parsed.project.id,
+    projectDir,
+    dryRun: true,
+    selectedVersionOnly: true,
+    maxFollowUpDepth: maxDepth,
+    partialId: partialId || null,
+    promotionCount: versionPlans.reduce((sum, plan) => sum + plan.promotions.length, 0),
+    skippedCount: skipped.length,
+    versionPlans,
+    skipped,
+  };
 }
 
 export function restartFromTask(workDir, { fromTaskId, instruction = null, instructionFile = null, reason = null } = {}) {
