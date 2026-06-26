@@ -245,7 +245,9 @@ export function auditParsedWork(parsed, options = {}) {
     ...auditProjectionConsistency(parsed, options),
   ];
   const counts = severityCounts(issues);
-  const claimSafe = (counts.error || 0) === 0 && parsed.errors.length === 0;
+  const claimSafe = (counts.error || 0) === 0
+    && parsed.errors.length === 0
+    && parsed.closure?.policyApprovedComplete === true;
   return {
     workId: parsed.project?.id || null,
     projectDir: parsed.projectDir,

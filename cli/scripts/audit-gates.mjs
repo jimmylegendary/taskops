@@ -203,6 +203,28 @@ function makeProblemWork() {
 }
 
 try {
+  const openSmallParsed = {
+    projectDir: tempRoot,
+    project: {
+      id: 'open-small-work',
+      title: 'Small open work',
+      objective: 'Check one small thing.',
+      activeSnapshotId: null,
+      activeRootTaskGroupId: 'tg-root',
+    },
+    snapshots: new Map(),
+    taskGroups: new Map([['tg-root', { id: 'tg-root', objective: 'Check one small thing.' }]]),
+    tasks: new Map(),
+    versions: new Map(),
+    eowNodes: new Map(),
+    errors: [],
+    warnings: [],
+    closure: { closureState: 'open', structuralComplete: false, policyApprovedComplete: false },
+  };
+  assert.equal(auditParsedWork(openSmallParsed).claimSafe, false, 'an open work must not be claim-safe');
+  openSmallParsed.closure = { closureState: 'policy_approved_complete', structuralComplete: true, policyApprovedComplete: true };
+  assert.equal(auditParsedWork(openSmallParsed).claimSafe, true, 'only a clean policy-approved work can be claim-safe');
+
   const workDir = makeProblemWork();
   const parsed = parseProject(workDir);
   assert.deepEqual(parsed.errors, []);
