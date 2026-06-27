@@ -27,12 +27,8 @@ function json(args, options = {}) {
   return JSON.parse(run([...args, '--json'], options));
 }
 
-function makeFakeOpenClaw() {
-  const fakePath = join(tempRoot, 'fake-openclaw');
-  const finalAssistantRawText = [
-    'Completed the verified first slice only.',
-    'TASKOPS_PARTIAL_REQUEST: {"partialRequested":true,"completedSummary":"Finished the verified first slice.","incompleteSummary":"Need the follow-up verification and final write-up.","followUpNeeded":true}',
-  ].join('\n');
+function makeFakeOpenClaw(name, finalAssistantRawText) {
+  const fakePath = join(tempRoot, name);
   writeFileSync(
     fakePath,
     `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify({ result: { finalAssistantRawText } }))});\n`,
@@ -72,7 +68,10 @@ function makeWork(id) {
 }
 
 try {
-  const fakeOpenClaw = makeFakeOpenClaw();
+  const fakeOpenClaw = makeFakeOpenClaw('fake-openclaw-partial', [
+    'Completed the verified first slice only.',
+    'TASKOPS_PARTIAL_REQUEST: {"partialRequested":true,"completedSummary":"Finished the verified first slice.","incompleteSummary":"Need the follow-up verification and final write-up.","followUpNeeded":true}',
+  ].join('\n'));
   const previousOpenClawBin = process.env.TASKOPS_OPENCLAW_BIN;
   process.env.TASKOPS_OPENCLAW_BIN = fakeOpenClaw;
 
@@ -170,6 +169,50 @@ try {
   assert.match(queueRun.report.message, /releaseStatus: partial/);
   assert.match(queueRun.report.message, /partial: execute:task-main/);
   assert.equal(parseMarkdownFile(join(queueWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-main.md')).awaitingPromotion, true);
+
+  const fakeMalformedOpenClaw = makeFakeOpenClaw('fake-openclaw-malformed-partial', [
+    'Completed a first slice, but the rest is incomplete.',
+    'TASKOPS_PARTIAL_REQUEST: {"partialRequested": true,',
+  ].join('\n'));
+  process.env.TASKOPS_OPENCLAW_BIN = fakeMalformedOpenClaw;
+  const malformedWorkDir = makeWork('partial-request-malformed-work');
+  const malformedRun = runTaskOps(malformedWorkDir, {
+    executor: 'openclaw-agent',
+    agent: 'main',
+    maxSteps: 2,
+    maxStepsExplicit: true,
+    targetTaskId: 'task-main',
+    targetTaskGroupVersionId: 'tgv-root-v2',
+    allowConcurrentTarget: true,
+  });
+  assert.equal(malformedRun.stopReason, 'task_failed');
+  assert.equal(malformedRun.actions[0].status, 'failed');
+  assert.equal(malformedRun.actions[0].failureKind, 'malformed_partial_request');
+  assert.equal(malformedRun.partialCompletions.length, 0);
+  const malformedTaskPath = join(malformedWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-main.md');
+  const malformedTask = parseMarkdownFile(malformedTaskPath);
+  assert.equal(malformedTask.status, 'blocked');
+  assert.equal(malformedTask.runReadiness, 'blocked');
+  assert.equal(malformedTask.needsManualReview, true);
+  assert.equal(malformedTask.malformedPartialRequest, true);
+  assert.match(malformedTask.runReadinessReason, /malformed TASKOPS_PARTIAL_REQUEST marker/);
+  assert.equal(existsSync(join(malformedWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-main.md')), false, 'malformed partial marker must not auto-close the task');
+
+  const fakeDoneOpenClaw = makeFakeOpenClaw('fake-openclaw-done', 'Completed normally without a partial sentinel.');
+  process.env.TASKOPS_OPENCLAW_BIN = fakeDoneOpenClaw;
+  const doneWorkDir = makeWork('partial-request-normal-done-work');
+  const doneRun = runTaskOps(doneWorkDir, {
+    executor: 'openclaw-agent',
+    agent: 'main',
+    maxSteps: 2,
+    maxStepsExplicit: true,
+    targetTaskId: 'task-main',
+    targetTaskGroupVersionId: 'tgv-root-v2',
+    allowConcurrentTarget: true,
+  });
+  assert.equal(doneRun.actions[0].status, 'completed');
+  assert.equal(doneRun.partialCompletions.length, 0);
+  assert.equal(parseMarkdownFile(join(doneWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-main.md')).status, 'done');
 
   if (previousOpenClawBin == null) delete process.env.TASKOPS_OPENCLAW_BIN;
   else process.env.TASKOPS_OPENCLAW_BIN = previousOpenClawBin;

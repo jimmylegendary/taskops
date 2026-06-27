@@ -1635,6 +1635,52 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         partialCompletion,
       };
     }
+    if (partialRequest.markerFound && partialRequest.parseError) {
+      const reason = sanitizeFmScalar(`malformed TASKOPS_PARTIAL_REQUEST marker: ${partialRequest.parseError}`);
+      rewriteFrontmatter(task.path, (fm) => {
+        fm.status = 'blocked';
+        fm.runReadiness = 'blocked';
+        fm.runReadinessReason = reason;
+        fm.lastRunFailureReason = reason;
+        fm.needsManualReview = true;
+        fm.malformedPartialRequest = true;
+        return fm;
+      });
+      rewriteFrontmatter(runNodePath, (fm) => {
+        fm.status = 'blocked';
+        fm.result = {
+          ...executionResult,
+          malformedPartialRequest: {
+            markerFound: true,
+            parseError: partialRequest.parseError,
+            rawLine: partialRequest.rawLine || '',
+            needsManualReview: true,
+          },
+        };
+        return fm;
+      });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'task_malformed_partial_request', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        parseError: partialRequest.parseError,
+      });
+      appendRunLog(runDir, `${finishedAt} task_malformed_partial_request taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
+      return {
+        taskId: task.id,
+        runNodeId,
+        kind: 'execute',
+        status: 'failed',
+        failureKind: 'malformed_partial_request',
+        executor,
+        message: reason,
+        budget,
+        malformedPartialRequest: {
+          markerFound: true,
+          parseError: partialRequest.parseError,
+          rawLine: partialRequest.rawLine || '',
+        },
+      };
+    }
     rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
     rewriteFrontmatter(runNodePath, (fm) => {
       fm.status = 'done';
