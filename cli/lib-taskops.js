@@ -1923,6 +1923,68 @@ function appendWorkLog(projectDir, line) {
   appendTextFile(workLogPath, existsSync(workLogPath) ? line : `# Work log\n\n${line}`);
 }
 
+function closePromotedPartialSourceRunNode(projectDir, partial, now) {
+  const runId = partial?.sourceRunId;
+  const runNodeId = partial?.sourceRunNodeId;
+  if (!runId || !runNodeId) return null;
+
+  const runDir = join(projectDir, 'runs', runId);
+  const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
+  if (!existsSync(runNodePath)) {
+    return { runId, runNodeId, closed: false, reason: 'missing_source_run_node' };
+  }
+
+  ensureDir(join(runDir, 'nodes'));
+  ensureDir(join(runDir, 'edges'));
+
+  const eowRunNodeId = `eow-${runNodeId}`;
+  const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
+  const edgeId = `edge-${runNodeId}-to-eow`;
+  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
+  let wroteEow = false;
+  let wroteEdge = false;
+
+  if (!existsSync(eowRunPath)) {
+    writeFileSync(eowRunPath, fmBlock({
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: eowRunNodeId,
+      runId,
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: runNodeId,
+      reason: 'partial_follow_up_promoted',
+      declaredBy: 'taskops-promote-partials',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    }) + `# EoW: ${runNodeId}\n`, 'utf8');
+    wroteEow = true;
+  }
+
+  if (!existsSync(edgePath)) {
+    writeFileSync(edgePath, fmBlock({
+      taskOpsVersion: 'v1',
+      entityType: 'runEdge',
+      id: edgeId,
+      runId,
+      fromRunNodeId: runNodeId,
+      toRunNodeId: eowRunNodeId,
+      edgeType: 'closes_with',
+      createdAt: now,
+      status: 'done',
+    }) + `# Run edge: ${runNodeId} closes with EoW\n`, 'utf8');
+    wroteEdge = true;
+  }
+
+  appendTextFile(
+    join(runDir, 'run-log.md'),
+    `${now} partial_source_run_node_closed runNodeId=${runNodeId} partialId=${partial.id || ''} reason=partial_follow_up_promoted\n`,
+  );
+
+  return { runId, runNodeId, eowRunNodeId, edgeId, closed: true, wroteEow, wroteEdge };
+}
+
 export function promotePartialCompletions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH, dryRun = true } = {}) {
   const plan = planPartialPromotions(workDir, { partialId, maxFollowUpDepth });
   if (dryRun) return plan;
@@ -1988,6 +2050,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
       `- ${now} partial-driven follow-up promotion from=${versionPlan.fromVersionId} to=${versionPlan.toVersionId} partials=${promotedIds}\n`,
     );
 
+    const closedSourceRunNodes = [];
     for (const promotion of versionPlan.promotions) {
       const partial = parsed.partialNodes.get(promotion.partialId);
       if (!partial) throw new Error(`Cannot promote partials: partial '${promotion.partialId}' disappeared before apply`);
@@ -1999,6 +2062,13 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
         fm.followUpTaskGroupVersionId = versionPlan.toVersionId;
         return fm;
       });
+      const closedSourceRunNode = closePromotedPartialSourceRunNode(plan.projectDir, partial, now);
+      if (closedSourceRunNode) {
+        closedSourceRunNodes.push({
+          partialId: promotion.partialId,
+          ...closedSourceRunNode,
+        });
+      }
     }
 
     appliedVersionPlans.push({
@@ -2008,6 +2078,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
       newVersionDir,
       promotionCount: versionPlan.promotions.length,
       promotedPartialIds: versionPlan.promotions.map((promotion) => promotion.partialId),
+      closedSourceRunNodes,
     });
   }
 
