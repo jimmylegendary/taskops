@@ -603,8 +603,21 @@ assert.ok(childGuard.consistencyIssues.some((issue) => issue.code === 'inherited
 inheritanceParsed = parseProject(inheritDir);
 assert.deepEqual(inheritanceParsed.errors, [], 'birth snapshot should keep inheritance fixture valid');
 
-writeMd(rootTaskPath, {
+writeMd(join(inheritDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'index.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'taskGroupVersion',
+  id: 'tgv-root-v2',
+  taskGroupId: 'tg-root',
+  version: 'v2',
+  summary: 'Restarted parent version with contradiction',
+  selected: true,
+  createdAt: '2026-06-28T03:09:00Z',
+  status: 'active',
+}, '# Root v2\n');
+writeMd(join(inheritDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-parent.md'), {
   ...parseMarkdownFile(rootTaskPath),
+  taskGroupVersionId: 'tgv-root-v2',
+  createdAt: '2026-06-28T03:09:00Z',
   surpriseHistory: [
     {
       id: 'surprise-parent-contradiction',
@@ -619,7 +632,15 @@ writeMd(rootTaskPath, {
       summary: 'The upstream endpoint claim was contradicted.',
     },
   ],
-}, '# Parent with contradicted known\n');
+}, '# Parent v2 with contradicted known\n');
+writeMd(join(inheritDir, 'snapshots', 'snapshot-root-v1.md'), {
+  ...parseMarkdownFile(join(inheritDir, 'snapshots', 'snapshot-root-v1.md')),
+  selectedVersions: [
+    { taskGroupId: 'tg-root', versionId: 'tgv-root-v2' },
+    { taskGroupId: 'tg-child', versionId: 'tgv-child-v1' },
+    { taskGroupId: 'tg-grandchild', versionId: 'tgv-grandchild-v1' },
+  ],
+}, '# Snapshot root v1\n');
 
 inheritanceParsed = parseProject(inheritDir);
 assert.deepEqual(inheritanceParsed.errors, [], 'parent contradiction should keep inheritance fixture valid');
@@ -628,6 +649,8 @@ const childParsed = inheritanceParsed.tasks.get('tgv-child-v1:task-child');
 const hydratedChild = hydrateInheritedContext(inheritanceParsed, childParsed, activeInheritanceSnapshot);
 assert.equal(hydratedChild.stale, true);
 assert.equal(hydratedChild.inheritedKnownRefs[0].trust, 'contradicted_upstream');
+assert.equal(hydratedChild.inheritedKnownRefs[0].sourceTaskGroupVersionId, 'tgv-root-v2');
+assert.equal(hydratedChild.inheritedKnownRefs[0].hydrationSource, 'active_selected_parent');
 assert.equal(hydratedChild.inheritedFailurePatterns.some((pattern) => pattern.type === 'contradicted_known' && pattern.sourceKnownId === 'k-parent-wrong'), true);
 const childExecutionPrompt = buildAgentExecutionPrompt({
   project: inheritanceParsed.project,
@@ -643,6 +666,7 @@ const hydratedGrandchild = hydrateInheritedContext(inheritanceParsed, grandchild
 assert.equal(hydratedGrandchild.parentChain.length, 2);
 assert.equal(hydratedGrandchild.inheritedKnownRefs.some((ref) => ref.sourceTaskId === 'task-child' && ref.sourceKnownId === 'k-parent-wrong'), false);
 assert.equal(hydratedGrandchild.inheritedKnownRefs.some((ref) => ref.sourceTaskId === 'task-parent' && ref.sourceKnownId === 'k-parent-wrong' && ref.trust === 'contradicted_upstream'), true);
+assert.equal(hydratedGrandchild.inheritedKnownRefs.some((ref) => ref.sourceTaskId === 'task-parent' && ref.sourceTaskGroupVersionId === 'tgv-root-v2' && ref.hydrationSource === 'active_selected_parent'), true);
 assert.deepEqual(parseMarkdownFile(grandchildTaskPath).knownList ?? [], []);
 
 const invalidSpecPath = join(tempRoot, 'invalid-spec.json');

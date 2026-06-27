@@ -318,6 +318,33 @@ function sourceTaskForChainEntry(entry) {
   return entry?.task && typeof entry.task === 'object' ? entry.task : null;
 }
 
+function hydrationSourceTaskForChainEntry(parsed, entry) {
+  const birthSource = sourceTaskForChainEntry(entry);
+  const active = entry?.activeParent;
+  if (!active?.taskId || !active?.taskGroupVersionId) {
+    return { task: birthSource, source: 'birth_backlink' };
+  }
+  const activeTask = parsed?.tasks?.get(`${active.taskGroupVersionId}:${active.taskId}`) || null;
+  if (!activeTask) {
+    return {
+      task: birthSource,
+      source: 'birth_backlink',
+      warning: `active selected parent ${active.taskGroupVersionId}:${active.taskId} was not found; using birth backlink source`,
+    };
+  }
+  if (activeTask.id !== entry.taskId || activeTask.childTaskGroupId !== entry.childTaskGroupId) {
+    return {
+      task: birthSource,
+      source: 'birth_backlink',
+      warning: `active selected parent ${activeTask.taskGroupVersionId}:${activeTask.id} does not match backlink parent ${entry.taskGroupVersionId}:${entry.taskId}; using birth backlink source`,
+    };
+  }
+  return {
+    task: activeTask,
+    source: activeTask.taskGroupVersionId === entry.taskGroupVersionId ? 'birth_backlink' : 'active_selected_parent',
+  };
+}
+
 function claimHash(claim) {
   return sha256Of({ claim: compactString(claim) });
 }
@@ -405,6 +432,7 @@ function inheritedContextWithoutRuntimeFlags(context) {
   delete cloned.staleWarning;
   delete cloned.birthSnapshotHash;
   delete cloned.dynamicSnapshotHash;
+  delete cloned.lineageWarnings;
   return cloned;
 }
 
@@ -415,6 +443,7 @@ export function hydrateInheritedContext(parsed, task, activeSnapshot = null, { c
   const inheritedKnownRefs = [];
   const inheritedFailurePatterns = [];
   const inheritedSurpriseRefs = [];
+  const lineageWarnings = [];
 
   for (const entry of chain) {
     parentChain.push({
@@ -426,7 +455,9 @@ export function hydrateInheritedContext(parsed, task, activeSnapshot = null, { c
       decomposedByRunId: entry.decomposedByRunId,
       decomposedByRunNodeId: entry.decomposedByRunNodeId,
     });
-    const sourceTask = sourceTaskForChainEntry(entry);
+    const source = hydrationSourceTaskForChainEntry(parsed, entry);
+    if (source.warning) lineageWarnings.push(source.warning);
+    const sourceTask = source.task;
     if (!sourceTask) continue;
     const contradictions = contradictionRefsByKnownId(sourceTask);
     const knownList = Array.isArray(sourceTask.knownList) ? sourceTask.knownList : [];
@@ -444,6 +475,7 @@ export function hydrateInheritedContext(parsed, task, activeSnapshot = null, { c
         claimPreview: claim,
         trust: sourceSurpriseRefs.length > 0 ? 'contradicted_upstream' : 'inherited_unverified',
         sourceSurpriseRefs,
+        hydrationSource: source.source,
         observedAt: compactString(known.observedAt || sourceTask.createdAt || capturedAt || isoNow()),
       });
     }
@@ -466,6 +498,7 @@ export function hydrateInheritedContext(parsed, task, activeSnapshot = null, { c
     inheritedFailurePatterns,
     inheritedSurpriseRefs,
   };
+  if (lineageWarnings.length > 0) context.lineageWarnings = lineageWarnings;
   if (task?.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) {
     const birthSnapshotHash = inheritedSignature(task.inheritedFrom);
     const dynamicSnapshotHash = inheritedSignature(context);
@@ -1385,6 +1418,9 @@ function inheritedContextPromptLines(inheritedContext = null) {
   const staleWarning = context.stale === true || context.staleWarning
     ? `Stale warning: ${context.staleWarning || 'birth snapshot differs from dynamically hydrated ancestor context'}`
     : 'Stale warning: (none)';
+  const lineageWarnings = Array.isArray(context.lineageWarnings) && context.lineageWarnings.length
+    ? context.lineageWarnings.join('; ')
+    : '(none)';
   return [
     '',
     'Inherited context (not ground truth):',
@@ -1395,6 +1431,7 @@ function inheritedContextPromptLines(inheritedContext = null) {
     `Inherited failure patterns: ${inheritedFailurePatterns}`,
     `Inherited surprise refs: ${inheritedSurpriseRefs}`,
     staleWarning,
+    `Lineage warnings: ${lineageWarnings}`,
   ];
 }
 
