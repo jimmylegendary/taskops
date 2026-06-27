@@ -1561,7 +1561,6 @@ function cloneTaskForPromotion(task) {
   }
   if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
-  if (Array.isArray(task.runRefs)) cloned.runRefs = [...task.runRefs];
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
   if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) cloned.followUpBudget = task.followUpBudget;

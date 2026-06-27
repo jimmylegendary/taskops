@@ -720,10 +720,24 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
   const now = isoNow();
 
   for (const task of parsed.tasks.values()) {
-    const blockers = normalizeBlockedBy(task);
-    if (blockers.length === 0) continue;
     const isBlocked = task.status === 'blocked' || task.runReadiness === 'blocked';
     if (!isBlocked) continue;
+    if (task.awaitingPromotion === true || task.awaitingPromotionPartialId) {
+      const item = {
+        taskId: task.id,
+        taskGroupVersionId: task.taskGroupVersionId,
+        path: task.path,
+        allResolved: false,
+        awaitingPromotion: true,
+        partialId: task.awaitingPromotionPartialId || null,
+        blockers: [],
+      };
+      checked.push(item);
+      stillBlocked.push(item);
+      continue;
+    }
+    const blockers = normalizeBlockedBy(task);
+    if (blockers.length === 0) continue;
     const results = blockers.map((ref) => ({ ref, key: blockerKey(ref), ...resolveBlocker(parsed, ref) }));
     const allResolved = results.every((result) => result.resolved);
     const item = { taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, path: task.path, allResolved, blockers: results };
@@ -1412,7 +1426,7 @@ function writeTaskPartialMarker({ task, declaredAt, options = {} }) {
     attachedToId: task.id,
     taskGroupVersionId: task.taskGroupVersionId,
     reason: 'partial_complete',
-    declaredBy: 'taskops-close',
+    declaredBy: sanitizeFmScalar(options.declaredBy, { maxLen: 120, fallback: 'taskops-close' }),
     declaredAt,
     createdAt: declaredAt,
     status: 'active',
@@ -1422,6 +1436,8 @@ function writeTaskPartialMarker({ task, declaredAt, options = {} }) {
     supersededBy: 'null',
     budget: partialOptions.budget,
   };
+  if (options.sourceRunId) partialFm.sourceRunId = sanitizeFmScalar(options.sourceRunId, { maxLen: 200, fallback: null });
+  if (options.sourceRunNodeId) partialFm.sourceRunNodeId = sanitizeFmScalar(options.sourceRunNodeId, { maxLen: 200, fallback: null });
   writeTextFileAtomic(partialPath, fmBlock(partialFm) + `# Partial: ${task.id}\n`);
   return { partialId, partialPath, partial: partialFm };
 }
@@ -1552,6 +1568,73 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   if (result.ok) {
     const executionResult = buildExecutionResult({ task, runId, runNodeId, executorResult: result });
+    const partialRequest = parsePartialRequestFromExecutorResult(result);
+    if (partialRequest.partialRequested) {
+      const partial = writeTaskPartialMarker({
+        task,
+        declaredAt: finishedAt,
+        options: {
+          completedSummary: partialRequest.completedSummary,
+          incompleteSummary: partialRequest.incompleteSummary,
+          followUpNeeded: partialRequest.followUpNeeded !== false,
+          budget: budget || { enabled: false },
+          declaredBy: 'taskops-runner',
+          sourceRunId: runId,
+          sourceRunNodeId: runNodeId,
+        },
+      });
+      const partialCompletion = {
+        partialId: partial.partialId,
+        partialPath: partial.partialPath,
+        taskId: task.id,
+        taskGroupVersionId: task.taskGroupVersionId,
+        completedSummary: partial.partial.completedSummary,
+        incompleteSummary: partial.partial.incompleteSummary,
+        followUpNeeded: partial.partial.followUpNeeded,
+        awaitingPromotion: true,
+        sourceRunId: runId,
+        sourceRunNodeId: runNodeId,
+      };
+      rewriteFrontmatter(task.path, (fm) => {
+        if (fm.status === 'active') fm.status = 'pending';
+        fm.runReadiness = 'blocked';
+        fm.runReadinessReason = sanitizeFmScalar(`Awaiting partial-driven follow-up promotion (partial: ${partial.partialId})`);
+        fm.awaitingPromotion = true;
+        fm.awaitingPromotionPartialId = partial.partialId;
+        delete fm.lastRunFailureReason;
+        return fm;
+      });
+      rewriteFrontmatter(runNodePath, (fm) => {
+        fm.status = 'done';
+        fm.result = {
+          ...executionResult,
+          partialRequest: {
+            partialRequested: true,
+            completedSummary: partial.partial.completedSummary,
+            incompleteSummary: partial.partial.incompleteSummary,
+            followUpNeeded: partial.partial.followUpNeeded,
+          },
+          partialCompletion,
+        };
+        return fm;
+      });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'task_partial_requested', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        partialId: partial.partialId,
+      });
+      appendRunLog(runDir, `${finishedAt} task_partial_requested taskId=${task.id} runNodeId=${runNodeId} partialId=${partial.partialId}`);
+      return {
+        taskId: task.id,
+        runNodeId,
+        kind: 'execute',
+        status: 'partial',
+        executor,
+        message: result.message || null,
+        budget,
+        partialCompletion,
+      };
+    }
     rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
     rewriteFrontmatter(runNodePath, (fm) => {
       fm.status = 'done';

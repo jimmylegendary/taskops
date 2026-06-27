@@ -147,11 +147,30 @@ function targetCompleted(result, target) {
   ));
 }
 
+function targetPartial(result, target) {
+  const actions = result.actions || result.tasks || [];
+  return actions.some((action) => (
+    action
+    && action.status === 'partial'
+    && action.kind !== 'loopback'
+    && action.taskId === target.taskId
+  ));
+}
+
+function releaseSucceeded(releaseStatus) {
+  return releaseStatus === 'done' || releaseStatus === 'partial';
+}
+
+function leaseReleaseStatus(releaseStatus) {
+  return releaseSucceeded(releaseStatus) ? 'done' : 'failed';
+}
+
 function terminalStatusFromRun(result, target) {
   const actions = result.actions || result.tasks || [];
   if (result.stopReason === 'task_failed' || result.stopReason === 'validation_failed') return 'failed';
   if (actions.some((action) => action.status === 'failed')) return 'failed';
   if (targetCompleted(result, target)) return 'done';
+  if (targetPartial(result, target)) return 'partial';
   return 'failed';
 }
 
@@ -163,12 +182,16 @@ function buildProgressMessage({ workId, waveId, item, target, runResult, release
   const failed = actions.filter((action) => action.status === 'failed')
     .map((action) => `${action.kind}:${action.taskId || action.delegateRunNodeId}`)
     .join(', ') || 'none';
+  const partial = actions.filter((action) => action.status === 'partial')
+    .map((action) => `${action.kind}:${action.taskId || action.delegateRunNodeId}`)
+    .join(', ') || 'none';
   return [
     `TaskOps ${waveId} (${workId})`,
     `queueItem: ${item.id}`,
     `stopReason: ${runResult.stopReason}`,
     `releaseStatus: ${releaseStatus}`,
     `completed: ${completed}`,
+    `partial: ${partial}`,
     `targetCompleted: ${targetCompleted(runResult, target)}`,
     `failed: ${failed}`,
   ].join('\n');
@@ -372,14 +395,14 @@ async function runClaimedQueueItemWorker(workDir, {
 
   const finishedAt = isoNow();
   updateRunnerAttempt(workDir, attemptId, {
-    status: releaseStatus === 'done' ? 'done' : 'failed',
+    status: releaseSucceeded(releaseStatus) ? 'done' : 'failed',
     finishedAt,
     runId: runResult?.runId || null,
     stopReason: runResult?.stopReason || null,
     errorSummary,
   });
   try {
-    releaseLease(workDir, lease.id, { status: releaseStatus });
+    releaseLease(workDir, lease.id, { status: leaseReleaseStatus(releaseStatus) });
   } catch (error) {
     releaseErrorSummary = error instanceof Error ? error.message : String(error);
     errorSummary = errorSummary || releaseErrorSummary;
@@ -593,14 +616,14 @@ export function runQueueOnce(workDir, options = {}) {
   } finally {
     const finishedAt = isoNow();
     updateRunnerAttempt(workDir, attemptId, {
-      status: releaseStatus === 'done' ? 'done' : 'failed',
+      status: releaseSucceeded(releaseStatus) ? 'done' : 'failed',
       finishedAt,
       runId: runResult?.runId || null,
       stopReason: runResult?.stopReason || null,
       errorSummary,
     });
     try {
-      releaseLease(workDir, lease.id, { status: releaseStatus });
+      releaseLease(workDir, lease.id, { status: leaseReleaseStatus(releaseStatus) });
     } finally {
       syncQueueProjection(workDir);
     }
