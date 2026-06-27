@@ -382,6 +382,12 @@ try {
     if (flags.json) console.log(JSON.stringify(result, null, 2));
     else {
       console.log(`workId=${result.workId} dryRun=${result.dryRun === true} promotionCount=${result.promotionCount} skippedCount=${result.skippedCount}`);
+      if (result.waveBudget) {
+        console.log(`waveBudget count=${result.waveBudget.count} budget=${result.waveBudget.budget} next=${result.waveBudget.nextCount} remainingAfterApply=${result.waveBudget.remainingAfterApply} wouldExceed=${result.waveBudget.wouldExceed}`);
+      }
+      if (result.reason) {
+        console.log(`reason=${result.reason}`);
+      }
       if (!apply) {
         console.log('note=default is dry-run; pass --apply to write a new selected version and mark promoted partials superseded.');
       }

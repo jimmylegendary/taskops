@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { isPartialUnresolved } from './lib-taskops.js';
+import { isPartialUnresolved, partialPromotionWaveBudgetState } from './lib-taskops.js';
 
 const DEFAULT_MAX_FLAT_TASKS = 12;
 
@@ -156,6 +156,27 @@ function auditClosureIntegrity(parsed) {
         })),
       },
     }));
+
+    const waveBudget = partialPromotionWaveBudgetState(parsed.project, { promotionCount: 0 });
+    if (waveBudget.exhausted) {
+      issues.push(issue({
+        code: 'wave_budget_exhausted_with_unresolved_partials',
+        severity: 'warning',
+        message: `Partial-promotion wave budget is exhausted (${waveBudget.count}/${waveBudget.budget}) while unresolved partial completion marker(s) remain; human review is required before further promotion.`,
+        evidence: {
+          count: waveBudget.count,
+          budget: waveBudget.budget,
+          unresolvedPartialCount: partials.length,
+          examples: partials.slice(0, 5).map((partial) => ({
+            id: partial.id,
+            graphType: partial.graphType,
+            attachedToId: partial.attachedToId,
+            supersededBy: partial.supersededBy ?? null,
+            path: partial.path,
+          })),
+        },
+      }));
+    }
   }
 
   if (manuals.length > 0) {

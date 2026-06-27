@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -193,6 +193,16 @@ const plan = json(['promote-partials', workDir, '--dry-run', '--partial-id', pri
 assert.equal(plan.dryRun, true);
 assert.equal(plan.promotionCount, 1);
 assert.equal(plan.skippedCount, 0);
+assert.deepEqual(
+  {
+    budget: plan.waveBudget.budget,
+    count: plan.waveBudget.count,
+    nextCount: plan.waveBudget.nextCount,
+    remainingAfterApply: plan.waveBudget.remainingAfterApply,
+    wouldExceed: plan.waveBudget.wouldExceed,
+  },
+  { budget: 10, count: 0, nextCount: 1, remainingAfterApply: 9, wouldExceed: false },
+);
 assert.equal(plan.versionPlans.length, 1);
 
 const [versionPlan] = plan.versionPlans;
@@ -233,8 +243,12 @@ const applied = json(['promote-partials', workDir, '--apply', '--partial-id', pr
 assert.equal(applied.dryRun, false);
 assert.equal(applied.applied, true);
 assert.equal(applied.promotionCount, 1);
+assert.equal(applied.waveBudget.nextCount, 1);
 assert.equal(applied.appliedVersionPlans[0].toVersionId, 'tgv-root-v3');
 assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), true, 'apply must create the planned version directory');
+const workIndexAfterApply = readFileSync(join(workDir, 'index.md'), 'utf8');
+assert.match(workIndexAfterApply, /partialPromotionWaveBudget: 10/);
+assert.match(workIndexAfterApply, /partialPromotionWaveCount: 1/);
 
 const oldVersionIndex = readFileSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'index.md'), 'utf8');
 assert.match(oldVersionIndex, /selected: false/);
@@ -287,5 +301,47 @@ const reopenedSourceText = readFileSync(join(workDir, 'task-groups', 'tg-root', 
 assert.match(reopenedSourceText, /status: pending/);
 assert.match(reopenedSourceText, /runReadiness: runnable/);
 assert.match(reopenedSourceText, /Blockers resolved by taskops blocker recheck/);
+
+writeFileSync(
+  join(workDir, 'index.md'),
+  readFileSync(join(workDir, 'index.md'), 'utf8').replace('partialPromotionWaveBudget: 10', 'partialPromotionWaveBudget: 1'),
+  'utf8',
+);
+const repeatPartialId = 'partial-task-main-repeat';
+const repeatPartialDir = join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'partials');
+mkdirSync(repeatPartialDir, { recursive: true });
+writeFileSync(
+  join(repeatPartialDir, `${repeatPartialId}.md`),
+  `---\ntaskOpsVersion: v1\nentityType: partial\nid: ${repeatPartialId}\ngraphType: task\nattachedToType: task\nattachedToId: task-main\ntaskGroupVersionId: tgv-root-v3\nreason: partial_complete\ndeclaredBy: smoke\ndeclaredAt: 2026-06-27T00:00:00Z\ncreatedAt: 2026-06-27T00:00:00Z\nstatus: active\ncompletedSummary: Reopened source made more progress.\nincompleteSummary: A second wave would be needed, but the work-level budget is exhausted.\nfollowUpNeeded: true\nsupersededBy: null\nbudget:\n  enabled: true\n---\n# Partial: task-main repeat\n`,
+  'utf8',
+);
+const exhaustedPlan = json(['promote-partials', workDir, '--dry-run', '--partial-id', repeatPartialId]);
+assert.equal(exhaustedPlan.promotionCount, 1);
+assert.deepEqual(
+  {
+    budget: exhaustedPlan.waveBudget.budget,
+    count: exhaustedPlan.waveBudget.count,
+    nextCount: exhaustedPlan.waveBudget.nextCount,
+    remainingAfterApply: exhaustedPlan.waveBudget.remainingAfterApply,
+    wouldExceed: exhaustedPlan.waveBudget.wouldExceed,
+  },
+  { budget: 1, count: 1, nextCount: 2, remainingAfterApply: 0, wouldExceed: true },
+);
+assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v4')), false, 'exhausted dry-run must not create a new version');
+
+const exhaustedApply = json(['promote-partials', workDir, '--apply', '--partial-id', repeatPartialId]);
+assert.equal(exhaustedApply.dryRun, false);
+assert.equal(exhaustedApply.applied, false);
+assert.equal(exhaustedApply.reason, 'wave_budget_exhausted');
+assert.equal(exhaustedApply.waveBudget.wouldExceed, true);
+assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v4')), false, 'exhausted apply must not create a new version');
+assert.match(readFileSync(join(workDir, 'work-log.md'), 'utf8'), /wave budget exhausted work=partial-promotion-plan count=1 budget=1/);
+
+const exhaustedAudit = json(['audit', workDir]);
+assert.equal(
+  exhaustedAudit.issues.some((issue) => issue.code === 'wave_budget_exhausted_with_unresolved_partials'),
+  true,
+  'audit must surface budget exhaustion when unresolved partials remain',
+);
 
 console.log('partial promotion plan smoke passed');

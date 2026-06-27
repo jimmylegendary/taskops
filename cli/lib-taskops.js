@@ -15,6 +15,7 @@ export const TASKOPS_SYNC_DIR = '.taskops';
 export const TASKOPS_SYNC_CONFIG = 'taskops-sync.json';
 export const DEFAULT_LANGUAGE = 'en';
 export const DEFAULT_MAX_FOLLOW_UP_DEPTH = 1;
+export const DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET = 10;
 
 const SUMMARY_LABELS = Object.freeze({
   projectId: 'Work ID',
@@ -197,6 +198,29 @@ export function isPartialUnresolved(partial) {
   if (value == null) return true;
   const normalized = String(value).trim().toLowerCase();
   return normalized === '' || normalized === 'null';
+}
+
+function nonNegativeInteger(value, fallback) {
+  if (value == null || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
+export function partialPromotionWaveBudgetState(project, { promotionCount = 0 } = {}) {
+  const budget = nonNegativeInteger(project?.partialPromotionWaveBudget, DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET);
+  const count = nonNegativeInteger(project?.partialPromotionWaveCount, 0);
+  const willApply = Number(promotionCount || 0) > 0;
+  const nextCount = willApply ? count + 1 : count;
+  return {
+    budget,
+    count,
+    nextCount,
+    promotionCount: Number(promotionCount || 0),
+    remainingBefore: Math.max(0, budget - count),
+    remainingAfterApply: Math.max(0, budget - nextCount),
+    exhausted: count >= budget,
+    wouldExceed: willApply && nextCount > budget,
+  };
 }
 
 export function parseScalar(value) {
@@ -1898,6 +1922,7 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
       selectedPair: group.selectedPair,
       promotions: group.promotions,
     }));
+  const promotionCount = versionPlans.reduce((sum, plan) => sum + plan.promotions.length, 0);
 
   return {
     workId: parsed.project.id,
@@ -1906,8 +1931,9 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
     selectedVersionOnly: true,
     maxFollowUpDepth: maxDepth,
     partialId: partialId || null,
-    promotionCount: versionPlans.reduce((sum, plan) => sum + plan.promotions.length, 0),
+    promotionCount,
     skippedCount: skipped.length,
+    waveBudget: partialPromotionWaveBudgetState(parsed.project, { promotionCount }),
     versionPlans,
     skipped,
   };
@@ -1994,6 +2020,22 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
       dryRun: false,
       applied: false,
       appliedAt: null,
+      reason: null,
+      appliedVersionPlans: [],
+    };
+  }
+  if (plan.waveBudget?.wouldExceed) {
+    const now = isoNow();
+    appendWorkLog(
+      plan.projectDir,
+      `- ${now} promote partials wave budget exhausted work=${plan.workId} count=${plan.waveBudget.count} budget=${plan.waveBudget.budget} requestedWave=${plan.waveBudget.nextCount} promotions=${plan.promotionCount}\n`,
+    );
+    return {
+      ...plan,
+      dryRun: false,
+      applied: false,
+      appliedAt: null,
+      reason: 'wave_budget_exhausted',
       appliedVersionPlans: [],
     };
   }
@@ -2084,6 +2126,11 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
 
   const logLine = `- ${now} promote partials work=${plan.workId} promotions=${plan.promotionCount} skipped=${plan.skippedCount} versions=${appliedVersionPlans.map((p) => `${p.fromVersionId}->${p.toVersionId}`).join(',')}\n`;
   appendWorkLog(plan.projectDir, logLine);
+  rewriteFrontmatterInPlace(join(plan.projectDir, 'index.md'), (fm) => {
+    fm.partialPromotionWaveBudget = plan.waveBudget.budget;
+    fm.partialPromotionWaveCount = plan.waveBudget.nextCount;
+    return fm;
+  });
 
   return {
     ...plan,
