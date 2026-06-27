@@ -66,6 +66,60 @@ function assertKnownListPreserved(task, message) {
   assert.deepEqual(task.surpriseHistory?.[0]?.newKnownIds, ['k1'], message);
 }
 
+function inheritedFromFixture() {
+  return {
+    schemaVersion: 'phase3b-v1',
+    capturedAt: '2026-06-28T02:00:00Z',
+    parentChain: [
+      {
+        taskId: 'task-parent',
+        taskGroupId: 'tg-parent',
+        taskGroupVersionId: 'tgv-parent-v1',
+        childTaskGroupId: 'tg-child',
+        childTaskGroupVersionId: 'tgv-child-v1',
+        decomposedByRunId: 'run-parent',
+        decomposedByRunNodeId: 'rn-decompose-parent',
+      },
+    ],
+    inheritedKnownRefs: [
+      {
+        id: 'inh-k1',
+        sourceTaskId: 'task-parent',
+        sourceTaskGroupVersionId: 'tgv-parent-v1',
+        sourceKnownId: 'k-parent-wrong',
+        claimHash: 'hash-parent-wrong',
+        trust: 'inherited_unverified',
+        observedAt: '2026-06-28T02:00:00Z',
+      },
+    ],
+    inheritedFailurePatterns: [
+      {
+        id: 'fp1',
+        type: 'contradicted_known',
+        sourceTaskId: 'task-parent',
+        sourceSurpriseHistoryId: 'surprise-parent-1',
+        sourceKnownId: 'k-parent-wrong',
+        severity: 'warning',
+      },
+    ],
+    inheritedSurpriseRefs: [
+      {
+        sourceTaskId: 'task-parent',
+        surpriseHistoryId: 'surprise-parent-1',
+      },
+    ],
+  };
+}
+
+function assertInheritedFromPreserved(task, message) {
+  assert.equal(task.inheritedFrom?.schemaVersion, 'phase3b-v1', message);
+  assert.equal(task.inheritedFrom?.parentChain?.[0]?.taskId, 'task-parent', message);
+  assert.equal(task.inheritedFrom?.inheritedKnownRefs?.[0]?.sourceKnownId, 'k-parent-wrong', message);
+  assert.equal(task.inheritedFrom?.inheritedKnownRefs?.[0]?.trust, 'inherited_unverified', message);
+  assert.equal(task.inheritedFrom?.inheritedFailurePatterns?.[0]?.type, 'contradicted_known', message);
+  assert.equal(task.inheritedFrom?.inheritedSurpriseRefs?.[0]?.surpriseHistoryId, 'surprise-parent-1', message);
+}
+
 const unknownUnknown = classify({
   uncertaintyState: 'unknown_unknown',
   confidenceScore: 0.2,
@@ -99,6 +153,22 @@ const knownRunnable = classify({
 });
 assert.equal(knownRunnable.runReadiness, 'runnable');
 
+const inheritedOnlyKnown = classify({
+  uncertaintyState: 'known',
+  confidenceScore: 0.9,
+  knownList: [],
+  inheritedFrom: inheritedFromFixture(),
+});
+assert.equal(inheritedOnlyKnown.runReadiness, 'needs_exploration');
+assert.equal(inheritedOnlyKnown.originalRunReadiness, 'runnable');
+assert.ok(inheritedOnlyKnown.consistencyIssues.some((issue) => issue.code === 'inherited_only_known_not_runnable'));
+
+const inheritedWithoutUncertainty = classify({
+  inheritedFrom: inheritedFromFixture(),
+});
+assert.equal(inheritedWithoutUncertainty.runReadiness, 'needs_exploration');
+assert.equal(inheritedWithoutUncertainty.legacyComparison.runReadiness, 'runnable');
+
 const knownMissingContract = classify({
   uncertaintyState: 'known',
   confidenceScore: 0.8,
@@ -129,6 +199,7 @@ const decompositionPrompt = buildAgentDecompositionPrompt({
   versionId: 'tgv-child-v1',
 });
 assert.match(decompositionPrompt, /Phase 1 uncertainty metadata is required on each child task/);
+assert.match(decompositionPrompt, /Do not copy inherited context into knownList unless the child task locally revalidates it/);
 assert.match(decompositionPrompt, /uncertaintyState: unknown_unknown \| known_unknown \| known/);
 assert.match(decompositionPrompt, /confidenceScore: number from 0\.0 to 1\.0/);
 assert.match(decompositionPrompt, /verificationStatus: unverified/);
@@ -143,10 +214,19 @@ const executionPrompt = buildAgentExecutionPrompt({
     confidenceScore: 0.8,
     knownList: [{ id: 'k1', claim: 'The task contract is executable.', verificationStatus: 'unverified' }],
   },
+  inheritedContext: {
+    parentChain: [{ taskId: 'task-parent', taskGroupVersionId: 'tgv-parent-v1' }],
+    inheritedKnownRefs: [{ id: 'inh-k1', sourceTaskId: 'task-parent', sourceKnownId: 'k-parent-wrong', trust: 'inherited_unverified', claimPreview: 'Parent claim to revalidate.' }],
+    inheritedFailurePatterns: [{ id: 'fp1', type: 'contradicted_known', sourceTaskId: 'task-parent', sourceKnownId: 'k-parent-wrong', summary: 'Parent claim was contradicted upstream.' }],
+    inheritedSurpriseRefs: [{ sourceTaskId: 'task-parent', surpriseHistoryId: 'surprise-parent-1' }],
+  },
 });
 assert.match(executionPrompt, /Phase 2 surprise report protocol/);
 assert.match(executionPrompt, new RegExp(SURPRISE_REPORT_PREFIX));
 assert.match(executionPrompt, /The worker reports facts only; the runner computes surprise\/penalty/);
+assert.match(executionPrompt, /Inherited context \(not ground truth\)/);
+assert.match(executionPrompt, /Do not copy inherited claims into knownList unless this task locally revalidates them/);
+assert.match(executionPrompt, /Inherited known refs: inh-k1: source task-parent:k-parent-wrong trust=inherited_unverified/);
 
 const explorationPrompt = buildAgentExplorationPrompt({
   project: { id: 'work-uncertainty', title: 'Uncertainty work', objective: 'Verify exploration surprise reporting.' },
@@ -262,6 +342,7 @@ writeFileSync(specPath, JSON.stringify({
           newKnownIds: ['k1'],
         },
       ],
+      inheritedFrom: inheritedFromFixture(),
     },
   ],
 }), 'utf8');
@@ -272,11 +353,13 @@ writeFileSync(snapshotPath, readFileSync(snapshotPath, 'utf8').replace('versionI
 
 const v2Task = parseMarkdownFile(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-known.md'));
 assertKnownListPreserved(v2Task, 'writeVersionFromSpec should preserve uncertainty metadata');
+assertInheritedFromPreserved(v2Task, 'writeVersionFromSpec should preserve inherited context separately');
 assert.deepEqual(parseProject(workDir).errors, []);
 
 run(['restart', workDir, '--from', 'task-known', '--instruction', 'Re-run after uncertainty metadata smoke.', '--reason', 'uncertainty_phase1']);
 const v3Task = parseMarkdownFile(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-known.md'));
 assertKnownListPreserved(v3Task, 'restartFromTask should preserve uncertainty metadata');
+assertInheritedFromPreserved(v3Task, 'restartFromTask should preserve inherited context separately');
 
 const partialDir = join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'partials');
 mkdirSync(partialDir, { recursive: true });
@@ -293,6 +376,7 @@ assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv
 
 const v4Task = parseMarkdownFile(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v4', 'tasks', 'task-known.md'));
 assertKnownListPreserved(v4Task, 'partial promotion should preserve uncertainty metadata on cloned source task');
+assertInheritedFromPreserved(v4Task, 'partial promotion should preserve inherited context separately');
 assert.deepEqual(parseProject(workDir).errors, []);
 
 const invalidSpecPath = join(tempRoot, 'invalid-spec.json');
@@ -314,6 +398,13 @@ writeFileSync(invalidSpecPath, JSON.stringify({
       confidenceScore: 1.5,
       knownList: [{ id: 'k1', claim: '', verificationStatus: 'verified' }],
       surpriseHistory: [{ id: '', actionKind: '', observedAt: '', surpriseScore: 2, contradictedKnownIds: 'k1' }],
+      inheritedFrom: {
+        schemaVersion: '',
+        parentChain: [{ taskId: '', taskGroupId: 'tg-parent' }],
+        inheritedKnownRefs: [{ id: 'inh-bad', sourceTaskId: 'task-parent', sourceKnownId: 'k-parent', trust: 'trusted_truth' }],
+        inheritedFailurePatterns: [{ id: 'fp-bad', type: 'ground_truth', sourceTaskId: 'task-parent' }],
+        inheritedSurpriseRefs: [{ sourceTaskId: '', surpriseHistoryId: 'surprise-parent-1' }],
+      },
     },
   ],
 }), 'utf8');
@@ -326,5 +417,10 @@ assert.ok(invalidParsed.errors.some((error) => error.includes("invalid verificat
 assert.ok(invalidParsed.errors.some((error) => error.includes('invalid surpriseHistory: entry 1 missing non-empty id')));
 assert.ok(invalidParsed.errors.some((error) => error.includes("invalid surpriseHistory: entry 1 has invalid surpriseScore '2'")));
 assert.ok(invalidParsed.errors.some((error) => error.includes('invalid surpriseHistory: entry 1 field contradictedKnownIds must be a list')));
+assert.ok(invalidParsed.errors.some((error) => error.includes('invalid inheritedFrom: schemaVersion must be a non-empty string')));
+assert.ok(invalidParsed.errors.some((error) => error.includes('invalid inheritedFrom: parentChain entry 1 missing non-empty taskId')));
+assert.ok(invalidParsed.errors.some((error) => error.includes("invalid inheritedFrom: inheritedKnownRefs entry 1 has invalid trust 'trusted_truth'")));
+assert.ok(invalidParsed.errors.some((error) => error.includes("invalid inheritedFrom: inheritedFailurePatterns entry 1 has invalid type 'ground_truth'")));
+assert.ok(invalidParsed.errors.some((error) => error.includes('invalid inheritedFrom: inheritedSurpriseRefs entry 1 missing non-empty sourceTaskId')));
 
 console.log('uncertainty-readiness smoke passed');

@@ -7,6 +7,8 @@ export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_e
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
 export const UNCERTAINTY_STATE_VALUES = ['unknown_unknown', 'known_unknown', 'known'];
 export const KNOWN_VERIFICATION_STATUS_VALUES = ['unverified'];
+export const INHERITED_KNOWN_TRUST_VALUES = ['inherited_unverified', 'contradicted_upstream', 'locally_revalidated'];
+export const INHERITED_FAILURE_PATTERN_TYPES = ['contradicted_known', 'high_surprise', 'blocking_unknown'];
 export const REVIEW_DECISION_VALUES = ['approved', 'rejected', 'needs_verification'];
 export const ACCEPTANCE_MODE_VALUES = ['informational', 'enforced', 'guarded', 'runner-managed'];
 export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow', 'partial'];
@@ -99,6 +101,7 @@ const LOCALIZED_TEXT = {
       invalidConfidenceScore: (value) => `invalid confidenceScore '${value}'`,
       invalidKnownList: (detail) => `invalid knownList: ${detail}`,
       invalidSurpriseHistory: (detail) => `invalid surpriseHistory: ${detail}`,
+      invalidInheritedFrom: (detail) => `invalid inheritedFrom: ${detail}`,
       invalidEowGraphType: (value) => `invalid EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `invalid EoW attachedToType '${value}'`,
       missingIndexMd: 'missing index.md',
@@ -177,6 +180,8 @@ const LOCALIZED_TEXT = {
       invalidUncertaintyState: (value) => `유효하지 않은 uncertaintyState '${value}'`,
       invalidConfidenceScore: (value) => `유효하지 않은 confidenceScore '${value}'`,
       invalidKnownList: (detail) => `유효하지 않은 knownList: ${detail}`,
+      invalidSurpriseHistory: (detail) => `유효하지 않은 surpriseHistory: ${detail}`,
+      invalidInheritedFrom: (detail) => `유효하지 않은 inheritedFrom: ${detail}`,
       invalidEowGraphType: (value) => `유효하지 않은 EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `유효하지 않은 EoW attachedToType '${value}'`,
       missingIndexMd: 'index.md가 없음',
@@ -371,6 +376,68 @@ function validateTaskUncertaintyFields(task, taskPath, errors, t) {
         errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} field ${listField} must be a list`)));
       }
     }
+  });
+}
+
+function validateInheritedRefList(value, taskPath, errors, t, { field, requiredFields = [], enumField = null, enumValues = [] }) {
+  if (value == null) return;
+  if (!Array.isArray(value)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} must be a list`)));
+    return;
+  }
+  value.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} entry ${index + 1} must be an object`)));
+      return;
+    }
+    for (const required of requiredFields) {
+      if (!nonEmptyString(entry[required])) {
+        errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} entry ${index + 1} missing non-empty ${required}`)));
+      }
+    }
+    if (enumField) {
+      const value = String(entry[enumField] || '').trim();
+      if (!enumValues.includes(value)) {
+        errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} entry ${index + 1} has invalid ${enumField} '${entry[enumField]}'`)));
+      }
+    }
+  });
+}
+
+function validateTaskInheritedFromFields(task, taskPath, errors, t) {
+  if (task.inheritedFrom == null) return;
+  if (!task.inheritedFrom || typeof task.inheritedFrom !== 'object' || Array.isArray(task.inheritedFrom)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom('inheritedFrom must be an object')));
+    return;
+  }
+
+  const inherited = task.inheritedFrom;
+  if (!nonEmptyString(inherited.schemaVersion)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom('schemaVersion must be a non-empty string')));
+  }
+  if (inherited.capturedAt != null && !nonEmptyString(inherited.capturedAt)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom('capturedAt must be a non-empty string when present')));
+  }
+
+  validateInheritedRefList(inherited.parentChain, taskPath, errors, t, {
+    field: 'parentChain',
+    requiredFields: ['taskId', 'taskGroupId', 'taskGroupVersionId', 'childTaskGroupId', 'childTaskGroupVersionId'],
+  });
+  validateInheritedRefList(inherited.inheritedKnownRefs, taskPath, errors, t, {
+    field: 'inheritedKnownRefs',
+    requiredFields: ['id', 'sourceTaskId', 'sourceTaskGroupVersionId', 'sourceKnownId', 'trust'],
+    enumField: 'trust',
+    enumValues: INHERITED_KNOWN_TRUST_VALUES,
+  });
+  validateInheritedRefList(inherited.inheritedFailurePatterns, taskPath, errors, t, {
+    field: 'inheritedFailurePatterns',
+    requiredFields: ['id', 'type', 'sourceTaskId'],
+    enumField: 'type',
+    enumValues: INHERITED_FAILURE_PATTERN_TYPES,
+  });
+  validateInheritedRefList(inherited.inheritedSurpriseRefs, taskPath, errors, t, {
+    field: 'inheritedSurpriseRefs',
+    requiredFields: ['sourceTaskId', 'surpriseHistoryId'],
   });
 }
 
@@ -697,6 +764,7 @@ export function parseProject(projectDir) {
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
         validateTaskUncertaintyFields(task, taskPath, errors, t);
+        validateTaskInheritedFromFields(task, taskPath, errors, t);
         if (task.acceptance != null) {
           if (!task.acceptance || typeof task.acceptance !== 'object' || Array.isArray(task.acceptance)) {
             warnings.push(withPath(taskPath, 'acceptance should be an object with expectedOutcome, requiredArtifacts, and requiredChecks'));
@@ -1054,15 +1122,29 @@ function isManualAttestedEow(eow) {
 export function classifyTaskReadiness(task) {
   if (!task || typeof task !== 'object') throw new Error('Task is required');
   const legacy = classifyTaskReadinessV05(task);
-  if (!hasUncertaintyReadinessFields(task)) return legacy;
+  if (!hasUncertaintyReadinessFields(task) && !hasInheritedContext(task)) return legacy;
 
   const semanticReadiness = inferUncertaintyReadiness(task);
   const consistencyIssues = uncertaintyReadinessConsistencyIssues(task, semanticReadiness);
+  const downgrade = strongestReadinessDowngrade(semanticReadiness.runReadiness, consistencyIssues);
+  if (downgrade) {
+    return {
+      ...semanticReadiness,
+      runReadiness: downgrade.runReadiness,
+      originalRunReadiness: semanticReadiness.runReadiness,
+      source: 'uncertainty_with_consistency_downgrade',
+      reason: downgrade.reason,
+      nextAction: nextActionForRunReadiness(downgrade.runReadiness),
+      consistencyIssues,
+      legacyComparison: readinessComparisonFromLegacy(legacy),
+      compatibilityPolicy: 'uncertainty readiness is primary when uncertaintyState/confidenceScore/knownList is present; legacy v0.5 readiness is retained for comparison; inherited context is safety-only and never runnable evidence',
+    };
+  }
   return {
     ...semanticReadiness,
     consistencyIssues,
     legacyComparison: readinessComparisonFromLegacy(legacy),
-    compatibilityPolicy: 'uncertainty readiness is primary when uncertaintyState/confidenceScore/knownList is present; legacy v0.5 readiness is retained for comparison',
+    compatibilityPolicy: 'uncertainty readiness is primary when uncertaintyState/confidenceScore/knownList is present; legacy v0.5 readiness is retained for comparison; inherited context is safety-only and never runnable evidence',
   };
 }
 
@@ -1105,6 +1187,21 @@ export function classifyTaskReadinessV05(task) {
 function hasUncertaintyReadinessFields(task) {
   return TASK_UNCERTAINTY_SCALAR_FIELDS.some((field) => hasOwn(task, field))
     || TASK_UNCERTAINTY_ARRAY_FIELDS.some((field) => hasOwn(task, field));
+}
+
+function hasInheritedContext(task) {
+  return Boolean(task?.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom));
+}
+
+function inheritedKnownRefs(task) {
+  const refs = task?.inheritedFrom?.inheritedKnownRefs;
+  return Array.isArray(refs) ? refs : [];
+}
+
+function hasLocalKnownEvidence(task) {
+  if (Array.isArray(task?.knownList) && task.knownList.length > 0) return true;
+  const history = Array.isArray(task?.surpriseHistory) ? task.surpriseHistory : [];
+  return history.some((entry) => Array.isArray(entry?.newKnownIds) && entry.newKnownIds.length > 0);
 }
 
 function readinessComparisonFromLegacy(legacy) {
@@ -1276,6 +1373,17 @@ function uncertaintyReadinessConsistencyIssues(task, semanticReadiness) {
       downgradeTo: null,
       message: "uncertaintyState 'known' still lacks objective/responsibility/completionCriteria for a runnable contract",
     });
+  }
+  if (inheritedKnownRefs(task).length > 0 && !hasLocalKnownEvidence(task)) {
+    const state = String(task.uncertaintyState || '').trim();
+    if (state === 'known' || semanticReadiness.runReadiness === 'runnable' || task.runReadiness === 'runnable') {
+      issues.push({
+        code: 'inherited_only_known_not_runnable',
+        severity: 'error',
+        downgradeTo: 'needs_exploration',
+        message: 'Inherited known references are revalidation targets, not local known evidence; local validation is required before runnable.',
+      });
+    }
   }
   return issues;
 }
@@ -1860,6 +1968,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.knownList)) fm.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) fm.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
+    if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) fm.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
@@ -1991,6 +2100,7 @@ function cloneTaskForPromotion(task) {
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
   if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
   if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
+  if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
@@ -2806,6 +2916,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
     if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
+    if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
     const order = task.order ?? 0;
     if (task.id === fromTaskId) {
       cloned.status = 'pending';

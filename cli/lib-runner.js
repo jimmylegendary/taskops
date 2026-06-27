@@ -1123,6 +1123,39 @@ function taskUncertaintyPromptLines(task) {
   ];
 }
 
+function inheritedContextPromptLines(inheritedContext = null) {
+  const context = inheritedContext && typeof inheritedContext === 'object' && !Array.isArray(inheritedContext)
+    ? inheritedContext
+    : null;
+  if (!context) return [];
+  const parentChain = Array.isArray(context.parentChain) && context.parentChain.length
+    ? context.parentChain.map((item) => `${item?.taskId || '(unknown task)'}@${item?.taskGroupVersionId || '(unknown version)'}`).join(' -> ')
+    : '(none)';
+  const inheritedKnownRefs = Array.isArray(context.inheritedKnownRefs) && context.inheritedKnownRefs.length
+    ? context.inheritedKnownRefs.map((item) => `${item?.id || '(no id)'}: source ${item?.sourceTaskId || '?'}:${item?.sourceKnownId || '?'} trust=${item?.trust || 'inherited_unverified'}${item?.claimPreview ? ` claimPreview="${item.claimPreview}"` : ''}`).join('; ')
+    : '(none)';
+  const inheritedFailurePatterns = Array.isArray(context.inheritedFailurePatterns) && context.inheritedFailurePatterns.length
+    ? context.inheritedFailurePatterns.map((item) => `${item?.id || '(no id)'}: ${item?.type || 'failure_pattern'} from ${item?.sourceTaskId || '?'}${item?.sourceKnownId ? ` known=${item.sourceKnownId}` : ''}${item?.summary ? ` summary="${item.summary}"` : ''}`).join('; ')
+    : '(none)';
+  const inheritedSurpriseRefs = Array.isArray(context.inheritedSurpriseRefs) && context.inheritedSurpriseRefs.length
+    ? context.inheritedSurpriseRefs.map((item) => `${item?.sourceTaskId || '?'}:${item?.surpriseHistoryId || '?'}`).join('; ')
+    : '(none)';
+  const staleWarning = context.stale === true || context.staleWarning
+    ? `Stale warning: ${context.staleWarning || 'birth snapshot differs from dynamically hydrated ancestor context'}`
+    : 'Stale warning: (none)';
+  return [
+    '',
+    'Inherited context (not ground truth):',
+    'Inherited context is not local knowledge. Treat it only as revalidation targets and failure-pattern warnings.',
+    'Do not copy inherited claims into knownList unless this task locally revalidates them.',
+    `Parent chain: ${parentChain}`,
+    `Inherited known refs: ${inheritedKnownRefs}`,
+    `Inherited failure patterns: ${inheritedFailurePatterns}`,
+    `Inherited surprise refs: ${inheritedSurpriseRefs}`,
+    staleWarning,
+  ];
+}
+
 function childTaskUncertaintySchemaPromptLines() {
   return [
     'Phase 1 uncertainty metadata is required on each child task:',
@@ -1132,6 +1165,7 @@ function childTaskUncertaintySchemaPromptLines() {
     "Use unknown_unknown when the task's internal structure is not understood enough to decompose or execute honestly.",
     'Use known_unknown when the objective boundary is meaningful but important unknowns remain.',
     'Use known only when the task has enough understood context to be runnable under its stated completionCriteria.',
+    'Do not copy inherited context into knownList unless the child task locally revalidates it.',
   ];
 }
 
@@ -1149,7 +1183,7 @@ function surpriseReportPromptLines({ artifactRequired = false } = {}) {
   ];
 }
 
-export function buildAgentExecutionPrompt({ project, task, budget = null }) {
+export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null }) {
   return promptWithBudget([
     'You are a TaskOps worker agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1160,6 +1194,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null }) {
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
     ...taskUncertaintyPromptLines(task),
+    ...inheritedContextPromptLines(inheritedContext),
     '',
     'Execute this single TaskOps task. Do not recursively invoke `taskops run`.',
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
@@ -1169,7 +1204,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null }) {
   ], budget, { allowPartialRequest: true });
 }
 
-export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget = null }) {
+export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget = null, inheritedContext = null }) {
   return promptWithBudget([
     'You are a TaskOps decomposition agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1180,6 +1215,7 @@ export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
     ...taskUncertaintyPromptLines(task),
+    ...inheritedContextPromptLines(inheritedContext),
     '',
     'Author a TaskOps child task group and a v1 version that decomposes this task using the canonical md-first format.',
     `Target child task group id: ${childTaskGroupId}`,
@@ -1212,7 +1248,7 @@ export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNod
   ], budget);
 }
 
-export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget = null }) {
+export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget = null, inheritedContext = null }) {
   return promptWithBudget([
     'You are a TaskOps exploration agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1225,6 +1261,7 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     `Declared unknowns: ${Array.isArray(task.unknowns) && task.unknowns.length ? task.unknowns.join('; ') : '(none declared)'}`,
     `Next learning goal: ${task.nextLearningGoal || '(none declared)'}`,
     ...taskUncertaintyPromptLines(task),
+    ...inheritedContextPromptLines(inheritedContext),
     '',
     'Run a minimal, safe exploration pass: search/read/try just enough to record learned facts, discovered constraints, failed/successful approaches, remaining unknowns, and a recommended next decomposition or runnable task.',
     `Write the exploration artifact at: ${artifactRelPath}`,
