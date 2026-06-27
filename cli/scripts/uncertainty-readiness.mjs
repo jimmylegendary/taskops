@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { classifyTaskReadiness, parseMarkdownFile, parseProject } from '../lib-taskops.js';
+import { buildAgentDecompositionPrompt } from '../lib-runner.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const cli = resolve(__dirname, '..', 'bin', 'taskops.js');
@@ -100,6 +101,24 @@ const blockedStillBlocked = classify({
   knownList: [{ id: 'k1', claim: 'The task is understood but externally blocked.', verificationStatus: 'unverified' }],
 });
 assert.equal(blockedStillBlocked.runReadiness, 'blocked');
+
+const decompositionPrompt = buildAgentDecompositionPrompt({
+  project: { id: 'work-uncertainty', title: 'Uncertainty work', objective: 'Verify worker uncertainty declaration.' },
+  task: {
+    ...baseTask,
+    uncertaintyState: 'known_unknown',
+    confidenceScore: 0.42,
+    knownList: [{ id: 'k1', claim: 'The decomposition boundary is uncertain.', verificationStatus: 'unverified' }],
+  },
+  childTaskGroupId: 'tg-child',
+  versionId: 'tgv-child-v1',
+});
+assert.match(decompositionPrompt, /Phase 1 uncertainty metadata is required on each child task/);
+assert.match(decompositionPrompt, /uncertaintyState: unknown_unknown \| known_unknown \| known/);
+assert.match(decompositionPrompt, /confidenceScore: number from 0\.0 to 1\.0/);
+assert.match(decompositionPrompt, /verificationStatus: unverified/);
+assert.match(decompositionPrompt, /Task uncertaintyState: known_unknown/);
+assert.match(decompositionPrompt, /k1: The decomposition boundary is uncertain\. \[unverified\]/);
 
 const workDir = join(tempRoot, 'work');
 run(['init', workDir, '--id', 'uncertainty-phase1', '--title', 'Uncertainty phase 1', '--objective', 'Verify uncertainty metadata preservation', '--language', 'en']);

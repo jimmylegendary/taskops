@@ -917,6 +917,29 @@ function promptWithBudget(lines, budget, options = {}) {
   return [...lines, ...budgetPromptLines(budget, options)].join('\n');
 }
 
+function taskUncertaintyPromptLines(task) {
+  const knownList = Array.isArray(task.knownList) && task.knownList.length
+    ? task.knownList.map((item) => `${item?.id || '(no id)'}: ${item?.claim || ''} [${item?.verificationStatus || 'unverified'}]`).join('; ')
+    : '(none declared)';
+  return [
+    `Task uncertaintyState: ${task.uncertaintyState || '(none declared)'}`,
+    `Task confidenceScore: ${task.confidenceScore ?? '(none declared)'}`,
+    `Task knownList: ${knownList}`,
+  ];
+}
+
+function childTaskUncertaintySchemaPromptLines() {
+  return [
+    'Phase 1 uncertainty metadata is required on each child task:',
+    '- uncertaintyState: unknown_unknown | known_unknown | known',
+    '- confidenceScore: number from 0.0 to 1.0. This is only a weak self-estimate; do not overstate certainty.',
+    '- knownList: append-only list of concrete claims the task currently treats as known. Each item must have id, claim, verificationStatus: unverified.',
+    "Use unknown_unknown when the task's internal structure is not understood enough to decompose or execute honestly.",
+    'Use known_unknown when the objective boundary is meaningful but important unknowns remain.',
+    'Use known only when the task has enough understood context to be runnable under its stated completionCriteria.',
+  ];
+}
+
 export function buildAgentExecutionPrompt({ project, task, budget = null }) {
   return promptWithBudget([
     'You are a TaskOps worker agent.',
@@ -927,6 +950,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null }) {
     `Task objective: ${task.objective || ''}`,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
+    ...taskUncertaintyPromptLines(task),
     '',
     'Execute this single TaskOps task. Do not recursively invoke `taskops run`.',
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
@@ -945,12 +969,14 @@ export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId,
     `Task objective: ${task.objective || ''}`,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
+    ...taskUncertaintyPromptLines(task),
     '',
     'Author a TaskOps child task group and a v1 version that decomposes this task using the canonical md-first format.',
     `Target child task group id: ${childTaskGroupId}`,
     `Target version id: ${versionId}`,
     'Create the task group folder (with index.md) under task-groups/<id>/, then call `taskops decompose <work-dir> --task-group-id <child-tg-id> --spec <spec.json>` to write the new version.',
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
+    ...childTaskUncertaintySchemaPromptLines(),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
   ], budget);
@@ -988,6 +1014,7 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     `Task completion criteria: ${task.completionCriteria || ''}`,
     `Declared unknowns: ${Array.isArray(task.unknowns) && task.unknowns.length ? task.unknowns.join('; ') : '(none declared)'}`,
     `Next learning goal: ${task.nextLearningGoal || '(none declared)'}`,
+    ...taskUncertaintyPromptLines(task),
     '',
     'Run a minimal, safe exploration pass: search/read/try just enough to record learned facts, discovered constraints, failed/successful approaches, remaining unknowns, and a recommended next decomposition or runnable task.',
     `Write the exploration artifact at: ${artifactRelPath}`,
