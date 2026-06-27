@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { isPartialUnresolved } from '../lib-taskops.js';
+import { isPartialUnresolved, parseMarkdownFile } from '../lib-taskops.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const cli = resolve(__dirname, '..', 'bin', 'taskops.js');
@@ -21,6 +21,16 @@ function run(args) {
 
 function json(args) {
   return JSON.parse(run([...args, '--json']));
+}
+
+function writeTaskPartial(workDir, versionId, taskId, partialId, { completedSummary = 'Completed slice.', incompleteSummary = 'Remaining slice.' } = {}) {
+  const partialDir = join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'partials');
+  mkdirSync(partialDir, { recursive: true });
+  writeFileSync(
+    join(partialDir, `${partialId}.md`),
+    `---\ntaskOpsVersion: v1\nentityType: partial\nid: ${partialId}\ngraphType: task\nattachedToType: task\nattachedToId: ${taskId}\ntaskGroupVersionId: ${versionId}\nreason: partial_complete\ndeclaredBy: smoke\ndeclaredAt: 2026-06-27T00:00:00Z\ncreatedAt: 2026-06-27T00:00:00Z\nstatus: active\ncompletedSummary: ${completedSummary}\nincompleteSummary: ${incompleteSummary}\nfollowUpNeeded: true\nsupersededBy: null\nbudget:\n  enabled: true\n---\n# Partial: ${taskId}\n`,
+    'utf8',
+  );
 }
 
 assert.equal(isPartialUnresolved({}), true);
@@ -343,5 +353,179 @@ assert.equal(
   true,
   'audit must surface budget exhaustion when unresolved partials remain',
 );
+
+const belowThresholdWorkDir = join(tempRoot, 'below-threshold-work');
+run(['init', belowThresholdWorkDir, '--id', 'below-threshold', '--title', 'Below threshold', '--objective', 'Verify repeat threshold off by one', '--language', 'en']);
+const belowThresholdSpecPath = join(tempRoot, 'below-threshold-spec.json');
+writeFileSync(belowThresholdSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Below threshold fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-repeat',
+      title: 'Repeat below threshold',
+      objective: 'A task that has been partial-promoted twice already.',
+      responsibility: 'Verify the third promotion is still allowed.',
+      completionCriteria: 'A third partial promotion can be planned.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+      followUpBlockedByPartialIds: ['partial-old-1', 'partial-old-2'],
+    },
+  ],
+}), 'utf8');
+run(['decompose', belowThresholdWorkDir, '--task-group-id', 'tg-root', '--spec', belowThresholdSpecPath]);
+writeFileSync(
+  join(belowThresholdWorkDir, 'snapshots', 'snapshot-root-v1.md'),
+  readFileSync(join(belowThresholdWorkDir, 'snapshots', 'snapshot-root-v1.md'), 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'),
+  'utf8',
+);
+writeTaskPartial(belowThresholdWorkDir, 'tgv-root-v2', 'task-repeat', 'partial-repeat-third', {
+  completedSummary: 'Third slice completed.',
+  incompleteSummary: 'Third follow-up needed.',
+});
+const belowThresholdPlan = json(['promote-partials', belowThresholdWorkDir, '--dry-run', '--partial-id', 'partial-repeat-third']);
+assert.equal(belowThresholdPlan.partialRepeatThreshold, 3);
+assert.equal(belowThresholdPlan.promotionCount, 1, 'count=2 should allow the third promote when threshold=3');
+assert.equal(belowThresholdPlan.skippedCount, 0);
+
+const repeatWorkDir = join(tempRoot, 'repeat-review-work');
+run(['init', repeatWorkDir, '--id', 'repeat-review', '--title', 'Repeat review', '--objective', 'Verify repeated partial review isolation', '--language', 'en']);
+const repeatSpecPath = join(tempRoot, 'repeat-review-spec.json');
+writeFileSync(repeatSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Repeat review fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-repeat',
+      title: 'Repeat needs review',
+      objective: 'A task that has already been partial-promoted three times.',
+      responsibility: 'Should be isolated for human review on the next partial.',
+      completionCriteria: 'Does not block unrelated task promotion.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+      followUpBlockedByPartialIds: ['partial-old-1', 'partial-old-2', 'partial-old-3'],
+    },
+    {
+      id: 'task-normal',
+      title: 'Normal partial task',
+      objective: 'A different task that should still promote.',
+      responsibility: 'Verify repeated task isolation.',
+      completionCriteria: 'Follow-up task is created normally.',
+      order: 2,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+    },
+  ],
+}), 'utf8');
+run(['decompose', repeatWorkDir, '--task-group-id', 'tg-root', '--spec', repeatSpecPath]);
+writeFileSync(
+  join(repeatWorkDir, 'snapshots', 'snapshot-root-v1.md'),
+  readFileSync(join(repeatWorkDir, 'snapshots', 'snapshot-root-v1.md'), 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'),
+  'utf8',
+);
+writeTaskPartial(repeatWorkDir, 'tgv-root-v2', 'task-repeat', 'partial-repeat-fourth', {
+  completedSummary: 'Fourth repeated slice.',
+  incompleteSummary: 'This should require human review before another follow-up.',
+});
+writeTaskPartial(repeatWorkDir, 'tgv-root-v2', 'task-normal', 'partial-normal-first', {
+  completedSummary: 'Normal task first slice.',
+  incompleteSummary: 'Normal task follow-up remains.',
+});
+
+const repeatAllowedByOverride = json(['promote-partials', repeatWorkDir, '--dry-run', '--partial-id', 'partial-repeat-fourth', '--repeat-threshold', '4']);
+assert.equal(repeatAllowedByOverride.partialRepeatThreshold, 4);
+assert.equal(repeatAllowedByOverride.promotionCount, 1, 'count=3 should be allowed when threshold is raised to 4');
+assert.equal(repeatAllowedByOverride.skippedCount, 0);
+
+const repeatPlan = json(['promote-partials', repeatWorkDir, '--dry-run']);
+assert.equal(repeatPlan.partialRepeatThreshold, 3);
+assert.equal(repeatPlan.promotionCount, 1, 'normal task should still promote');
+assert.equal(repeatPlan.skippedCount, 1, 'repeated task should be skipped only');
+assert.equal(repeatPlan.skipped[0].reason, 'repeated_partial_needs_review');
+assert.equal(repeatPlan.skipped[0].sourceTaskId, 'task-repeat');
+assert.equal(repeatPlan.skipped[0].repeatCount, 3);
+assert.equal(repeatPlan.skipped[0].repeatThreshold, 3);
+assert.equal(repeatPlan.versionPlans[0].promotions[0].sourceTaskId, 'task-normal');
+const repeatPreviewTask = repeatPlan.versionPlans[0].specPreview.tasks.find((task) => task.id === 'task-repeat');
+assert.equal(repeatPreviewTask.needsManualReview, true);
+assert.equal(repeatPreviewTask.repeatedPartialNeedsReview, true);
+assert.equal(repeatPreviewTask.repeatedPartialCount, 3);
+assert.deepEqual(repeatPreviewTask.repeatedPartialReviewPartialIds, ['partial-repeat-fourth']);
+
+const repeatApplied = json(['promote-partials', repeatWorkDir, '--apply']);
+assert.equal(repeatApplied.applied, true);
+assert.equal(repeatApplied.promotionCount, 1);
+assert.equal(repeatApplied.repeatedReviewApplied.length, 1);
+assert.equal(repeatApplied.repeatedReviewApplied[0].taskId, 'task-repeat');
+assert.equal(existsSync(join(repeatWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), true);
+const repeatedTaskV3 = parseMarkdownFile(join(repeatWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-repeat.md'));
+assert.equal(repeatedTaskV3.status, 'blocked');
+assert.equal(repeatedTaskV3.runReadiness, 'blocked');
+assert.equal(repeatedTaskV3.needsManualReview, true);
+assert.equal(repeatedTaskV3.repeatedPartialNeedsReview, true);
+assert.equal(repeatedTaskV3.repeatedPartialCount, 3);
+assert.equal(repeatedTaskV3.partialRepeatThreshold, 3);
+assert.deepEqual(repeatedTaskV3.repeatedPartialReviewPartialIds, ['partial-repeat-fourth']);
+assert.equal(existsSync(join(repeatWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-task-normal-followup.md')), true, 'normal task follow-up should still be promoted');
+assert.match(readFileSync(join(repeatWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'partials', 'partial-normal-first.md'), 'utf8'), /supersededBy: task:tgv-root-v3\/task-task-normal-followup/);
+assert.match(readFileSync(join(repeatWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'partials', 'partial-repeat-fourth.md'), 'utf8'), /supersededBy: null/);
+const repeatAudit = json(['audit', repeatWorkDir]);
+assert.equal(repeatAudit.claimSafe, false);
+assert.equal(
+  repeatAudit.issues.some((issue) => issue.code === 'task_repeated_partial_needs_review' && issue.evidence.examples.some((task) => task.id === 'task-repeat')),
+  true,
+  'audit must surface repeated partial review tasks',
+);
+
+const reviewOnlyWorkDir = join(tempRoot, 'repeat-review-only-work');
+run(['init', reviewOnlyWorkDir, '--id', 'repeat-review-only', '--title', 'Repeat review only', '--objective', 'Verify skip-only manual review apply', '--language', 'en']);
+const reviewOnlySpecPath = join(tempRoot, 'repeat-review-only-spec.json');
+writeFileSync(reviewOnlySpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Repeat review only fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-repeat',
+      title: 'Repeat only task',
+      objective: 'A task that should be marked for review without rolling a version.',
+      responsibility: 'Verify skip-only apply behavior.',
+      completionCriteria: 'Task is blocked for human review.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+      followUpBlockedByPartialIds: ['partial-old-1', 'partial-old-2', 'partial-old-3'],
+    },
+  ],
+}), 'utf8');
+run(['decompose', reviewOnlyWorkDir, '--task-group-id', 'tg-root', '--spec', reviewOnlySpecPath]);
+writeFileSync(
+  join(reviewOnlyWorkDir, 'snapshots', 'snapshot-root-v1.md'),
+  readFileSync(join(reviewOnlyWorkDir, 'snapshots', 'snapshot-root-v1.md'), 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'),
+  'utf8',
+);
+writeTaskPartial(reviewOnlyWorkDir, 'tgv-root-v2', 'task-repeat', 'partial-repeat-only-fourth');
+const reviewOnlyApply = json(['promote-partials', reviewOnlyWorkDir, '--apply', '--partial-id', 'partial-repeat-only-fourth']);
+assert.equal(reviewOnlyApply.applied, false);
+assert.equal(reviewOnlyApply.reason, 'repeated_partial_needs_review');
+assert.equal(reviewOnlyApply.promotionCount, 0);
+assert.equal(reviewOnlyApply.skippedCount, 1);
+assert.equal(reviewOnlyApply.repeatedReviewApplied.length, 1);
+assert.equal(existsSync(join(reviewOnlyWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), false, 'skip-only repeated review must not roll a version');
+const reviewOnlyTask = parseMarkdownFile(join(reviewOnlyWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-repeat.md'));
+assert.equal(reviewOnlyTask.needsManualReview, true);
+assert.equal(reviewOnlyTask.repeatedPartialNeedsReview, true);
+assert.equal(reviewOnlyTask.repeatedPartialCount, 3);
 
 console.log('partial promotion plan smoke passed');

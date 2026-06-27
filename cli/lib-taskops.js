@@ -16,6 +16,7 @@ export const TASKOPS_SYNC_CONFIG = 'taskops-sync.json';
 export const DEFAULT_LANGUAGE = 'en';
 export const DEFAULT_MAX_FOLLOW_UP_DEPTH = 1;
 export const DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET = 10;
+export const DEFAULT_PARTIAL_REPEAT_THRESHOLD = 3;
 
 const SUMMARY_LABELS = Object.freeze({
   projectId: 'Work ID',
@@ -206,6 +207,12 @@ function nonNegativeInteger(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
+function positiveInteger(value, fallback) {
+  if (value == null || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+}
+
 export function partialPromotionWaveBudgetState(project, { promotionCount = 0 } = {}) {
   const budget = nonNegativeInteger(project?.partialPromotionWaveBudget, DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET);
   const count = nonNegativeInteger(project?.partialPromotionWaveCount, 0);
@@ -221,6 +228,15 @@ export function partialPromotionWaveBudgetState(project, { promotionCount = 0 } 
     exhausted: count >= budget,
     wouldExceed: willApply && nextCount > budget,
   };
+}
+
+export function partialRepeatThresholdValue(project, override = null) {
+  if (override != null) {
+    const value = positiveInteger(override, null);
+    if (value == null) throw new Error(`Invalid partial repeat threshold '${override}'`);
+    return value;
+  }
+  return positiveInteger(project?.partialRepeatThreshold, DEFAULT_PARTIAL_REPEAT_THRESHOLD);
 }
 
 export function parseScalar(value) {
@@ -1458,7 +1474,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary']) {
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary', 'needsManualReview', 'manualReviewReason', 'repeatedPartialNeedsReview', 'repeatedPartialCount', 'partialRepeatThreshold']) {
       if (task[key] !== undefined && task[key] !== null && task[key] !== '') fm[key] = task[key];
     }
     if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
@@ -1467,6 +1483,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
     if (Array.isArray(task.followUpBlockedByPartialIds)) fm.followUpBlockedByPartialIds = task.followUpBlockedByPartialIds;
+    if (Array.isArray(task.repeatedPartialReviewPartialIds)) fm.repeatedPartialReviewPartialIds = task.repeatedPartialReviewPartialIds;
     writeFileSync(join(versionDir, 'tasks', `${task.id}.md`), fmBlock(fm) + `# ${task.title}\n`, 'utf8');
   });
   for (const eow of spec.eows || []) {
@@ -1579,6 +1596,11 @@ function cloneTaskForPromotion(task) {
     'sourceRunNodeId',
     'followUpCompletedSummary',
     'followUpIncompleteSummary',
+    'needsManualReview',
+    'manualReviewReason',
+    'repeatedPartialNeedsReview',
+    'repeatedPartialCount',
+    'partialRepeatThreshold',
   ];
   for (const key of preserveKeys) {
     if (task[key] !== undefined && task[key] !== null && task[key] !== '') cloned[key] = task[key];
@@ -1586,6 +1608,7 @@ function cloneTaskForPromotion(task) {
   if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
+  if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
   if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) cloned.followUpBudget = task.followUpBudget;
   return cloned;
@@ -1608,7 +1631,7 @@ function selectedVersionIds(parsed) {
   return new Set(selectedVersionPairs(parsed).map((pair) => pair.versionId).filter(Boolean));
 }
 
-function partialSkip(partial, reason, detail = null) {
+function partialSkip(partial, reason, detail = null, extra = {}) {
   return {
     partialId: partial?.id || null,
     graphType: partial?.graphType || null,
@@ -1616,6 +1639,46 @@ function partialSkip(partial, reason, detail = null) {
     reason,
     detail,
     path: partial?.path || null,
+    ...extra,
+  };
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function repeatedPartialReviewPatch({ partial, sourceTask, sourceVersion, repeatCount, repeatThreshold }) {
+  const detail = `Task ${sourceTask.id} already has ${repeatCount} partial promotion wave(s), meeting repeat threshold ${repeatThreshold}; human review is required before another follow-up promotion.`;
+  return {
+    taskId: sourceTask.id,
+    taskGroupVersionId: sourceVersion.id,
+    partialId: partial.id,
+    repeatCount,
+    repeatThreshold,
+    reason: 'repeated_partial_needs_review',
+    detail,
+  };
+}
+
+function applyRepeatedPartialReviewToTask(task, patches) {
+  if (!Array.isArray(patches) || patches.length === 0) return task;
+  const repeatCount = Math.max(...patches.map((patch) => Number(patch.repeatCount || 0)));
+  const repeatThreshold = Math.max(...patches.map((patch) => Number(patch.repeatThreshold || DEFAULT_PARTIAL_REPEAT_THRESHOLD)));
+  const reviewPartialIds = uniqueStrings([
+    ...(Array.isArray(task.repeatedPartialReviewPartialIds) ? task.repeatedPartialReviewPartialIds : []),
+    ...patches.map((patch) => patch.partialId),
+  ]);
+  return {
+    ...task,
+    status: 'blocked',
+    runReadiness: 'blocked',
+    runReadinessReason: `Repeated partial promotion requires human review: task ${task.id} already has ${repeatCount} partial promotion wave(s), threshold=${repeatThreshold}.`,
+    needsManualReview: true,
+    manualReviewReason: 'repeated_partial_needs_review',
+    repeatedPartialNeedsReview: true,
+    repeatedPartialCount: repeatCount,
+    partialRepeatThreshold: repeatThreshold,
+    repeatedPartialReviewPartialIds: reviewPartialIds,
   };
 }
 
@@ -1719,11 +1782,18 @@ function preservedEowsForPromotion(sourceVersion, newVersionId) {
   return eows;
 }
 
-function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedPair, promotions }) {
+function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedPair, promotions, repeatedReviewPatches = [] }) {
   const newVersionId = deriveRestartVersionId(taskGroup, sourceVersion.id);
   const usedIds = new Set(sourceVersion.tasks.map((task) => task.id));
   const orderedTasks = [...sourceVersion.tasks].sort((a, b) => (Number(a.order ?? 0) - Number(b.order ?? 0)) || String(a.id).localeCompare(String(b.id)));
   const promotionsByTaskId = new Map();
+  const repeatedReviewPatchesByTaskId = new Map();
+
+  for (const patch of repeatedReviewPatches) {
+    const list = repeatedReviewPatchesByTaskId.get(patch.taskId) || [];
+    list.push(patch);
+    repeatedReviewPatchesByTaskId.set(patch.taskId, list);
+  }
 
   const plannedPromotions = promotions.map((promotion) => {
     const baseId = `task-${safeTaskIdPart(promotion.sourceTask.id)}-followup`;
@@ -1753,9 +1823,14 @@ function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedP
   const specTasks = [];
   const sourceTaskPatches = [];
   for (const task of orderedTasks) {
-    const cloned = cloneTaskForPromotion(task);
+    let cloned = cloneTaskForPromotion(task);
     cloned.order = nextOrder;
     nextOrder += 1;
+
+    const repeatedReviewPatchesForTask = repeatedReviewPatchesByTaskId.get(task.id) || [];
+    if (repeatedReviewPatchesForTask.length > 0) {
+      cloned = applyRepeatedPartialReviewToTask(cloned, repeatedReviewPatchesForTask);
+    }
 
     const taskPromotions = promotionsByTaskId.get(task.id) || [];
     if (taskPromotions.length > 0) {
@@ -1831,7 +1906,7 @@ function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedP
   };
 }
 
-export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH } = {}) {
+export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH, partialRepeatThreshold = null } = {}) {
   const projectDir = resolve(workDir);
   const parsed = parseProject(projectDir);
   if (parsed.errors.length > 0) {
@@ -1840,6 +1915,7 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
 
   const maxDepth = Math.max(0, Math.floor(Number(maxFollowUpDepth ?? DEFAULT_MAX_FOLLOW_UP_DEPTH)));
   if (!Number.isFinite(maxDepth)) throw new Error(`Invalid --max-follow-up-depth '${maxFollowUpDepth}'`);
+  const repeatThreshold = partialRepeatThresholdValue(parsed.project, partialRepeatThreshold);
 
   const pairs = selectedVersionPairs(parsed);
   const selected = selectedVersionIds(parsed);
@@ -1850,6 +1926,7 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
   if (partialId && candidates.length === 0) throw new Error(`Partial '${partialId}' not found`);
 
   const skipped = [];
+  const repeatedReviewPatches = [];
   const groups = new Map();
   for (const partial of candidates) {
     if (!isPartialUnresolved(partial)) {
@@ -1875,6 +1952,26 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
     }
     if (!selected.has(sourceVersion.id)) {
       skipped.push(partialSkip(partial, 'not_in_selected_version', `Version ${sourceVersion.id} is not selected in active snapshot.`));
+      continue;
+    }
+
+    const repeatCount = Array.isArray(sourceTask.followUpBlockedByPartialIds) ? sourceTask.followUpBlockedByPartialIds.length : 0;
+    if (repeatCount >= repeatThreshold) {
+      const patch = repeatedPartialReviewPatch({
+        partial,
+        sourceTask,
+        sourceVersion,
+        repeatCount,
+        repeatThreshold,
+      });
+      repeatedReviewPatches.push(patch);
+      skipped.push(partialSkip(partial, 'repeated_partial_needs_review', patch.detail, {
+        sourceTaskId: sourceTask.id,
+        sourceTaskGroupVersionId: sourceVersion.id,
+        repeatCount,
+        repeatThreshold,
+        needsManualReview: true,
+      }));
       continue;
     }
 
@@ -1921,6 +2018,7 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
       taskGroup: group.taskGroup,
       selectedPair: group.selectedPair,
       promotions: group.promotions,
+      repeatedReviewPatches: repeatedReviewPatches.filter((patch) => patch.taskGroupVersionId === group.sourceVersion.id),
     }));
   const promotionCount = versionPlans.reduce((sum, plan) => sum + plan.promotions.length, 0);
 
@@ -1930,10 +2028,12 @@ export function planPartialPromotions(workDir, { partialId = null, maxFollowUpDe
     dryRun: true,
     selectedVersionOnly: true,
     maxFollowUpDepth: maxDepth,
+    partialRepeatThreshold: repeatThreshold,
     partialId: partialId || null,
     promotionCount,
     skippedCount: skipped.length,
     waveBudget: partialPromotionWaveBudgetState(parsed.project, { promotionCount }),
+    repeatedReviewPatches,
     versionPlans,
     skipped,
   };
@@ -2011,17 +2111,48 @@ function closePromotedPartialSourceRunNode(projectDir, partial, now) {
   return { runId, runNodeId, eowRunNodeId, edgeId, closed: true, wroteEow, wroteEdge };
 }
 
-export function promotePartialCompletions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH, dryRun = true } = {}) {
-  const plan = planPartialPromotions(workDir, { partialId, maxFollowUpDepth });
+function applyRepeatedPartialReviewPatches(parsed, patches) {
+  const applied = [];
+  for (const patch of patches || []) {
+    const task = parsed.tasks.get(taskKey(patch.taskGroupVersionId, patch.taskId));
+    if (!task?.path) continue;
+    rewriteFrontmatterInPlace(task.path, (fm) => applyRepeatedPartialReviewToTask(fm, [patch]));
+    applied.push({
+      taskId: patch.taskId,
+      taskGroupVersionId: patch.taskGroupVersionId,
+      partialId: patch.partialId,
+      repeatCount: patch.repeatCount,
+      repeatThreshold: patch.repeatThreshold,
+      reason: patch.reason,
+    });
+  }
+  return applied;
+}
+
+export function promotePartialCompletions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH, partialRepeatThreshold = null, dryRun = true } = {}) {
+  const plan = planPartialPromotions(workDir, { partialId, maxFollowUpDepth, partialRepeatThreshold });
   if (dryRun) return plan;
   if (plan.promotionCount === 0) {
+    const parsed = parseProject(plan.projectDir);
+    if (parsed.errors.length > 0) {
+      throw new Error(`Cannot promote partials: project has validation errors:\n- ${parsed.errors.join('\n- ')}`);
+    }
+    const now = isoNow();
+    const repeatedReviewApplied = applyRepeatedPartialReviewPatches(parsed, plan.repeatedReviewPatches);
+    if (repeatedReviewApplied.length > 0) {
+      appendWorkLog(
+        plan.projectDir,
+        `- ${now} promote partials repeated partial needs review work=${plan.workId} tasks=${repeatedReviewApplied.map((patch) => `${patch.taskGroupVersionId}/${patch.taskId}`).join(',')} partials=${repeatedReviewApplied.map((patch) => patch.partialId).join(',')}\n`,
+      );
+    }
     return {
       ...plan,
       dryRun: false,
       applied: false,
       appliedAt: null,
-      reason: null,
+      reason: repeatedReviewApplied.length > 0 ? 'repeated_partial_needs_review' : null,
       appliedVersionPlans: [],
+      repeatedReviewApplied,
     };
   }
   if (plan.waveBudget?.wouldExceed) {
@@ -2037,6 +2168,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
       appliedAt: null,
       reason: 'wave_budget_exhausted',
       appliedVersionPlans: [],
+      repeatedReviewApplied: [],
     };
   }
 
@@ -2049,6 +2181,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
 
   const now = isoNow();
   const appliedVersionPlans = [];
+  const repeatedReviewApplied = applyRepeatedPartialReviewPatches(parsed, plan.repeatedReviewPatches);
 
   for (const versionPlan of plan.versionPlans) {
     const sourceVersion = parsed.versions.get(versionPlan.fromVersionId);
@@ -2138,6 +2271,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
     applied: true,
     appliedAt: now,
     appliedVersionPlans,
+    repeatedReviewApplied,
   };
 }
 

@@ -88,6 +88,10 @@ function unresolvedPartialMarkers(parsed) {
   return partialMarkers(parsed).filter((partial) => isPartialUnresolved(partial));
 }
 
+function repeatedPartialReviewTasks(parsed) {
+  return selectedTasks(parsed).filter((task) => task.needsManualReview === true && task.repeatedPartialNeedsReview === true);
+}
+
 function objectiveLooksComplex(parsed) {
   const text = [
     parsed.project?.title,
@@ -188,6 +192,26 @@ function auditClosureIntegrity(parsed) {
         manualEowCount: manuals.length,
         closureState: closure.closureState || 'open',
         examples: manuals.slice(0, 5).map((eow) => ({ id: eow.id, reason: eow.reason, path: eow.path })),
+      },
+    }));
+  }
+
+  const repeatedReviewTasks = repeatedPartialReviewTasks(parsed);
+  if (repeatedReviewTasks.length > 0) {
+    issues.push(issue({
+      code: 'task_repeated_partial_needs_review',
+      severity: 'warning',
+      message: `${repeatedReviewTasks.length} task(s) require human review after repeated partial-promotion waves.`,
+      evidence: {
+        taskCount: repeatedReviewTasks.length,
+        examples: repeatedReviewTasks.slice(0, 5).map((task) => ({
+          id: task.id,
+          taskGroupVersionId: task.taskGroupVersionId,
+          repeatCount: task.repeatedPartialCount ?? null,
+          repeatThreshold: task.partialRepeatThreshold ?? null,
+          partialIds: Array.isArray(task.repeatedPartialReviewPartialIds) ? task.repeatedPartialReviewPartialIds : [],
+          path: task.path,
+        })),
       },
     }));
   }
@@ -296,10 +320,12 @@ export function auditParsedWork(parsed, options = {}) {
   const counts = severityCounts(issues);
   const partialCount = partialMarkers(parsed).length;
   const unresolvedPartialCount = unresolvedPartialMarkers(parsed).length;
+  const repeatedReviewTaskCount = repeatedPartialReviewTasks(parsed).length;
   const claimSafe = (counts.error || 0) === 0
     && parsed.errors.length === 0
     && parsed.closure?.policyApprovedComplete === true
-    && unresolvedPartialCount === 0;
+    && unresolvedPartialCount === 0
+    && repeatedReviewTaskCount === 0;
   return {
     workId: parsed.project?.id || null,
     projectDir: parsed.projectDir,
@@ -315,6 +341,7 @@ export function auditParsedWork(parsed, options = {}) {
       manualEowCount: manualEows(parsed).length,
       partialCount,
       unresolvedPartialCount,
+      repeatedReviewTaskCount,
       closureState: parsed.closure?.closureState || 'open',
       policyApprovedComplete: parsed.closure?.policyApprovedComplete === true,
       structuralComplete: parsed.closure?.structuralComplete === true,
