@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process';
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
+export const UNCERTAINTY_STATE_VALUES = ['unknown_unknown', 'known_unknown', 'known'];
+export const KNOWN_VERIFICATION_STATUS_VALUES = ['unverified'];
 export const REVIEW_DECISION_VALUES = ['approved', 'rejected', 'needs_verification'];
 export const ACCEPTANCE_MODE_VALUES = ['informational', 'enforced', 'guarded', 'runner-managed'];
 export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow', 'partial'];
@@ -18,6 +20,8 @@ export const DEFAULT_MAX_FOLLOW_UP_DEPTH = 1;
 export const DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET = 10;
 export const DEFAULT_PARTIAL_REPEAT_THRESHOLD = 3;
 
+const TASK_UNCERTAINTY_SCALAR_FIELDS = ['uncertaintyState', 'confidenceScore'];
+const TASK_UNCERTAINTY_ARRAY_FIELDS = ['knownList'];
 const POLICY_APPROVED_EOW_FIELDS = [
   'approvedByReviewNodeId',
   'approvedReviewMode',
@@ -84,6 +88,9 @@ const LOCALIZED_TEXT = {
       invalidStatus: (status) => `invalid status '${status}'`,
       invalidRunReadiness: (value) => `invalid runReadiness '${value}'`,
       invalidUnderstandingLevel: (value) => `invalid understandingLevel '${value}'`,
+      invalidUncertaintyState: (value) => `invalid uncertaintyState '${value}'`,
+      invalidConfidenceScore: (value) => `invalid confidenceScore '${value}'`,
+      invalidKnownList: (detail) => `invalid knownList: ${detail}`,
       invalidEowGraphType: (value) => `invalid EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `invalid EoW attachedToType '${value}'`,
       missingIndexMd: 'missing index.md',
@@ -149,6 +156,9 @@ const LOCALIZED_TEXT = {
       invalidStatus: (status) => `유효하지 않은 status '${status}'`,
       invalidRunReadiness: (value) => `유효하지 않은 runReadiness '${value}'`,
       invalidUnderstandingLevel: (value) => `유효하지 않은 understandingLevel '${value}'`,
+      invalidUncertaintyState: (value) => `유효하지 않은 uncertaintyState '${value}'`,
+      invalidConfidenceScore: (value) => `유효하지 않은 confidenceScore '${value}'`,
+      invalidKnownList: (detail) => `유효하지 않은 knownList: ${detail}`,
       invalidEowGraphType: (value) => `유효하지 않은 EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `유효하지 않은 EoW attachedToType '${value}'`,
       missingIndexMd: 'index.md가 없음',
@@ -246,6 +256,61 @@ export function partialRepeatThresholdValue(project, override = null) {
     return value;
   }
   return positiveInteger(project?.partialRepeatThreshold, DEFAULT_PARTIAL_REPEAT_THRESHOLD);
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(Object(value), key);
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function cloneFrontmatterValue(value) {
+  if (Array.isArray(value)) return value.map((item) => cloneFrontmatterValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneFrontmatterValue(item)]));
+  }
+  return value;
+}
+
+function validateTaskUncertaintyFields(task, taskPath, errors, t) {
+  if (task.uncertaintyState != null) {
+    const state = String(task.uncertaintyState).trim();
+    if (!UNCERTAINTY_STATE_VALUES.includes(state)) {
+      errors.push(withPath(taskPath, t.invalidUncertaintyState(task.uncertaintyState)));
+    }
+  }
+
+  if (task.confidenceScore != null) {
+    const score = Number(task.confidenceScore);
+    if (!Number.isFinite(score) || score < 0 || score > 1) {
+      errors.push(withPath(taskPath, t.invalidConfidenceScore(task.confidenceScore)));
+    }
+  }
+
+  if (task.knownList == null) return;
+  if (!Array.isArray(task.knownList)) {
+    errors.push(withPath(taskPath, t.invalidKnownList('knownList must be a list')));
+    return;
+  }
+
+  task.knownList.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} must be an object`)));
+      return;
+    }
+    if (!nonEmptyString(item.id)) {
+      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty id`)));
+    }
+    if (!nonEmptyString(item.claim)) {
+      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty claim`)));
+    }
+    const status = String(item.verificationStatus || '').trim();
+    if (!KNOWN_VERIFICATION_STATUS_VALUES.includes(status)) {
+      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} has invalid verificationStatus '${item.verificationStatus}'`)));
+    }
+  });
 }
 
 export function parseScalar(value) {
@@ -487,6 +552,7 @@ export function parseProject(projectDir) {
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
+        validateTaskUncertaintyFields(task, taskPath, errors, t);
         if (task.acceptance != null) {
           if (!task.acceptance || typeof task.acceptance !== 'object' || Array.isArray(task.acceptance)) {
             warnings.push(withPath(taskPath, 'acceptance should be an object with expectedOutcome, requiredArtifacts, and requiredChecks'));
@@ -841,6 +907,21 @@ function isManualAttestedEow(eow) {
 
 export function classifyTaskReadiness(task) {
   if (!task || typeof task !== 'object') throw new Error('Task is required');
+  const legacy = classifyTaskReadinessV05(task);
+  if (!hasUncertaintyReadinessFields(task)) return legacy;
+
+  const semanticReadiness = inferUncertaintyReadiness(task);
+  const consistencyIssues = uncertaintyReadinessConsistencyIssues(task, semanticReadiness);
+  return {
+    ...semanticReadiness,
+    consistencyIssues,
+    legacyComparison: readinessComparisonFromLegacy(legacy),
+    compatibilityPolicy: 'uncertainty readiness is primary when uncertaintyState/confidenceScore/knownList is present; legacy v0.5 readiness is retained for comparison',
+  };
+}
+
+export function classifyTaskReadinessV05(task) {
+  if (!task || typeof task !== 'object') throw new Error('Task is required');
   const semanticReadiness = inferTaskReadiness(task);
   const consistencyIssues = explicitReadinessConsistencyIssues(task, semanticReadiness);
   if (task.runReadiness && RUN_READINESS_VALUES.includes(task.runReadiness)) {
@@ -872,6 +953,21 @@ export function classifyTaskReadiness(task) {
     ...semanticReadiness,
     consistencyIssues,
     compatibilityPolicy: 'semantic contradictions downgrade explicit runnable; legacy/manual acceptance gaps warn unless guarded or runner-managed',
+  };
+}
+
+function hasUncertaintyReadinessFields(task) {
+  return TASK_UNCERTAINTY_SCALAR_FIELDS.some((field) => hasOwn(task, field))
+    || TASK_UNCERTAINTY_ARRAY_FIELDS.some((field) => hasOwn(task, field));
+}
+
+function readinessComparisonFromLegacy(legacy) {
+  return {
+    runReadiness: legacy.runReadiness,
+    source: legacy.source,
+    reason: legacy.reason,
+    nextAction: legacy.nextAction,
+    consistencyIssues: legacy.consistencyIssues || [],
   };
 }
 
@@ -907,6 +1003,101 @@ function inferTaskReadiness(task) {
     reason: 'The task is not blocked or unknown, but it lacks enough single-responsibility run criteria.',
     nextAction: nextActionForRunReadiness('needs_decomposition'),
   };
+}
+
+export function inferUncertaintyReadiness(task) {
+  const state = String(task.uncertaintyState || '').trim();
+  if (task.status === 'blocked' || task.runReadiness === 'blocked') {
+    return { taskId: task.id, runReadiness: 'blocked', source: 'uncertainty', reason: 'Blocked status/readiness remains orthogonal to uncertainty.', nextAction: nextActionForRunReadiness('blocked') };
+  }
+  if (state === 'unknown_unknown') {
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_exploration',
+      source: 'uncertainty',
+      reason: 'uncertaintyState unknown_unknown requires exploration before honest execution or decomposition.',
+      nextAction: nextActionForRunReadiness('needs_exploration'),
+    };
+  }
+  if (state === 'known_unknown') {
+    if (isDecompositionReadyByUncertainty(task)) {
+      return {
+        taskId: task.id,
+        runReadiness: 'needs_decomposition',
+        source: 'uncertainty',
+        reason: 'uncertaintyState known_unknown has enough structure to decompose before execution.',
+        nextAction: nextActionForRunReadiness('needs_decomposition'),
+      };
+    }
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_exploration',
+      source: 'uncertainty',
+      reason: 'uncertaintyState known_unknown still needs exploration before decomposition is honest.',
+      nextAction: nextActionForRunReadiness('needs_exploration'),
+    };
+  }
+  if (state === 'known') {
+    if (hasRunnableTaskContract(task)) {
+      return {
+        taskId: task.id,
+        runReadiness: 'runnable',
+        source: 'uncertainty',
+        reason: 'uncertaintyState known and runnable task contract fields are present.',
+        nextAction: nextActionForRunReadiness('runnable'),
+      };
+    }
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_decomposition',
+      source: 'uncertainty',
+      reason: 'uncertaintyState known, but objective/responsibility/completionCriteria are not complete enough for one run.',
+      nextAction: nextActionForRunReadiness('needs_decomposition'),
+    };
+  }
+
+  return {
+    taskId: task.id,
+    runReadiness: 'needs_exploration',
+    source: 'uncertainty',
+    reason: 'Uncertainty metadata is present but uncertaintyState is missing or invalid; explore before acting.',
+    nextAction: nextActionForRunReadiness('needs_exploration'),
+  };
+}
+
+function hasRunnableTaskContract(task) {
+  return nonEmptyString(task.objective)
+    && nonEmptyString(task.responsibility)
+    && nonEmptyString(task.completionCriteria);
+}
+
+function isDecompositionReadyByUncertainty(task) {
+  if (task.runReadiness === 'needs_decomposition') return true;
+  if (task.childTaskGroupId) return true;
+  const confidence = Number(task.decompositionConfidence);
+  return Number.isFinite(confidence) && confidence >= 0.7;
+}
+
+function uncertaintyReadinessConsistencyIssues(task, semanticReadiness) {
+  const issues = [];
+  const explicit = task.runReadiness && RUN_READINESS_VALUES.includes(task.runReadiness) ? task.runReadiness : null;
+  if (explicit && explicit !== semanticReadiness.runReadiness) {
+    issues.push({
+      code: 'explicit_readiness_differs_from_uncertainty',
+      severity: 'warning',
+      downgradeTo: null,
+      message: `explicit runReadiness '${explicit}' differs from uncertainty readiness '${semanticReadiness.runReadiness}'`,
+    });
+  }
+  if (String(task.uncertaintyState || '').trim() === 'known' && !hasRunnableTaskContract(task)) {
+    issues.push({
+      code: 'known_uncertainty_missing_runnable_contract',
+      severity: 'warning',
+      downgradeTo: null,
+      message: "uncertaintyState 'known' still lacks objective/responsibility/completionCriteria for a runnable contract",
+    });
+  }
+  return issues;
 }
 
 function explicitReadinessConsistencyIssues(task, semanticReadiness) {
@@ -1482,11 +1673,12 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary', 'needsManualReview', 'manualReviewReason', 'repeatedPartialNeedsReview', 'repeatedPartialCount', 'partialRepeatThreshold']) {
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', ...TASK_UNCERTAINTY_SCALAR_FIELDS, 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary', 'needsManualReview', 'manualReviewReason', 'repeatedPartialNeedsReview', 'repeatedPartialCount', 'partialRepeatThreshold']) {
       if (task[key] !== undefined && task[key] !== null && task[key] !== '') fm[key] = task[key];
     }
     if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
+    if (Array.isArray(task.knownList)) fm.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
@@ -1583,6 +1775,7 @@ function cloneTaskForPromotion(task) {
     'runReadinessReason',
     'unblockRunReadiness',
     'understandingLevel',
+    ...TASK_UNCERTAINTY_SCALAR_FIELDS,
     'decompositionConfidence',
     'executionConfidence',
     'explorationNeeded',
@@ -1615,6 +1808,7 @@ function cloneTaskForPromotion(task) {
   }
   if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
+  if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
@@ -2363,7 +2557,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
   const targetOrder = targetTask.order ?? 0;
   const orderedTasks = [...sourceVersion.tasks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-  const preserveKeys = ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId'];
+  const preserveKeys = ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', ...TASK_UNCERTAINTY_SCALAR_FIELDS, 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId'];
 
   const specTasks = orderedTasks.map((task) => {
     const cloned = { id: task.id, title: task.title, objective: task.objective, responsibility: task.responsibility, completionCriteria: task.completionCriteria, order: task.order };
@@ -2372,6 +2566,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     }
     if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
     if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
+    if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
     const order = task.order ?? 0;
     if (task.id === fromTaskId) {
       cloned.status = 'pending';
