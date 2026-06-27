@@ -2073,6 +2073,42 @@ function deriveDecompositionIds(task) {
   };
 }
 
+function ensureDecompositionBacklink({ projectDir, childTaskGroupId, versionId, task, runId, runNodeId }) {
+  const desired = {
+    decomposedFromTaskId: task.id,
+    decomposedFromTaskGroupId: task.taskGroupId,
+    decomposedFromTaskGroupVersionId: task.taskGroupVersionId,
+    decomposedByRunId: runId,
+    decomposedByRunNodeId: runNodeId,
+  };
+  const paths = [
+    join(projectDir, 'task-groups', childTaskGroupId, 'index.md'),
+    join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md'),
+  ];
+
+  for (const filePath of paths) {
+    if (!existsSync(filePath)) return { ok: false, message: `Missing decomposition target index at ${filePath}` };
+    const current = parseMarkdownFile(filePath);
+    for (const [key, value] of Object.entries(desired)) {
+      if (current[key] != null && current[key] !== '' && String(current[key]) !== String(value)) {
+        return {
+          ok: false,
+          message: `Conflicting decomposition backlink in ${filePath}: ${key}=${current[key]} expected ${value}`,
+        };
+      }
+    }
+  }
+
+  for (const filePath of paths) {
+    rewriteFrontmatter(filePath, (fm) => {
+      for (const [key, value] of Object.entries(desired)) fm[key] = value;
+      return fm;
+    });
+  }
+
+  return { ok: true };
+}
+
 function performDryRunDecomposition({ projectDir, task }) {
   const { childTaskGroupId, versionId, suffix } = deriveDecompositionIds(task);
   const tgDir = join(projectDir, 'task-groups', childTaskGroupId);
@@ -2196,6 +2232,34 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     message: result.message || null, adapterStatus: result.status || null,
     stdout: result.stdout || '', stderr: result.stderr || '',
     budget,
+    };
+  }
+
+  const backlinkResult = ensureDecompositionBacklink({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    task,
+    runId,
+    runNodeId,
+  });
+  if (!backlinkResult.ok) {
+    rewriteFrontmatter(task.path, (fm) => {
+      fm.status = 'blocked';
+      fm.lastRunFailureReason = sanitizeFmScalar(backlinkResult.message);
+      return fm;
+    });
+    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'decomposition_failed', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      message: backlinkResult.message || null,
+    });
+    appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${backlinkResult.message || ''}`);
+    return {
+      taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+      message: backlinkResult.message || null,
+      budget,
     };
   }
 

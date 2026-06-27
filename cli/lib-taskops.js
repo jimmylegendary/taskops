@@ -22,6 +22,13 @@ export const DEFAULT_PARTIAL_REPEAT_THRESHOLD = 3;
 
 const TASK_UNCERTAINTY_SCALAR_FIELDS = ['uncertaintyState', 'confidenceScore'];
 const TASK_UNCERTAINTY_ARRAY_FIELDS = ['knownList', 'surpriseHistory'];
+const DECOMPOSITION_BACKLINK_FIELDS = [
+  'decomposedFromTaskId',
+  'decomposedFromTaskGroupId',
+  'decomposedFromTaskGroupVersionId',
+  'decomposedByRunId',
+  'decomposedByRunNodeId',
+];
 const POLICY_APPROVED_EOW_FIELDS = [
   'approvedByReviewNodeId',
   'approvedReviewMode',
@@ -128,6 +135,16 @@ const LOCALIZED_TEXT = {
       delegateMissingField: (field) => `delegation/waiting node missing '${field}'`,
       taskGroupNotFound: (id) => `Task group not found: ${id}`,
       versionAlreadyExists: (id) => `Version already exists: ${id}`,
+      incompleteDecompositionBacklink: (missing) => `incomplete decomposition backlink; missing ${missing.join(', ')}`,
+      decompositionBacklinkTaskGroupMismatch: (expected, actual) => `decomposition backlink taskGroupId mismatch; expected '${expected}', found '${actual}'`,
+      decompositionBacklinkSourceVersionNotFound: (id) => `decomposition backlink source version '${id}' not found`,
+      decompositionBacklinkSourceTaskNotFound: (taskId, versionId) => `decomposition backlink source task '${taskId}' not found in version '${versionId}'`,
+      decompositionBacklinkParentMismatch: (taskId, expected, actual) => `decomposition backlink parent task '${taskId}' points to childTaskGroupId '${actual || ''}', expected '${expected}'`,
+      decompositionBacklinkRunNodeNotFound: (runId, nodeId) => `decomposition backlink run node '${runId}/${nodeId}' not found`,
+      decompositionBacklinkRunNodeMismatch: (runId, nodeId, taskId, versionId) => `decomposition backlink run node '${runId}/${nodeId}' does not point to source task '${taskId}' in version '${versionId}'`,
+      selectedChildParentNotFound: (id) => `selected child task group '${id}' has no selected parent task`,
+      selectedChildParentAmbiguous: (id) => `selected child task group '${id}' has multiple selected parent tasks`,
+      selectedChildParentVersionDiffers: (id, selectedVersionId, sourceVersionId) => `selected child task group '${id}' parent is selected from version '${selectedVersionId}', while decomposition source version is '${sourceVersionId}'`,
     },
   },
   ko: {
@@ -196,6 +213,16 @@ const LOCALIZED_TEXT = {
       delegateMissingField: (field) => `delegation/waiting node에 '${field}'가 없음`,
       taskGroupNotFound: (id) => `Task group '${id}'를 찾지 못함`,
       versionAlreadyExists: (id) => `Version '${id}'가 이미 존재함`,
+      incompleteDecompositionBacklink: (missing) => `decomposition backlink가 불완전함; 누락: ${missing.join(', ')}`,
+      decompositionBacklinkTaskGroupMismatch: (expected, actual) => `decomposition backlink taskGroupId 불일치; 기대 '${expected}', 실제 '${actual}'`,
+      decompositionBacklinkSourceVersionNotFound: (id) => `decomposition backlink source version '${id}'를 찾지 못함`,
+      decompositionBacklinkSourceTaskNotFound: (taskId, versionId) => `decomposition backlink source task '${taskId}'를 version '${versionId}'에서 찾지 못함`,
+      decompositionBacklinkParentMismatch: (taskId, expected, actual) => `decomposition backlink parent task '${taskId}'의 childTaskGroupId '${actual || ''}'가 기대 '${expected}'와 다름`,
+      decompositionBacklinkRunNodeNotFound: (runId, nodeId) => `decomposition backlink run node '${runId}/${nodeId}'를 찾지 못함`,
+      decompositionBacklinkRunNodeMismatch: (runId, nodeId, taskId, versionId) => `decomposition backlink run node '${runId}/${nodeId}'가 source task '${taskId}' version '${versionId}'를 가리키지 않음`,
+      selectedChildParentNotFound: (id) => `selected child task group '${id}'의 selected parent task가 없음`,
+      selectedChildParentAmbiguous: (id) => `selected child task group '${id}'의 selected parent task가 여러 개임`,
+      selectedChildParentVersionDiffers: (id, selectedVersionId, sourceVersionId) => `selected child task group '${id}' parent는 version '${selectedVersionId}'에서 선택됐지만 decomposition source version은 '${sourceVersionId}'임`,
     },
   },
 };
@@ -345,6 +372,89 @@ function validateTaskUncertaintyFields(task, taskPath, errors, t) {
       }
     }
   });
+}
+
+function hasDecompositionBacklink(version) {
+  return DECOMPOSITION_BACKLINK_FIELDS.some((field) => version[field] != null && version[field] !== '');
+}
+
+function copyDecompositionBacklinkFields(source, target) {
+  for (const field of DECOMPOSITION_BACKLINK_FIELDS) {
+    if (source?.[field] !== undefined && source[field] !== null && source[field] !== '') target[field] = source[field];
+  }
+  return target;
+}
+
+function validateDecompositionBacklink({ version, versions, tasks, runNodes, activeSnapshot, errors, warnings, t, taskKey, runNodeKey }) {
+  if (!hasDecompositionBacklink(version)) return;
+
+  const missing = DECOMPOSITION_BACKLINK_FIELDS.filter((field) => version[field] == null || version[field] === '');
+  if (missing.length > 0) {
+    errors.push(withPath(`${version.path}/index.md`, t.incompleteDecompositionBacklink(missing)));
+    return;
+  }
+
+  const sourceVersion = versions.get(version.decomposedFromTaskGroupVersionId);
+  if (!sourceVersion) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkSourceVersionNotFound(version.decomposedFromTaskGroupVersionId)));
+  } else if (sourceVersion.taskGroupId !== version.decomposedFromTaskGroupId) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkTaskGroupMismatch(sourceVersion.taskGroupId, version.decomposedFromTaskGroupId)));
+  }
+
+  const sourceTask = tasks.get(taskKey(version.decomposedFromTaskGroupVersionId, version.decomposedFromTaskId));
+  if (!sourceTask) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkSourceTaskNotFound(version.decomposedFromTaskId, version.decomposedFromTaskGroupVersionId)));
+  } else if (sourceTask.childTaskGroupId !== version.taskGroupId) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkParentMismatch(version.decomposedFromTaskId, version.taskGroupId, sourceTask.childTaskGroupId)));
+  }
+
+  const sourceRunNode = runNodes.get(runNodeKey(version.decomposedByRunId, version.decomposedByRunNodeId));
+  if (!sourceRunNode) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkRunNodeNotFound(version.decomposedByRunId, version.decomposedByRunNodeId)));
+  } else if (
+    sourceRunNode.sourceTaskId !== version.decomposedFromTaskId
+    || (sourceRunNode.sourceTaskGroupVersionId && sourceRunNode.sourceTaskGroupVersionId !== version.decomposedFromTaskGroupVersionId)
+  ) {
+    errors.push(withPath(
+      `${version.path}/index.md`,
+      t.decompositionBacklinkRunNodeMismatch(
+        version.decomposedByRunId,
+        version.decomposedByRunNodeId,
+        version.decomposedFromTaskId,
+        version.decomposedFromTaskGroupVersionId,
+      ),
+    ));
+  }
+
+  const selectedPairs = Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions : [];
+  const selectedVersionIds = new Set(selectedPairs.map((pair) => pair?.versionId).filter(Boolean));
+  if (!selectedVersionIds.has(version.id)) return;
+
+  const selectedParentMatches = [];
+  for (const pair of selectedPairs) {
+    const selectedVersion = pair?.versionId ? versions.get(pair.versionId) : null;
+    if (!selectedVersion) continue;
+    for (const task of selectedVersion.tasks || []) {
+      if (task.childTaskGroupId === version.taskGroupId) selectedParentMatches.push({ task, version: selectedVersion });
+    }
+  }
+
+  if (selectedParentMatches.length === 0) {
+    errors.push(withPath(`${version.path}/index.md`, t.selectedChildParentNotFound(version.taskGroupId)));
+  } else if (selectedParentMatches.length > 1) {
+    errors.push(withPath(`${version.path}/index.md`, t.selectedChildParentAmbiguous(version.taskGroupId)));
+  } else {
+    const selectedParent = selectedParentMatches[0];
+    if (selectedParent.task.id !== version.decomposedFromTaskId) {
+      errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkParentMismatch(version.decomposedFromTaskId, version.taskGroupId, selectedParent.task.childTaskGroupId)));
+    }
+    if (selectedParent.version.id !== version.decomposedFromTaskGroupVersionId) {
+      warnings.push(withPath(
+        `${version.path}/index.md`,
+        t.selectedChildParentVersionDiffers(version.taskGroupId, selectedParent.version.id, version.decomposedFromTaskGroupVersionId),
+      ));
+    }
+  }
 }
 
 export function parseScalar(value) {
@@ -788,7 +898,10 @@ export function parseProject(projectDir) {
   }
   if (runs.size === 0) warnings.push(withPath(projectDir, t.missingRunIndex));
 
+  const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
+
   for (const version of versions.values()) {
+    validateDecompositionBacklink({ version, versions, tasks, runNodes, activeSnapshot, errors, warnings, t, taskKey, runNodeKey });
     for (const task of version.tasks) {
       if (task.childTaskGroupId && !taskGroups.has(task.childTaskGroupId)) errors.push(withPath(task.path, t.childTaskGroupNotFound(task.childTaskGroupId)));
     }
@@ -829,7 +942,6 @@ export function parseProject(projectDir) {
   let terminalTaskEowCount = 0;
   let policyApprovedTerminalTaskEowCount = 0;
   let manualAttestedTerminalTaskEowCount = 0;
-  const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
   const selectedPairs = activeSnapshot?.selectedVersions || [];
   const selectedTaskGroupIds = new Set(selectedPairs.map((pair) => pair.taskGroupId));
   for (const pair of selectedPairs) {
@@ -1729,7 +1841,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   const versionFm = { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: versionId, taskGroupId, version: spec.version ?? versionId, summary: spec.summary, createdAt: now, status: spec.status ?? 'active' };
   if (supersedesVersionId) versionFm.supersedesVersionId = supersedesVersionId;
   if (spec.selected === true) versionFm.selected = true;
-  for (const key of ['restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
+  for (const key of [...DECOMPOSITION_BACKLINK_FIELDS, 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
     if (spec[key] !== undefined && spec[key] !== null && spec[key] !== '') versionFm[key] = spec[key];
   }
   writeFileSync(join(versionDir, 'index.md'), fmBlock(versionFm) + `# ${spec.summary}\n`, 'utf8');
@@ -1901,6 +2013,61 @@ function selectedVersionPairs(parsed) {
 
 function selectedVersionIds(parsed) {
   return new Set(selectedVersionPairs(parsed).map((pair) => pair.versionId).filter(Boolean));
+}
+
+export function ancestorChainForTask(parsed, task, activeSnapshot = null) {
+  if (!parsed || !task || !task.taskGroupVersionId) return [];
+  const chain = [];
+  const seenVersionIds = new Set();
+  const activePairs = Array.isArray(activeSnapshot?.selectedVersions)
+    ? activeSnapshot.selectedVersions
+    : selectedVersionPairs(parsed);
+  const selectedParentForChildGroup = (childTaskGroupId) => {
+    const matches = [];
+    for (const pair of activePairs) {
+      const version = pair?.versionId ? parsed.versions?.get(pair.versionId) : null;
+      if (!version) continue;
+      for (const candidate of version.tasks || []) {
+        if (candidate.childTaskGroupId === childTaskGroupId) matches.push({ task: candidate, version });
+      }
+    }
+    return matches.length === 1 ? matches[0] : null;
+  };
+
+  let currentVersionId = task.taskGroupVersionId;
+  while (currentVersionId && !seenVersionIds.has(currentVersionId)) {
+    seenVersionIds.add(currentVersionId);
+    const version = parsed.versions?.get(currentVersionId);
+    if (!version || !hasDecompositionBacklink(version)) break;
+
+    const sourceVersion = parsed.versions?.get(version.decomposedFromTaskGroupVersionId) || null;
+    const sourceTask = parsed.tasks?.get(taskKey(version.decomposedFromTaskGroupVersionId, version.decomposedFromTaskId)) || null;
+    const sourceRunNode = parsed.runNodes?.get(runNodeKey(version.decomposedByRunId, version.decomposedByRunNodeId)) || null;
+    const activeParent = selectedParentForChildGroup(version.taskGroupId);
+
+    chain.push({
+      taskId: version.decomposedFromTaskId,
+      taskGroupId: version.decomposedFromTaskGroupId,
+      taskGroupVersionId: version.decomposedFromTaskGroupVersionId,
+      childTaskGroupId: version.taskGroupId,
+      childTaskGroupVersionId: version.id,
+      decomposedByRunId: version.decomposedByRunId,
+      decomposedByRunNodeId: version.decomposedByRunNodeId,
+      task: sourceTask,
+      version: sourceVersion,
+      runNode: sourceRunNode,
+      activeParent: activeParent
+        ? {
+            taskId: activeParent.task.id,
+            taskGroupId: activeParent.task.taskGroupId,
+            taskGroupVersionId: activeParent.version.id,
+          }
+        : null,
+    });
+
+    currentVersionId = version.decomposedFromTaskGroupVersionId;
+  }
+  return chain;
 }
 
 function partialSkip(partial, reason, detail = null, extra = {}) {
@@ -2190,6 +2357,7 @@ function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedP
     eows: preservedEowsForPromotion(sourceVersion, newVersionId),
     logSeedLine: `Partial-driven follow-up promotion supersedes version ${sourceVersion.id}.`,
   };
+  copyDecompositionBacklinkFields(sourceVersion, specPreview);
 
   return {
     taskGroupId: taskGroup.id,
@@ -2689,6 +2857,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     restartedAt: now,
     logSeedLine: `Restart from task '${fromTaskId}' supersedes version ${sourceVersion.id}.`,
   };
+  copyDecompositionBacklinkFields(sourceVersion, spec);
 
   const newVersionDir = writeVersionFromSpec(projectDir, taskGroup.id, spec, { supersedesVersionId: sourceVersion.id });
 
