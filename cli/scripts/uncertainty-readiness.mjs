@@ -5,8 +5,15 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { classifyTaskReadiness, parseMarkdownFile, parseProject } from '../lib-taskops.js';
-import { buildAgentDecompositionPrompt } from '../lib-runner.js';
+import { classifyTaskReadiness, informationGainConvergence, parseMarkdownFile, parseProject } from '../lib-taskops.js';
+import {
+  SURPRISE_REPORT_PREFIX,
+  buildAgentDecompositionPrompt,
+  buildAgentExecutionPrompt,
+  buildAgentExplorationPrompt,
+  computeSurpriseHistoryEntry,
+  parseSurpriseReportFromExecutorResult,
+} from '../lib-runner.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const cli = resolve(__dirname, '..', 'bin', 'taskops.js');
@@ -49,6 +56,14 @@ function assertKnownListPreserved(task, message) {
       verificationStatus: 'unverified',
     },
   ], message);
+  assert.equal(task.surpriseHistory?.[0]?.id, 'surprise-seed', message);
+  assert.equal(task.surpriseHistory?.[0]?.actionKind, 'explore', message);
+  assert.equal(task.surpriseHistory?.[0]?.observedAt, '2026-06-28T00:00:00Z', message);
+  assert.equal(Number(task.surpriseHistory?.[0]?.surpriseScore), 0.333, message);
+  assert.equal(task.surpriseHistory?.[0]?.surpriseLevel, 'medium', message);
+  assert.deepEqual(task.surpriseHistory?.[0]?.contradictedKnownIds, [], message);
+  assert.deepEqual(task.surpriseHistory?.[0]?.newUnknownIds, ['u1'], message);
+  assert.deepEqual(task.surpriseHistory?.[0]?.newKnownIds, ['k1'], message);
 }
 
 const unknownUnknown = classify({
@@ -120,6 +135,92 @@ assert.match(decompositionPrompt, /verificationStatus: unverified/);
 assert.match(decompositionPrompt, /Task uncertaintyState: known_unknown/);
 assert.match(decompositionPrompt, /k1: The decomposition boundary is uncertain\. \[unverified\]/);
 
+const executionPrompt = buildAgentExecutionPrompt({
+  project: { id: 'work-uncertainty', title: 'Uncertainty work', objective: 'Verify worker surprise reporting.' },
+  task: {
+    ...baseTask,
+    uncertaintyState: 'known',
+    confidenceScore: 0.8,
+    knownList: [{ id: 'k1', claim: 'The task contract is executable.', verificationStatus: 'unverified' }],
+  },
+});
+assert.match(executionPrompt, /Phase 2 surprise report protocol/);
+assert.match(executionPrompt, new RegExp(SURPRISE_REPORT_PREFIX));
+assert.match(executionPrompt, /The worker reports facts only; the runner computes surprise\/penalty/);
+
+const explorationPrompt = buildAgentExplorationPrompt({
+  project: { id: 'work-uncertainty', title: 'Uncertainty work', objective: 'Verify exploration surprise reporting.' },
+  task: {
+    ...baseTask,
+    uncertaintyState: 'known_unknown',
+    confidenceScore: 0.4,
+    knownList: [{ id: 'k1', claim: 'The exploration target is meaningful.', verificationStatus: 'unverified' }],
+  },
+  runId: 'run-main',
+  runNodeId: 'run-node-explore',
+  artifactRelPath: 'runs/run-main/artifacts/run-node-explore.md',
+});
+assert.match(explorationPrompt, /Include this report inside the exploration artifact/);
+
+const surpriseLine = `${SURPRISE_REPORT_PREFIX} ${JSON.stringify({
+  summary: 'One prior claim was contradicted and one blocking unknown emerged.',
+  contradictedKnown: [{ knownId: 'k1', observedEvidence: 'The API does not expose the assumed method.', correctedClaim: 'The integration needs schema discovery first.' }],
+  discoveredUnknowns: [{ id: 'u1', question: 'Which API mutation replaces the missing method?', whyDiscovered: 'Method call failed.', blocksReadiness: true }],
+  newKnownDeltas: [{ id: 'k2', claim: 'The API requires schema discovery before implementation.', evidence: 'Observed missing method.' }],
+})}`;
+const parsedSurprise = parseSurpriseReportFromExecutorResult({ stdout: `done\n${surpriseLine}` });
+assert.equal(parsedSurprise.surpriseReported, true);
+assert.equal(parsedSurprise.report.contradictedKnown[0].knownId, 'k1');
+assert.equal(parsedSurprise.report.discoveredUnknowns[0].blocksReadiness, true);
+assert.equal(parsedSurprise.report.newKnownDeltas[0].verificationStatus, 'unverified');
+
+const historyEntry = computeSurpriseHistoryEntry({
+  task: {
+    ...baseTask,
+    confidenceScore: 0.8,
+    knownList: [{ id: 'k1', claim: 'The API exposes the assumed method.', verificationStatus: 'unverified' }],
+  },
+  report: parsedSurprise.report,
+  runId: 'run-main',
+  runNodeId: 'run-node-task',
+  actionKind: 'execute',
+  observedAt: '2026-06-28T01:00:00Z',
+  evidenceRefs: ['run:run-main/node:run-node-task'],
+});
+assert.equal(historyEntry.surpriseLevel, 'high');
+assert.equal(historyEntry.surpriseScore, 1);
+assert.equal(historyEntry.penaltyModel.wrongKnown, 3);
+assert.equal(historyEntry.penaltyModel.discoveredUnknown, 1);
+assert.deepEqual(historyEntry.contradictedKnownIds, ['k1']);
+assert.deepEqual(historyEntry.newUnknownIds, ['u1']);
+assert.deepEqual(historyEntry.blockingNewUnknownIds, ['u1']);
+assert.deepEqual(historyEntry.newKnownIds, ['k2']);
+assert.equal(historyEntry.confidenceAfter, 0.4);
+
+const converged = informationGainConvergence({
+  surpriseHistory: [
+    { id: 's1', actionKind: 'explore', observedAt: '2026-06-28T00:00:00Z', surpriseScore: 0.05, contradictedKnownIds: [], blockingNewUnknownIds: [] },
+    { id: 's2', actionKind: 'explore', observedAt: '2026-06-28T00:01:00Z', surpriseScore: 0.1, contradictedKnownIds: [], blockingNewUnknownIds: [] },
+    { id: 's3', actionKind: 'execute', observedAt: '2026-06-28T00:02:00Z', surpriseScore: 0.0, contradictedKnownIds: [], blockingNewUnknownIds: [] },
+  ],
+});
+assert.equal(converged.converged, true);
+assert.equal(converged.reason, '3 consecutive low-surprise observations');
+
+const notConverged = informationGainConvergence({
+  surpriseHistory: [
+    { id: 's1', actionKind: 'explore', observedAt: '2026-06-28T00:00:00Z', surpriseScore: 0.05, contradictedKnownIds: [], blockingNewUnknownIds: [] },
+    { id: 's2', actionKind: 'execute', observedAt: '2026-06-28T00:01:00Z', surpriseScore: 0.1, contradictedKnownIds: ['k1'], blockingNewUnknownIds: [] },
+    { id: 's3', actionKind: 'explore', observedAt: '2026-06-28T00:02:00Z', surpriseScore: 0.0, contradictedKnownIds: [], blockingNewUnknownIds: [] },
+  ],
+});
+assert.equal(notConverged.converged, false);
+assert.deepEqual(notConverged.contradictedKnownIds, ['k1']);
+
+const malformedSurprise = parseSurpriseReportFromExecutorResult({ stdout: `${SURPRISE_REPORT_PREFIX} {"contradictedKnown":` });
+assert.equal(malformedSurprise.markerFound, true);
+assert.match(malformedSurprise.parseError, /Unexpected|JSON/);
+
 const workDir = join(tempRoot, 'work');
 run(['init', workDir, '--id', 'uncertainty-phase1', '--title', 'Uncertainty phase 1', '--objective', 'Verify uncertainty metadata preservation', '--language', 'en']);
 
@@ -147,6 +248,18 @@ writeFileSync(specPath, JSON.stringify({
           id: 'k1',
           claim: 'Input and output are known, but the decomposition boundary is still uncertain.',
           verificationStatus: 'unverified',
+        },
+      ],
+      surpriseHistory: [
+        {
+          id: 'surprise-seed',
+          actionKind: 'explore',
+          observedAt: '2026-06-28T00:00:00Z',
+          surpriseScore: 0.333,
+          surpriseLevel: 'medium',
+          contradictedKnownIds: [],
+          newUnknownIds: ['u1'],
+          newKnownIds: ['k1'],
         },
       ],
     },
@@ -200,6 +313,7 @@ writeFileSync(invalidSpecPath, JSON.stringify({
       uncertaintyState: 'maybe_known',
       confidenceScore: 1.5,
       knownList: [{ id: 'k1', claim: '', verificationStatus: 'verified' }],
+      surpriseHistory: [{ id: '', actionKind: '', observedAt: '', surpriseScore: 2, contradictedKnownIds: 'k1' }],
     },
   ],
 }), 'utf8');
@@ -209,5 +323,8 @@ assert.ok(invalidParsed.errors.some((error) => error.includes("invalid uncertain
 assert.ok(invalidParsed.errors.some((error) => error.includes("invalid confidenceScore '1.5'")));
 assert.ok(invalidParsed.errors.some((error) => error.includes('missing non-empty claim')));
 assert.ok(invalidParsed.errors.some((error) => error.includes("invalid verificationStatus 'verified'")));
+assert.ok(invalidParsed.errors.some((error) => error.includes('invalid surpriseHistory: entry 1 missing non-empty id')));
+assert.ok(invalidParsed.errors.some((error) => error.includes("invalid surpriseHistory: entry 1 has invalid surpriseScore '2'")));
+assert.ok(invalidParsed.errors.some((error) => error.includes('invalid surpriseHistory: entry 1 field contradictedKnownIds must be a list')));
 
 console.log('uncertainty-readiness smoke passed');

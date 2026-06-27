@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -60,6 +60,12 @@ export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled
 }
 
 export const PARTIAL_REQUEST_PREFIX = 'TASKOPS_PARTIAL_REQUEST:';
+export const SURPRISE_REPORT_PREFIX = 'TASKOPS_SURPRISE_REPORT:';
+export const SURPRISE_PENALTY_WEIGHTS = Object.freeze({
+  wrongKnown: 3,
+  discoveredUnknown: 1,
+  nonBlockingUnknown: 0.5,
+});
 
 function looksLikeJson(value) {
   const text = String(value || '').trim();
@@ -142,6 +148,91 @@ export function parsePartialRequestFromExecutorResult(executorResult) {
   return malformed || { partialRequested: false, markerFound: false };
 }
 
+function compactString(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeObjectList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+}
+
+function normalizeContradictedKnown(value) {
+  return normalizeObjectList(value).map((item) => ({
+    knownId: compactString(item.knownId || item.id),
+    priorClaim: compactString(item.priorClaim),
+    observedEvidence: compactString(item.observedEvidence || item.evidence),
+    correctedClaim: compactString(item.correctedClaim),
+  })).filter((item) => item.knownId);
+}
+
+function normalizeDiscoveredUnknowns(value) {
+  return normalizeObjectList(value).map((item, index) => ({
+    id: compactString(item.id) || `u${index + 1}`,
+    question: compactString(item.question || item.claim || item.unknown),
+    whyDiscovered: compactString(item.whyDiscovered || item.reason || item.evidence),
+    blocksReadiness: item.blocksReadiness !== false,
+  })).filter((item) => item.question);
+}
+
+function normalizeNewKnownDeltas(value) {
+  return normalizeObjectList(value).map((item, index) => ({
+    id: compactString(item.id) || `k-delta-${index + 1}`,
+    claim: compactString(item.claim),
+    verificationStatus: 'unverified',
+    evidence: compactString(item.evidence || item.observedEvidence),
+  })).filter((item) => item.claim);
+}
+
+function normalizeSurpriseReportPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('surprise report must be a JSON object');
+  }
+  return {
+    summary: compactString(payload.summary),
+    contradictedKnown: normalizeContradictedKnown(payload.contradictedKnown || payload.contradictedKnownClaims || payload.wrongKnown),
+    discoveredUnknowns: normalizeDiscoveredUnknowns(payload.discoveredUnknowns || payload.newUnknowns || payload.unknownsDiscovered),
+    newKnownDeltas: normalizeNewKnownDeltas(payload.newKnownDeltas || payload.newKnown || payload.learnedKnown),
+  };
+}
+
+function parseSurpriseReportText(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  let malformed = null;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith(SURPRISE_REPORT_PREFIX)) continue;
+    const jsonText = trimmed.slice(SURPRISE_REPORT_PREFIX.length).trim();
+    try {
+      return {
+        surpriseReported: true,
+        markerFound: true,
+        report: normalizeSurpriseReportPayload(JSON.parse(jsonText)),
+        rawLine: line,
+      };
+    } catch (error) {
+      malformed = {
+        surpriseReported: false,
+        markerFound: true,
+        parseError: error instanceof Error ? error.message : String(error),
+        rawLine: line,
+      };
+    }
+  }
+  return malformed || { surpriseReported: false, markerFound: false };
+}
+
+export function parseSurpriseReportFromExecutorResult(executorResult, extraTexts = []) {
+  const texts = [...collectPartialRequestTexts(executorResult), ...asArray(extraTexts)];
+  let malformed = null;
+  for (const text of texts) {
+    const parsed = parseSurpriseReportText(text);
+    if (parsed.surpriseReported === true) return parsed;
+    if (parsed.markerFound && parsed.parseError && !malformed) malformed = parsed;
+  }
+  return malformed || { surpriseReported: false, markerFound: false };
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -180,6 +271,34 @@ function rewriteFrontmatter(filePath, updater) {
   writeTextFileAtomic(filePath, text);
 }
 
+function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
+  if (!task?.path) return null;
+  const normalizedReport = normalizeSurpriseReportPayload(report || {});
+  const entry = computeSurpriseHistoryEntry({ task, report: normalizedReport, runId, runNodeId, actionKind, observedAt, evidenceRefs });
+  const deltas = normalizedReport.newKnownDeltas;
+  rewriteFrontmatter(task.path, (fm) => {
+    const surpriseHistory = Array.isArray(fm.surpriseHistory) ? [...fm.surpriseHistory] : [];
+    surpriseHistory.push(entry);
+    fm.surpriseHistory = surpriseHistory;
+    if (deltas.length > 0) {
+      const knownList = Array.isArray(fm.knownList) ? [...fm.knownList] : [];
+      const knownIds = new Set(knownList.map((item) => compactString(item?.id)).filter(Boolean));
+      for (const delta of deltas) {
+        if (knownIds.has(delta.id)) continue;
+        knownList.push(delta);
+        knownIds.add(delta.id);
+      }
+      fm.knownList = knownList;
+    }
+    return fm;
+  });
+  return entry;
+}
+
+function malformedSurpriseReason(parsed) {
+  return sanitizeFmScalar(`malformed ${SURPRISE_REPORT_PREFIX.trim()} marker: ${parsed?.parseError || 'invalid surprise report'}`);
+}
+
 function logEvent(eventsPath, event) {
   appendFileSync(eventsPath, JSON.stringify(event) + '\n', 'utf8');
 }
@@ -205,6 +324,82 @@ function sha256Of(value) {
 function asArray(value) {
   if (value == null || value === '') return [];
   return Array.isArray(value) ? value : [value];
+}
+
+function clamp01(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(1, Math.max(0, n));
+}
+
+function round3(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n * 1000) / 1000;
+}
+
+function taskKnownIds(task) {
+  return new Set((Array.isArray(task?.knownList) ? task.knownList : [])
+    .map((item) => compactString(item?.id))
+    .filter(Boolean));
+}
+
+function surpriseLevel(score) {
+  if (score >= 0.67) return 'high';
+  if (score >= 0.34) return 'medium';
+  if (score > 0) return 'low';
+  return 'none';
+}
+
+export function computeSurpriseHistoryEntry({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
+  const normalizedReport = normalizeSurpriseReportPayload(report || {});
+  const knownIds = taskKnownIds(task);
+  const contradictedKnown = normalizedReport.contradictedKnown;
+  const discoveredUnknowns = normalizedReport.discoveredUnknowns;
+  const newKnownDeltas = normalizedReport.newKnownDeltas;
+  const contradictedKnownIds = contradictedKnown.map((item) => item.knownId);
+  const unknownKnownReferences = contradictedKnownIds.filter((id) => !knownIds.has(id));
+  const blockingUnknowns = discoveredUnknowns.filter((item) => item.blocksReadiness !== false);
+  const nonBlockingUnknowns = discoveredUnknowns.filter((item) => item.blocksReadiness === false);
+  const rawPenalty =
+    contradictedKnown.length * SURPRISE_PENALTY_WEIGHTS.wrongKnown
+    + blockingUnknowns.length * SURPRISE_PENALTY_WEIGHTS.discoveredUnknown
+    + nonBlockingUnknowns.length * SURPRISE_PENALTY_WEIGHTS.nonBlockingUnknown;
+  const score = round3(Math.min(1, rawPenalty / SURPRISE_PENALTY_WEIGHTS.wrongKnown));
+  const confidenceBefore = clamp01(task?.confidenceScore);
+  const confidenceDrop = Math.min(1, rawPenalty * 0.1);
+  const confidenceAfter = confidenceBefore == null ? null : round3(Math.max(0, confidenceBefore - confidenceDrop));
+  const safeAction = compactString(actionKind) || 'observe';
+  const safeObservedAt = compactString(observedAt) || isoNow();
+  const safeRunNodeId = compactString(runNodeId) || 'run-node';
+  const safeIdTime = safeObservedAt.replace(/[^0-9A-Za-z]+/g, '').slice(0, 14) || String(Date.now());
+  return {
+    id: `surprise-${safeAction}-${safeRunNodeId}-${safeIdTime}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+    actionKind: safeAction,
+    runId: compactString(runId),
+    runNodeId: safeRunNodeId,
+    observedAt: safeObservedAt,
+    surpriseScore: score,
+    surpriseLevel: surpriseLevel(score),
+    penaltyModel: {
+      wrongKnown: SURPRISE_PENALTY_WEIGHTS.wrongKnown,
+      discoveredUnknown: SURPRISE_PENALTY_WEIGHTS.discoveredUnknown,
+      nonBlockingUnknown: SURPRISE_PENALTY_WEIGHTS.nonBlockingUnknown,
+    },
+    rawPenalty: round3(rawPenalty),
+    confidenceBefore,
+    confidenceAfter,
+    confidenceAdjustment: confidenceBefore == null || confidenceAfter == null ? null : round3(confidenceAfter - confidenceBefore),
+    contradictedKnownIds,
+    unknownKnownReferences,
+    newUnknownIds: discoveredUnknowns.map((item) => item.id),
+    blockingNewUnknownIds: blockingUnknowns.map((item) => item.id),
+    nonBlockingNewUnknownIds: nonBlockingUnknowns.map((item) => item.id),
+    newKnownIds: newKnownDeltas.map((item) => item.id),
+    reportHash: sha256Of(normalizedReport),
+    evidenceRefs: asArray(evidenceRefs).map((item) => String(item || '').trim()).filter(Boolean),
+    summary: sanitizeFmScalar(normalizedReport.summary || `surprise ${surpriseLevel(score)} (${score})`, { maxLen: 500, fallback: `surprise ${surpriseLevel(score)}` }),
+  };
 }
 
 function stringList(value) {
@@ -940,6 +1135,20 @@ function childTaskUncertaintySchemaPromptLines() {
   ];
 }
 
+function surpriseReportPromptLines({ artifactRequired = false } = {}) {
+  const locationLine = artifactRequired
+    ? 'Include this report inside the exploration artifact. You may also repeat it in the final response.'
+    : 'Include this report as exactly one final-response line when the task completes normally.';
+  return [
+    'Phase 2 surprise report protocol:',
+    locationLine,
+    `Use prefix ${SURPRISE_REPORT_PREFIX} followed by one-line JSON.`,
+    'The worker reports facts only; the runner computes surprise/penalty. Do not self-score surprise.',
+    'Schema: {"summary":"what changed relative to knownList","contradictedKnown":[{"knownId":"k1","observedEvidence":"what disproved or weakened it","correctedClaim":"optional corrected claim"}],"discoveredUnknowns":[{"id":"u1","question":"new uncertainty","whyDiscovered":"evidence or reason","blocksReadiness":true}],"newKnownDeltas":[{"id":"k2","claim":"new learned claim","evidence":"supporting evidence"}]}',
+    'Use empty arrays when there is no contradiction, no new unknown, or no new known delta. Do not redeclare the whole knownList.',
+  ];
+}
+
 export function buildAgentExecutionPrompt({ project, task, budget = null }) {
   return promptWithBudget([
     'You are a TaskOps worker agent.',
@@ -955,6 +1164,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null }) {
     'Execute this single TaskOps task. Do not recursively invoke `taskops run`.',
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
+    ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
   ], budget, { allowPartialRequest: true });
 }
@@ -1019,6 +1229,7 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     'Run a minimal, safe exploration pass: search/read/try just enough to record learned facts, discovered constraints, failed/successful approaches, remaining unknowns, and a recommended next decomposition or runnable task.',
     `Write the exploration artifact at: ${artifactRelPath}`,
     `Run id: ${runId}, run node id: ${runNodeId}.`,
+    ...surpriseReportPromptLines({ artifactRequired: true }),
     'Do not mark the parent task as done; the runner manages task graph state. Do not recursively invoke `taskops run`.',
   ], budget);
 }
@@ -1708,10 +1919,74 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         },
       };
     }
+    const surpriseReport = parseSurpriseReportFromExecutorResult(result);
+    if (surpriseReport.markerFound && surpriseReport.parseError) {
+      const reason = malformedSurpriseReason(surpriseReport);
+      rewriteFrontmatter(task.path, (fm) => {
+        fm.status = 'blocked';
+        fm.runReadiness = 'blocked';
+        fm.runReadinessReason = reason;
+        fm.lastRunFailureReason = reason;
+        fm.needsManualReview = true;
+        fm.malformedSurpriseReport = true;
+        return fm;
+      });
+      rewriteFrontmatter(runNodePath, (fm) => {
+        fm.status = 'blocked';
+        fm.result = {
+          ...executionResult,
+          malformedSurpriseReport: {
+            markerFound: true,
+            parseError: surpriseReport.parseError,
+            rawLine: surpriseReport.rawLine || '',
+            needsManualReview: true,
+          },
+        };
+        return fm;
+      });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'task_malformed_surprise_report', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        parseError: surpriseReport.parseError,
+      });
+      appendRunLog(runDir, `${finishedAt} task_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
+      return {
+        taskId: task.id,
+        runNodeId,
+        kind: 'execute',
+        status: 'failed',
+        failureKind: 'malformed_surprise_report',
+        executor,
+        message: reason,
+        budget,
+        malformedSurpriseReport: {
+          markerFound: true,
+          parseError: surpriseReport.parseError,
+          rawLine: surpriseReport.rawLine || '',
+        },
+      };
+    }
+    const surpriseHistoryEntry = surpriseReport.surpriseReported
+      ? appendSurpriseHistory({
+          task,
+          report: surpriseReport.report,
+          runId,
+          runNodeId,
+          actionKind: 'execute',
+          observedAt: finishedAt,
+          evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+        })
+      : null;
     rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
     rewriteFrontmatter(runNodePath, (fm) => {
       fm.status = 'done';
-      fm.result = executionResult;
+      fm.result = {
+        ...executionResult,
+        ...(surpriseReport.surpriseReported ? {
+          surpriseReport: surpriseReport.report,
+          surpriseHistoryEntry,
+        } : {}),
+      };
       return fm;
     });
     const reviewedRunNode = parseMarkdownFile(runNodePath);
@@ -2046,12 +2321,74 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     });
     appendRunLog(runDir, `${finishedAt} exploration_failed taskId=${task.id} reason=${result.message || ''}`);
     return {
-    taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
+      taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '',
+      budget,
     };
   }
+
+  const artifactText = result.artifactPath && existsSync(result.artifactPath)
+    ? readFileSync(result.artifactPath, 'utf8')
+    : '';
+  const surpriseReport = parseSurpriseReportFromExecutorResult(result, artifactText ? [artifactText] : []);
+  if (surpriseReport.markerFound && surpriseReport.parseError) {
+    const reason = malformedSurpriseReason(surpriseReport);
+    rewriteFrontmatter(task.path, (fm) => {
+      fm.status = 'blocked';
+      fm.runReadiness = 'blocked';
+      fm.runReadinessReason = reason;
+      fm.lastRunFailureReason = reason;
+      fm.needsManualReview = true;
+      fm.malformedSurpriseReport = true;
+      return fm;
+    });
+    rewriteFrontmatter(runNodePath, (fm) => {
+      fm.status = 'blocked';
+      fm.result = {
+        artifactPath: result.artifactPath || null,
+        malformedSurpriseReport: {
+          markerFound: true,
+          parseError: surpriseReport.parseError,
+          rawLine: surpriseReport.rawLine || '',
+          needsManualReview: true,
+        },
+      };
+      return fm;
+    });
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'exploration_malformed_surprise_report', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      parseError: surpriseReport.parseError,
+    });
+    appendRunLog(runDir, `${finishedAt} exploration_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
+    return {
+      taskId: task.id,
+      runNodeId,
+      kind: 'explore',
+      status: 'failed',
+      failureKind: 'malformed_surprise_report',
+      executor,
+      message: reason,
+      budget,
+      malformedSurpriseReport: {
+        markerFound: true,
+        parseError: surpriseReport.parseError,
+        rawLine: surpriseReport.rawLine || '',
+      },
+    };
+  }
+  const surpriseHistoryEntry = surpriseReport.surpriseReported
+    ? appendSurpriseHistory({
+        task,
+        report: surpriseReport.report,
+        runId,
+        runNodeId,
+        actionKind: 'explore',
+        observedAt: finishedAt,
+        evidenceRefs: result.artifactPath ? [result.artifactPath, `run:${runId}/node:${runNodeId}`] : [`run:${runId}/node:${runNodeId}`],
+      })
+    : null;
 
   rewriteFrontmatter(task.path, (fm) => {
     fm.status = 'done';
@@ -2061,7 +2398,17 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     return fm;
   });
   closeTaskWithEow({ task, reason: 'exploration_recorded_by_runner', finishedAt });
-  rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
+  rewriteFrontmatter(runNodePath, (fm) => {
+    fm.status = 'done';
+    fm.result = {
+      artifactPath: result.artifactPath || null,
+      ...(surpriseReport.surpriseReported ? {
+        surpriseReport: surpriseReport.report,
+        surpriseHistoryEntry,
+      } : {}),
+    };
+    return fm;
+  });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'exploration_recorded', finishedAt });
 
   logEvent(eventsPath, {

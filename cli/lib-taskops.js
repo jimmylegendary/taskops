@@ -21,7 +21,7 @@ export const DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET = 10;
 export const DEFAULT_PARTIAL_REPEAT_THRESHOLD = 3;
 
 const TASK_UNCERTAINTY_SCALAR_FIELDS = ['uncertaintyState', 'confidenceScore'];
-const TASK_UNCERTAINTY_ARRAY_FIELDS = ['knownList'];
+const TASK_UNCERTAINTY_ARRAY_FIELDS = ['knownList', 'surpriseHistory'];
 const POLICY_APPROVED_EOW_FIELDS = [
   'approvedByReviewNodeId',
   'approvedReviewMode',
@@ -91,6 +91,7 @@ const LOCALIZED_TEXT = {
       invalidUncertaintyState: (value) => `invalid uncertaintyState '${value}'`,
       invalidConfidenceScore: (value) => `invalid confidenceScore '${value}'`,
       invalidKnownList: (detail) => `invalid knownList: ${detail}`,
+      invalidSurpriseHistory: (detail) => `invalid surpriseHistory: ${detail}`,
       invalidEowGraphType: (value) => `invalid EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `invalid EoW attachedToType '${value}'`,
       missingIndexMd: 'missing index.md',
@@ -289,26 +290,59 @@ function validateTaskUncertaintyFields(task, taskPath, errors, t) {
     }
   }
 
-  if (task.knownList == null) return;
-  if (!Array.isArray(task.knownList)) {
-    errors.push(withPath(taskPath, t.invalidKnownList('knownList must be a list')));
+  if (task.knownList != null) {
+    if (!Array.isArray(task.knownList)) {
+      errors.push(withPath(taskPath, t.invalidKnownList('knownList must be a list')));
+    } else {
+      task.knownList.forEach((item, index) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} must be an object`)));
+          return;
+        }
+        if (!nonEmptyString(item.id)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty id`)));
+        }
+        if (!nonEmptyString(item.claim)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty claim`)));
+        }
+        const status = String(item.verificationStatus || '').trim();
+        if (!KNOWN_VERIFICATION_STATUS_VALUES.includes(status)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} has invalid verificationStatus '${item.verificationStatus}'`)));
+        }
+      });
+    }
+  }
+
+  if (task.surpriseHistory == null) return;
+  if (!Array.isArray(task.surpriseHistory)) {
+    errors.push(withPath(taskPath, t.invalidSurpriseHistory('surpriseHistory must be a list')));
     return;
   }
 
-  task.knownList.forEach((item, index) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} must be an object`)));
+  task.surpriseHistory.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} must be an object`)));
       return;
     }
-    if (!nonEmptyString(item.id)) {
-      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty id`)));
+    if (!nonEmptyString(entry.id)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} missing non-empty id`)));
     }
-    if (!nonEmptyString(item.claim)) {
-      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty claim`)));
+    if (!nonEmptyString(entry.actionKind)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} missing non-empty actionKind`)));
     }
-    const status = String(item.verificationStatus || '').trim();
-    if (!KNOWN_VERIFICATION_STATUS_VALUES.includes(status)) {
-      errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} has invalid verificationStatus '${item.verificationStatus}'`)));
+    if (!nonEmptyString(entry.observedAt)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} missing non-empty observedAt`)));
+    }
+    if (entry.surpriseScore != null) {
+      const score = Number(entry.surpriseScore);
+      if (!Number.isFinite(score) || score < 0 || score > 1) {
+        errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} has invalid surpriseScore '${entry.surpriseScore}'`)));
+      }
+    }
+    for (const listField of ['contradictedKnownIds', 'newUnknownIds', 'blockingNewUnknownIds', 'nonBlockingNewUnknownIds', 'newKnownIds']) {
+      if (entry[listField] != null && !Array.isArray(entry[listField])) {
+        errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} field ${listField} must be a list`)));
+      }
     }
   });
 }
@@ -1065,6 +1099,40 @@ export function inferUncertaintyReadiness(task) {
   };
 }
 
+export function informationGainConvergence(task, { window = 3, maxSurpriseScore = 0.2 } = {}) {
+  const history = Array.isArray(task?.surpriseHistory) ? task.surpriseHistory : [];
+  const normalizedWindow = Math.max(1, Math.floor(Number(window) || 3));
+  const threshold = Number.isFinite(Number(maxSurpriseScore)) ? Number(maxSurpriseScore) : 0.2;
+  if (history.length < normalizedWindow) {
+    return {
+      converged: false,
+      window: normalizedWindow,
+      maxSurpriseScore: threshold,
+      observedCount: history.length,
+      reason: `need ${normalizedWindow} surprise observations; found ${history.length}`,
+    };
+  }
+  const recent = history.slice(-normalizedWindow);
+  const highSurprise = recent.filter((entry) => Number(entry.surpriseScore) > threshold);
+  const contradictedKnownIds = recent.flatMap((entry) => Array.isArray(entry.contradictedKnownIds) ? entry.contradictedKnownIds : []);
+  const blockingNewUnknownIds = recent.flatMap((entry) => Array.isArray(entry.blockingNewUnknownIds)
+    ? entry.blockingNewUnknownIds
+    : (Array.isArray(entry.newUnknownIds) ? entry.newUnknownIds : []));
+  const converged = highSurprise.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
+  return {
+    converged,
+    window: normalizedWindow,
+    maxSurpriseScore: threshold,
+    observedCount: history.length,
+    recentScores: recent.map((entry) => Number(entry.surpriseScore || 0)),
+    contradictedKnownIds,
+    blockingNewUnknownIds,
+    reason: converged
+      ? `${normalizedWindow} consecutive low-surprise observations`
+      : 'recent surprise history still contains high surprise, contradicted known claims, or blocking unknowns',
+  };
+}
+
 function hasRunnableTaskContract(task) {
   return nonEmptyString(task.objective)
     && nonEmptyString(task.responsibility)
@@ -1679,6 +1747,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.knownList)) fm.knownList = cloneFrontmatterValue(task.knownList);
+    if (Array.isArray(task.surpriseHistory)) fm.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
@@ -1809,6 +1878,7 @@ function cloneTaskForPromotion(task) {
   if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
   if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
+  if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
@@ -2567,6 +2637,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
     if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
     if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
+    if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
     const order = task.order ?? 0;
     if (task.id === fromTaskId) {
       cloned.status = 'pending';
