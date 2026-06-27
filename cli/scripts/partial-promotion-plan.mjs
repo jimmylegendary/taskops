@@ -33,6 +33,59 @@ function writeTaskPartial(workDir, versionId, taskId, partialId, { completedSumm
   );
 }
 
+function taskPath(workDir, versionId, taskId) {
+  return join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'tasks', `${taskId}.md`);
+}
+
+function eowPath(workDir, versionId, taskId) {
+  return join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'eow', `eow-${taskId}.md`);
+}
+
+function selectedVersionId(workDir) {
+  const snapshot = parseMarkdownFile(join(workDir, 'snapshots', 'snapshot-root-v1.md'));
+  return snapshot.selectedVersions.find((pair) => pair.taskGroupId === 'tg-root').versionId;
+}
+
+function markTaskDoneWithApprovedEow(workDir, versionId, taskId) {
+  const taskFile = taskPath(workDir, versionId, taskId);
+  let taskText = readFileSync(taskFile, 'utf8');
+  if (/status: pending/.test(taskText)) taskText = taskText.replace('status: pending', 'status: done');
+  else if (/status: blocked/.test(taskText)) taskText = taskText.replace('status: blocked', 'status: done');
+  else if (!/status: done/.test(taskText)) throw new Error(`Cannot mark ${versionId}/${taskId} done; missing status field`);
+  if (!/runReadiness: runnable/.test(taskText)) {
+    taskText = taskText.replace(/runReadiness: [^\n]+\n/, 'runReadiness: runnable\n');
+  }
+  writeFileSync(taskFile, taskText, 'utf8');
+
+  const eowDir = join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'eow');
+  mkdirSync(eowDir, { recursive: true });
+  writeFileSync(
+    eowPath(workDir, versionId, taskId),
+    `---\ntaskOpsVersion: v1\nentityType: eow\nid: eow-${taskId}\ngraphType: task\nattachedToType: task\nattachedToId: ${taskId}\nreason: approved_result\ndeclaredBy: smoke\ndeclaredAt: 2026-06-27T00:00:00Z\ncreatedAt: 2026-06-27T00:00:00Z\nstatus: done\ntaskGroupVersionId: ${versionId}\napprovedByReviewNodeId: review-${taskId}\napprovedReviewMode: guarded\napprovedReviewReportHash: review-hash-${taskId}\nreviewedAcceptanceHash: acceptance-hash-${taskId}\nreviewedResultHash: result-hash-${taskId}\n---\n# EoW: ${taskId}\n`,
+    'utf8',
+  );
+}
+
+function promotePartialAndClose(workDir, taskId, partialId) {
+  const fromVersionId = selectedVersionId(workDir);
+  writeTaskPartial(workDir, fromVersionId, taskId, partialId);
+  const applied = json(['promote-partials', workDir, '--apply', '--partial-id', partialId]);
+  assert.equal(applied.applied, true);
+  assert.equal(applied.promotionCount, 1);
+  const toVersionId = applied.appliedVersionPlans[0].toVersionId;
+  const promotion = applied.versionPlans[0].promotions[0];
+  assert.equal(promotion.sourceTaskId, taskId);
+  markTaskDoneWithApprovedEow(workDir, toVersionId, promotion.followUpTaskId);
+  const unblock = json(['unblock-check', workDir]);
+  assert.equal(
+    unblock.unblocked.some((item) => item.taskId === taskId && item.taskGroupVersionId === toVersionId),
+    true,
+    `${taskId} should reopen after ${promotion.followUpTaskId} completes`,
+  );
+  markTaskDoneWithApprovedEow(workDir, toVersionId, taskId);
+  return { fromVersionId, toVersionId, promotion };
+}
+
 assert.equal(isPartialUnresolved({}), true);
 assert.equal(isPartialUnresolved({ supersededBy: null }), true);
 assert.equal(isPartialUnresolved({ supersededBy: '' }), true);
@@ -527,5 +580,104 @@ const reviewOnlyTask = parseMarkdownFile(join(reviewOnlyWorkDir, 'task-groups', 
 assert.equal(reviewOnlyTask.needsManualReview, true);
 assert.equal(reviewOnlyTask.repeatedPartialNeedsReview, true);
 assert.equal(reviewOnlyTask.repeatedPartialCount, 3);
+
+const multiWaveWorkDir = join(tempRoot, 'multi-wave-preserved-eow-work');
+run(['init', multiWaveWorkDir, '--id', 'multi-wave-preserved-eow', '--title', 'Multi-wave preserved EoW', '--objective', 'Verify multi-wave preserved EoW carry-forward', '--language', 'en']);
+const multiWaveSpecPath = join(tempRoot, 'multi-wave-preserved-eow-spec.json');
+writeFileSync(multiWaveSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v2',
+  version: 'v2',
+  summary: 'Multi-wave preserved EoW fixture',
+  selected: true,
+  tasks: [
+    {
+      id: 'task-a',
+      title: 'Already approved task',
+      objective: 'Already approved before partial waves begin.',
+      responsibility: 'Verify EoW preservation across all waves.',
+      completionCriteria: 'Approval evidence remains policy-approved after later waves.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+    },
+    {
+      id: 'task-b',
+      title: 'Wave one task',
+      objective: 'Produce first partial wave.',
+      responsibility: 'Verify first wave.',
+      completionCriteria: 'Follow-up completes and source closes.',
+      order: 2,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+    },
+    {
+      id: 'task-c',
+      title: 'Wave two task',
+      objective: 'Produce second partial wave.',
+      responsibility: 'Verify second wave.',
+      completionCriteria: 'Follow-up completes and source closes.',
+      order: 3,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+    },
+    {
+      id: 'task-d',
+      title: 'Wave three task',
+      objective: 'Produce third partial wave.',
+      responsibility: 'Verify third wave.',
+      completionCriteria: 'Follow-up completes and source closes.',
+      order: 4,
+      status: 'pending',
+      runReadiness: 'runnable',
+      understandingLevel: 'known',
+    },
+  ],
+}), 'utf8');
+run(['decompose', multiWaveWorkDir, '--task-group-id', 'tg-root', '--spec', multiWaveSpecPath]);
+writeFileSync(
+  join(multiWaveWorkDir, 'snapshots', 'snapshot-root-v1.md'),
+  readFileSync(join(multiWaveWorkDir, 'snapshots', 'snapshot-root-v1.md'), 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'),
+  'utf8',
+);
+markTaskDoneWithApprovedEow(multiWaveWorkDir, 'tgv-root-v2', 'task-a');
+const waveOne = promotePartialAndClose(multiWaveWorkDir, 'task-b', 'partial-multi-task-b');
+assert.equal(waveOne.toVersionId, 'tgv-root-v3');
+const taskAInV3Eow = parseMarkdownFile(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'eow', 'eow-task-a-tgv-root-v3.md'));
+assert.equal(taskAInV3Eow.reason, 'preserved_upstream_after_restart');
+assert.equal(taskAInV3Eow.preservedFromVersionId, 'tgv-root-v2');
+assert.equal(taskAInV3Eow.preservedFromEowId, 'eow-task-a');
+assert.equal(taskAInV3Eow.approvedByReviewNodeId, 'review-task-a');
+const waveTwo = promotePartialAndClose(multiWaveWorkDir, 'task-c', 'partial-multi-task-c');
+assert.equal(waveTwo.toVersionId, 'tgv-root-v4');
+assert.equal(existsSync(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v4', 'eow', 'eow-task-a-tgv-root-v4.md')), true, 'second wave must preserve first task EoW again');
+const waveThree = promotePartialAndClose(multiWaveWorkDir, 'task-d', 'partial-multi-task-d');
+assert.equal(waveThree.toVersionId, 'tgv-root-v5');
+const finalVersionId = selectedVersionId(multiWaveWorkDir);
+assert.equal(finalVersionId, 'tgv-root-v5');
+for (const taskId of ['task-a', 'task-b', 'task-task-b-followup', 'task-c', 'task-task-c-followup', 'task-d', 'task-task-d-followup']) {
+  const eowFiles = [`eow-${taskId}-tgv-root-v5.md`, `eow-${taskId}.md`];
+  assert.equal(
+    eowFiles.some((file) => existsSync(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', finalVersionId, 'eow', file))),
+    true,
+    `${taskId} should have an EoW in final multi-wave version`,
+  );
+}
+const finalTaskAEow = parseMarkdownFile(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', finalVersionId, 'eow', 'eow-task-a-tgv-root-v5.md'));
+assert.equal(finalTaskAEow.reason, 'preserved_upstream_after_restart');
+assert.equal(finalTaskAEow.preservedFromVersionId, 'tgv-root-v2', 'multi-wave preservation should keep original provenance, not a hop-by-hop chain');
+assert.equal(finalTaskAEow.preservedFromEowId, 'eow-task-a');
+assert.equal(finalTaskAEow.approvedByReviewNodeId, 'review-task-a');
+assert.equal(finalTaskAEow.approvedReviewMode, 'guarded');
+const multiWaveExplain = json(['explain', multiWaveWorkDir]);
+assert.equal(multiWaveExplain.complete, true);
+assert.equal(multiWaveExplain.next.stopReason, 'all_closed');
+const multiWaveAudit = json(['audit', multiWaveWorkDir, '--max-tasks-flat', '99']);
+assert.equal(multiWaveAudit.metrics.structuralComplete, true);
+assert.equal(multiWaveAudit.metrics.policyApprovedComplete, true);
+assert.equal(multiWaveAudit.metrics.unresolvedPartialCount, 0);
+assert.equal(multiWaveAudit.claimSafe, true);
 
 console.log('partial promotion plan smoke passed');

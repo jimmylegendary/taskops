@@ -18,6 +18,15 @@ export const DEFAULT_MAX_FOLLOW_UP_DEPTH = 1;
 export const DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET = 10;
 export const DEFAULT_PARTIAL_REPEAT_THRESHOLD = 3;
 
+const POLICY_APPROVED_EOW_FIELDS = [
+  'approvedByReviewNodeId',
+  'approvedReviewMode',
+  'approvedReviewReportHash',
+  'reviewedAcceptanceHash',
+  'reviewedResultHash',
+];
+const POLICY_APPROVED_MODES = new Set(['enforced', 'guarded', 'runner-managed']);
+
 const SUMMARY_LABELS = Object.freeze({
   projectId: 'Work ID',
   projectObjective: 'Work objective',
@@ -815,15 +824,14 @@ export function parseProject(projectDir) {
 }
 
 function isPolicyApprovedEow(eow) {
-  const policyApprovedModes = new Set(['enforced', 'guarded', 'runner-managed']);
   return Boolean(
     eow
-    && eow.reason === 'approved_result'
+    && ['approved_result', 'preserved_upstream_after_restart'].includes(eow.reason)
     && eow.approvedByReviewNodeId
     && eow.approvedReviewReportHash
     && eow.reviewedAcceptanceHash
     && eow.reviewedResultHash
-    && policyApprovedModes.has(String(eow.approvedReviewMode || '').trim())
+    && POLICY_APPROVED_MODES.has(String(eow.approvedReviewMode || '').trim())
   );
 }
 
@@ -1500,7 +1508,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       status: eow.status || 'done',
       taskGroupVersionId: versionId,
     };
-    for (const key of ['preservedFromVersionId', 'preservedFromEowId']) {
+    for (const key of ['preservedFromVersionId', 'preservedFromEowId', 'preservedFromReason', ...POLICY_APPROVED_EOW_FIELDS]) {
       if (eow[key] !== undefined && eow[key] !== null && eow[key] !== '') eowFm[key] = eow[key];
     }
     writeFileSync(join(versionDir, 'eow', `${eow.id}.md`), fmBlock(eowFm) + `# EoW: ${eow.attachedToId}\n`, 'utf8');
@@ -1758,26 +1766,65 @@ function buildFollowUpTask({ partial, sourceTask, sourceVersion, newVersionId, f
   return followUpTask;
 }
 
+function eowDeclaredTime(eow) {
+  const value = Date.parse(eow?.declaredAt || eow?.createdAt || '');
+  return Number.isFinite(value) ? value : 0;
+}
+
+function selectTaskEowForCarryForward(sourceVersion, task) {
+  const candidates = (sourceVersion.eows || []).filter((eow) => (
+    eow
+    && eow.graphType === 'task'
+    && eow.attachedToType === 'task'
+    && eow.attachedToId === task.id
+    && eow.status === 'done'
+  ));
+  if (candidates.length === 0) return null;
+
+  return candidates.sort((a, b) => {
+    const policyDelta = Number(isPolicyApprovedEow(b)) - Number(isPolicyApprovedEow(a));
+    if (policyDelta !== 0) return policyDelta;
+    const manualDelta = Number(isManualAttestedEow(a)) - Number(isManualAttestedEow(b));
+    if (manualDelta !== 0) return manualDelta;
+    const timeDelta = eowDeclaredTime(b) - eowDeclaredTime(a);
+    if (timeDelta !== 0) return timeDelta;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  })[0];
+}
+
+function carriedForwardTaskEow({ sourceEow, task, sourceVersion, newVersionId, declaredBy }) {
+  const eow = {
+    id: `eow-${task.id}-${newVersionId}`,
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: task.id,
+    reason: 'preserved_upstream_after_restart',
+    declaredBy,
+    status: 'done',
+    preservedFromVersionId: sourceEow.preservedFromVersionId || sourceEow.taskGroupVersionId || sourceVersion.id,
+    preservedFromEowId: sourceEow.preservedFromEowId || sourceEow.id || `eow-${task.id}`,
+    preservedFromReason: sourceEow.preservedFromReason || sourceEow.reason || null,
+  };
+  for (const key of POLICY_APPROVED_EOW_FIELDS) {
+    if (sourceEow[key] !== undefined && sourceEow[key] !== null && sourceEow[key] !== '') eow[key] = sourceEow[key];
+  }
+  return eow;
+}
+
 function preservedEowsForPromotion(sourceVersion, newVersionId) {
   const eows = [];
-  const sourceEowDir = join(sourceVersion.path, 'eow');
   for (const task of sourceVersion.tasks) {
     if ((task.status ?? 'pending') !== 'done') continue;
     if (task.childTaskGroupId) continue;
-    const sourceEowPath = join(sourceEowDir, `eow-${task.id}.md`);
-    if (!existsSync(sourceEowPath)) continue;
-    const eowFm = parseMarkdownFile(sourceEowPath);
-    eows.push({
-      id: `eow-${task.id}-${newVersionId}`,
-      graphType: 'task',
-      attachedToType: 'task',
-      attachedToId: task.id,
-      reason: 'preserved_upstream_after_restart',
+    const sourceEow = selectTaskEowForCarryForward(sourceVersion, task);
+    if (!sourceEow) continue;
+    eows.push(carriedForwardTaskEow({
+      sourceEow,
+      task,
+      sourceVersion,
+      newVersionId,
       declaredBy: 'taskops-promote-partials',
-      status: 'done',
-      preservedFromVersionId: sourceVersion.id,
-      preservedFromEowId: eowFm.id || `eow-${task.id}`,
-    });
+    }));
   }
   return eows;
 }
@@ -2350,26 +2397,15 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     if (order >= targetOrder) continue;
     if ((task.status ?? 'pending') !== 'done') continue;
     if (task.childTaskGroupId) continue;
-    const sourceEowDir = join(sourceVersion.path, 'eow');
-    const sourceEowPath = join(sourceEowDir, `eow-${task.id}.md`);
-    let preservedFromEowId = null;
-    if (existsSync(sourceEowPath)) {
-      const eowFm = parseMarkdownFile(sourceEowPath);
-      preservedFromEowId = eowFm.id || `eow-${task.id}`;
-    }
-    specEows.push({
-      id: `eow-${task.id}-${newVersionId}`,
-      graphType: 'task',
-      attachedToType: 'task',
-      attachedToId: task.id,
-      reason: 'preserved_upstream_after_restart',
+    const sourceEow = selectTaskEowForCarryForward(sourceVersion, task);
+    if (!sourceEow) continue;
+    specEows.push(carriedForwardTaskEow({
+      sourceEow,
+      task,
+      sourceVersion,
+      newVersionId,
       declaredBy: 'taskops-restart',
-      declaredAt: now,
-      createdAt: now,
-      status: 'done',
-      preservedFromVersionId: sourceVersion.id,
-      preservedFromEowId,
-    });
+    }));
   }
 
   const summary = `Restart from task '${fromTaskId}'${reason ? ` (${reason})` : ''}`;
