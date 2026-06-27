@@ -2,16 +2,18 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { classifyTaskReadiness, informationGainConvergence, parseMarkdownFile, parseProject } from '../lib-taskops.js';
+import { classifyTaskReadiness, fmBlock, informationGainConvergence, parseMarkdownFile, parseProject } from '../lib-taskops.js';
 import {
   SURPRISE_REPORT_PREFIX,
+  applyInheritedBirthSnapshotToChildVersion,
   buildAgentDecompositionPrompt,
   buildAgentExecutionPrompt,
   buildAgentExplorationPrompt,
   computeSurpriseHistoryEntry,
+  hydrateInheritedContext,
   parseSurpriseReportFromExecutorResult,
 } from '../lib-runner.js';
 
@@ -120,6 +122,11 @@ function assertInheritedFromPreserved(task, message) {
   assert.equal(task.inheritedFrom?.inheritedSurpriseRefs?.[0]?.surpriseHistoryId, 'surprise-parent-1', message);
 }
 
+function writeMd(filePath, fm, body = '') {
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, fmBlock(fm) + body, 'utf8');
+}
+
 const unknownUnknown = classify({
   uncertaintyState: 'unknown_unknown',
   confidenceScore: 0.2,
@@ -168,6 +175,15 @@ const inheritedWithoutUncertainty = classify({
 });
 assert.equal(inheritedWithoutUncertainty.runReadiness, 'needs_exploration');
 assert.equal(inheritedWithoutUncertainty.legacyComparison.runReadiness, 'runnable');
+
+const inheritedWithoutUncertaintyDecompose = classify({
+  runReadiness: 'needs_decomposition',
+  runReadinessReason: 'Legacy decomposition should remain possible with inherited context.',
+  childTaskGroupId: 'tg-child',
+  inheritedFrom: inheritedFromFixture(),
+});
+assert.equal(inheritedWithoutUncertaintyDecompose.runReadiness, 'needs_decomposition');
+assert.equal(inheritedWithoutUncertaintyDecompose.source, 'explicit');
 
 const knownMissingContract = classify({
   uncertaintyState: 'known',
@@ -246,13 +262,25 @@ const surpriseLine = `${SURPRISE_REPORT_PREFIX} ${JSON.stringify({
   summary: 'One prior claim was contradicted and one blocking unknown emerged.',
   contradictedKnown: [{ knownId: 'k1', observedEvidence: 'The API does not expose the assumed method.', correctedClaim: 'The integration needs schema discovery first.' }],
   discoveredUnknowns: [{ id: 'u1', question: 'Which API mutation replaces the missing method?', whyDiscovered: 'Method call failed.', blocksReadiness: true }],
-  newKnownDeltas: [{ id: 'k2', claim: 'The API requires schema discovery before implementation.', evidence: 'Observed missing method.' }],
+  newKnownDeltas: [{
+    id: 'k2',
+    claim: 'The API requires schema discovery before implementation.',
+    evidence: 'Observed missing method.',
+    revalidatedFromInheritedRef: 'inh-task-parent-k-parent-wrong',
+    sourceTaskId: 'task-parent',
+    sourceKnownId: 'k-parent-wrong',
+    sourceSurpriseRefs: ['surprise-parent-1'],
+  }],
 })}`;
 const parsedSurprise = parseSurpriseReportFromExecutorResult({ stdout: `done\n${surpriseLine}` });
 assert.equal(parsedSurprise.surpriseReported, true);
 assert.equal(parsedSurprise.report.contradictedKnown[0].knownId, 'k1');
 assert.equal(parsedSurprise.report.discoveredUnknowns[0].blocksReadiness, true);
 assert.equal(parsedSurprise.report.newKnownDeltas[0].verificationStatus, 'unverified');
+assert.equal(parsedSurprise.report.newKnownDeltas[0].revalidatedFromInheritedRef, 'inh-task-parent-k-parent-wrong');
+assert.equal(parsedSurprise.report.newKnownDeltas[0].sourceTaskId, 'task-parent');
+assert.equal(parsedSurprise.report.newKnownDeltas[0].sourceKnownId, 'k-parent-wrong');
+assert.deepEqual(parsedSurprise.report.newKnownDeltas[0].sourceSurpriseRefs, ['surprise-parent-1']);
 
 const historyEntry = computeSurpriseHistoryEntry({
   task: {
@@ -378,6 +406,244 @@ const v4Task = parseMarkdownFile(join(workDir, 'task-groups', 'tg-root', 'versio
 assertKnownListPreserved(v4Task, 'partial promotion should preserve uncertainty metadata on cloned source task');
 assertInheritedFromPreserved(v4Task, 'partial promotion should preserve inherited context separately');
 assert.deepEqual(parseProject(workDir).errors, []);
+
+const inheritDir = join(tempRoot, 'inheritance-work');
+run(['init', inheritDir, '--id', 'inheritance-work', '--title', 'Inheritance work', '--objective', 'Verify direct ancestor inherited context hydration.', '--language', 'en']);
+const inheritNow = '2026-06-28T03:00:00Z';
+const rootVersionDir = join(inheritDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1');
+const rootTaskPath = join(rootVersionDir, 'tasks', 'task-parent.md');
+writeMd(rootTaskPath, {
+  taskOpsVersion: 'v1',
+  entityType: 'task',
+  id: 'task-parent',
+  taskGroupId: 'tg-root',
+  taskGroupVersionId: 'tgv-root-v1',
+  title: 'Parent with wrong known',
+  objective: 'Expose a wrong parent known to child inheritance.',
+  responsibility: 'Hold the upstream claim and later contradiction.',
+  completionCriteria: 'The child treats this only as inherited context.',
+  order: 1,
+  createdAt: inheritNow,
+  status: 'pending',
+  runReadiness: 'needs_decomposition',
+  uncertaintyState: 'known',
+  confidenceScore: 0.9,
+  childTaskGroupId: 'tg-child',
+  knownList: [
+    {
+      id: 'k-parent-wrong',
+      claim: 'The API endpoint is /v1/old-widgets.',
+      verificationStatus: 'unverified',
+      observedAt: inheritNow,
+    },
+  ],
+}, '# Parent with wrong known\n');
+
+writeMd(join(inheritDir, 'task-groups', 'tg-child', 'index.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'taskGroup',
+  id: 'tg-child',
+  objective: 'Child group for inherited context hydration.',
+  createdAt: inheritNow,
+  status: 'active',
+}, '# Child group\n');
+writeMd(join(inheritDir, 'task-groups', 'tg-child', 'versions', 'tgv-child-v1', 'index.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'taskGroupVersion',
+  id: 'tgv-child-v1',
+  taskGroupId: 'tg-child',
+  version: 'v1',
+  summary: 'Child version with parent backlink',
+  selected: true,
+  createdAt: inheritNow,
+  status: 'active',
+  decomposedFromTaskId: 'task-parent',
+  decomposedFromTaskGroupId: 'tg-root',
+  decomposedFromTaskGroupVersionId: 'tgv-root-v1',
+  decomposedByRunId: 'run-inherit',
+  decomposedByRunNodeId: 'rn-decompose-parent',
+}, '# Child version\n');
+const childTaskPath = join(inheritDir, 'task-groups', 'tg-child', 'versions', 'tgv-child-v1', 'tasks', 'task-child.md');
+writeMd(childTaskPath, {
+  taskOpsVersion: 'v1',
+  entityType: 'task',
+  id: 'task-child',
+  taskGroupId: 'tg-child',
+  taskGroupVersionId: 'tgv-child-v1',
+  title: 'Child must not trust inherited known',
+  objective: 'Attempt to copy an inherited parent claim into local knownList.',
+  responsibility: 'Demonstrate that copied inherited claims are stripped.',
+  completionCriteria: 'The task remains non-runnable until local validation.',
+  order: 1,
+  createdAt: inheritNow,
+  status: 'pending',
+  runReadiness: 'runnable',
+  uncertaintyState: 'known',
+  confidenceScore: 0.8,
+  childTaskGroupId: 'tg-grandchild',
+  knownList: [
+    {
+      id: 'k-parent-wrong',
+      claim: 'The API endpoint is /v1/old-widgets.',
+      verificationStatus: 'unverified',
+    },
+  ],
+}, '# Child contamination attempt\n');
+
+writeMd(join(inheritDir, 'task-groups', 'tg-grandchild', 'index.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'taskGroup',
+  id: 'tg-grandchild',
+  objective: 'Grandchild group for amplification guard.',
+  createdAt: inheritNow,
+  status: 'active',
+}, '# Grandchild group\n');
+writeMd(join(inheritDir, 'task-groups', 'tg-grandchild', 'versions', 'tgv-grandchild-v1', 'index.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'taskGroupVersion',
+  id: 'tgv-grandchild-v1',
+  taskGroupId: 'tg-grandchild',
+  version: 'v1',
+  summary: 'Grandchild version with child backlink',
+  selected: true,
+  createdAt: inheritNow,
+  status: 'active',
+  decomposedFromTaskId: 'task-child',
+  decomposedFromTaskGroupId: 'tg-child',
+  decomposedFromTaskGroupVersionId: 'tgv-child-v1',
+  decomposedByRunId: 'run-inherit',
+  decomposedByRunNodeId: 'rn-decompose-child',
+}, '# Grandchild version\n');
+const grandchildTaskPath = join(inheritDir, 'task-groups', 'tg-grandchild', 'versions', 'tgv-grandchild-v1', 'tasks', 'task-grandchild.md');
+writeMd(grandchildTaskPath, {
+  taskOpsVersion: 'v1',
+  entityType: 'task',
+  id: 'task-grandchild',
+  taskGroupId: 'tg-grandchild',
+  taskGroupVersionId: 'tgv-grandchild-v1',
+  title: 'Grandchild must not amplify wrong known',
+  objective: 'Verify inherited parent claims remain references across generations.',
+  responsibility: 'Observe direct ancestor inherited context without treating it as local truth.',
+  completionCriteria: 'No upstream claim is copied into local knownList.',
+  order: 1,
+  createdAt: inheritNow,
+  status: 'pending',
+  runReadiness: 'needs_exploration',
+  uncertaintyState: 'known_unknown',
+  confidenceScore: 0.3,
+}, '# Grandchild\n');
+
+writeMd(join(inheritDir, 'runs', 'run-inherit', 'index.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'run',
+  id: 'run-inherit',
+  workId: 'inheritance-work',
+  createdAt: inheritNow,
+  status: 'active',
+}, '# Inheritance run\n');
+writeMd(join(inheritDir, 'runs', 'run-inherit', 'nodes', 'rn-decompose-parent.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'runNode',
+  id: 'rn-decompose-parent',
+  runId: 'run-inherit',
+  type: 'decomposition',
+  title: 'Decompose parent',
+  status: 'done',
+  createdAt: inheritNow,
+  sourceTaskId: 'task-parent',
+  sourceTaskGroupVersionId: 'tgv-root-v1',
+}, '# Decompose parent\n');
+writeMd(join(inheritDir, 'runs', 'run-inherit', 'nodes', 'rn-decompose-child.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'runNode',
+  id: 'rn-decompose-child',
+  runId: 'run-inherit',
+  type: 'decomposition',
+  title: 'Decompose child',
+  status: 'done',
+  createdAt: inheritNow,
+  sourceTaskId: 'task-child',
+  sourceTaskGroupVersionId: 'tgv-child-v1',
+}, '# Decompose child\n');
+writeMd(join(inheritDir, 'snapshots', 'snapshot-root-v1.md'), {
+  taskOpsVersion: 'v1',
+  entityType: 'versionSnapshot',
+  id: 'snapshot-root-v1',
+  rootTaskGroupId: 'tg-root',
+  createdAt: inheritNow,
+  label: 'Inheritance selected versions',
+  status: 'active',
+  selectedVersions: [
+    { taskGroupId: 'tg-root', versionId: 'tgv-root-v1' },
+    { taskGroupId: 'tg-child', versionId: 'tgv-child-v1' },
+    { taskGroupId: 'tg-grandchild', versionId: 'tgv-grandchild-v1' },
+  ],
+}, '# Snapshot root v1\n');
+
+let inheritanceParsed = parseProject(inheritDir);
+assert.deepEqual(inheritanceParsed.errors, [], 'inheritance fixture should validate before birth snapshot');
+const birthResult = applyInheritedBirthSnapshotToChildVersion({
+  projectDir: inheritDir,
+  childTaskGroupId: 'tg-child',
+  versionId: 'tgv-child-v1',
+  capturedAt: '2026-06-28T03:05:00Z',
+});
+assert.equal(birthResult.applied, true);
+assert.equal(birthResult.tasksUpdated, 1);
+assert.equal(birthResult.removedKnownCopies, 1);
+const childAfterBirth = parseMarkdownFile(childTaskPath);
+assert.equal(childAfterBirth.inheritedKnownCopyRemoved, true);
+assert.deepEqual(childAfterBirth.inheritedKnownCopyRemovedIds, ['k-parent-wrong']);
+assert.deepEqual(childAfterBirth.knownList, []);
+assert.equal(childAfterBirth.inheritedFrom?.inheritedKnownRefs?.[0]?.sourceKnownId, 'k-parent-wrong');
+assert.equal(childAfterBirth.inheritedFrom?.inheritedKnownRefs?.[0]?.trust, 'inherited_unverified');
+const childGuard = classifyTaskReadiness(childAfterBirth);
+assert.equal(childGuard.runReadiness, 'needs_exploration');
+assert.ok(childGuard.consistencyIssues.some((issue) => issue.code === 'inherited_only_known_not_runnable'));
+inheritanceParsed = parseProject(inheritDir);
+assert.deepEqual(inheritanceParsed.errors, [], 'birth snapshot should keep inheritance fixture valid');
+
+writeMd(rootTaskPath, {
+  ...parseMarkdownFile(rootTaskPath),
+  surpriseHistory: [
+    {
+      id: 'surprise-parent-contradiction',
+      actionKind: 'execute',
+      observedAt: '2026-06-28T03:10:00Z',
+      surpriseScore: 1,
+      surpriseLevel: 'high',
+      contradictedKnownIds: ['k-parent-wrong'],
+      newUnknownIds: [],
+      blockingNewUnknownIds: [],
+      newKnownIds: [],
+      summary: 'The upstream endpoint claim was contradicted.',
+    },
+  ],
+}, '# Parent with contradicted known\n');
+
+inheritanceParsed = parseProject(inheritDir);
+assert.deepEqual(inheritanceParsed.errors, [], 'parent contradiction should keep inheritance fixture valid');
+const activeInheritanceSnapshot = inheritanceParsed.snapshots.get(inheritanceParsed.project.activeSnapshotId);
+const childParsed = inheritanceParsed.tasks.get('tgv-child-v1:task-child');
+const hydratedChild = hydrateInheritedContext(inheritanceParsed, childParsed, activeInheritanceSnapshot);
+assert.equal(hydratedChild.stale, true);
+assert.equal(hydratedChild.inheritedKnownRefs[0].trust, 'contradicted_upstream');
+assert.equal(hydratedChild.inheritedFailurePatterns.some((pattern) => pattern.type === 'contradicted_known' && pattern.sourceKnownId === 'k-parent-wrong'), true);
+const childExecutionPrompt = buildAgentExecutionPrompt({
+  project: inheritanceParsed.project,
+  task: childParsed,
+  inheritedContext: hydratedChild,
+});
+assert.match(childExecutionPrompt, /Inherited context \(not ground truth\)/);
+assert.match(childExecutionPrompt, /Stale warning: birth inheritedFrom snapshot differs from latest ancestor known\/surprise context/);
+assert.match(childExecutionPrompt, /trust=contradicted_upstream/);
+
+const grandchildParsed = inheritanceParsed.tasks.get('tgv-grandchild-v1:task-grandchild');
+const hydratedGrandchild = hydrateInheritedContext(inheritanceParsed, grandchildParsed, activeInheritanceSnapshot);
+assert.equal(hydratedGrandchild.parentChain.length, 2);
+assert.equal(hydratedGrandchild.inheritedKnownRefs.some((ref) => ref.sourceTaskId === 'task-child' && ref.sourceKnownId === 'k-parent-wrong'), false);
+assert.equal(hydratedGrandchild.inheritedKnownRefs.some((ref) => ref.sourceTaskId === 'task-parent' && ref.sourceKnownId === 'k-parent-wrong' && ref.trust === 'contradicted_upstream'), true);
+assert.deepEqual(parseMarkdownFile(grandchildTaskPath).knownList ?? [], []);
 
 const invalidSpecPath = join(tempRoot, 'invalid-spec.json');
 writeFileSync(invalidSpecPath, JSON.stringify({

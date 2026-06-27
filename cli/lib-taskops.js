@@ -1122,7 +1122,33 @@ function isManualAttestedEow(eow) {
 export function classifyTaskReadiness(task) {
   if (!task || typeof task !== 'object') throw new Error('Task is required');
   const legacy = classifyTaskReadinessV05(task);
-  if (!hasUncertaintyReadinessFields(task) && !hasInheritedContext(task)) return legacy;
+  const hasUncertainty = hasUncertaintyReadinessFields(task);
+  const hasInherited = hasInheritedContext(task);
+  if (!hasUncertainty && !hasInherited) return legacy;
+
+  if (!hasUncertainty && hasInherited) {
+    const consistencyIssues = uncertaintyReadinessConsistencyIssues(task, legacy);
+    const downgrade = strongestReadinessDowngrade(legacy.runReadiness, consistencyIssues);
+    if (downgrade) {
+      return {
+        ...legacy,
+        runReadiness: downgrade.runReadiness,
+        originalRunReadiness: legacy.runReadiness,
+        source: 'inherited_context_safety_downgrade',
+        reason: downgrade.reason,
+        nextAction: nextActionForRunReadiness(downgrade.runReadiness),
+        consistencyIssues,
+        legacyComparison: readinessComparisonFromLegacy(legacy),
+        compatibilityPolicy: 'inherited context is safety-only and never runnable evidence; legacy readiness is retained unless inherited-only runnable is detected',
+      };
+    }
+    return {
+      ...legacy,
+      consistencyIssues,
+      legacyComparison: readinessComparisonFromLegacy(legacy),
+      compatibilityPolicy: 'inherited context is safety-only and never runnable evidence; legacy readiness is retained unless inherited-only runnable is detected',
+    };
+  }
 
   const semanticReadiness = inferUncertaintyReadiness(task);
   const consistencyIssues = uncertaintyReadinessConsistencyIssues(task, semanticReadiness);
@@ -1375,8 +1401,7 @@ function uncertaintyReadinessConsistencyIssues(task, semanticReadiness) {
     });
   }
   if (inheritedKnownRefs(task).length > 0 && !hasLocalKnownEvidence(task)) {
-    const state = String(task.uncertaintyState || '').trim();
-    if (state === 'known' || semanticReadiness.runReadiness === 'runnable' || task.runReadiness === 'runnable') {
+    if (semanticReadiness.runReadiness === 'runnable' || task.runReadiness === 'runnable') {
       issues.push({
         code: 'inherited_only_known_not_runnable',
         severity: 'error',

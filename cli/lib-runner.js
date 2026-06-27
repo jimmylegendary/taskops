@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import {
+  ancestorChainForTask,
   classifyTaskReadiness,
   discoverProjects,
   ensureDir,
@@ -176,12 +177,21 @@ function normalizeDiscoveredUnknowns(value) {
 }
 
 function normalizeNewKnownDeltas(value) {
-  return normalizeObjectList(value).map((item, index) => ({
-    id: compactString(item.id) || `k-delta-${index + 1}`,
-    claim: compactString(item.claim),
-    verificationStatus: 'unverified',
-    evidence: compactString(item.evidence || item.observedEvidence),
-  })).filter((item) => item.claim);
+  return normalizeObjectList(value).map((item, index) => {
+    const delta = {
+      id: compactString(item.id) || `k-delta-${index + 1}`,
+      claim: compactString(item.claim),
+      verificationStatus: 'unverified',
+      evidence: compactString(item.evidence || item.observedEvidence),
+    };
+    if (compactString(item.revalidatedFromInheritedRef)) delta.revalidatedFromInheritedRef = compactString(item.revalidatedFromInheritedRef);
+    if (compactString(item.sourceTaskId)) delta.sourceTaskId = compactString(item.sourceTaskId);
+    if (compactString(item.sourceKnownId)) delta.sourceKnownId = compactString(item.sourceKnownId);
+    if (Array.isArray(item.sourceSurpriseRefs)) {
+      delta.sourceSurpriseRefs = item.sourceSurpriseRefs.map((ref) => String(ref || '').trim()).filter(Boolean);
+    }
+    return delta;
+  }).filter((item) => item.claim);
 }
 
 function normalizeSurpriseReportPayload(payload) {
@@ -293,6 +303,238 @@ function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, obs
     return fm;
   });
   return entry;
+}
+
+function cloneJson(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function activeSnapshotForParsed(parsed) {
+  return parsed?.project?.activeSnapshotId ? parsed.snapshots?.get(parsed.project.activeSnapshotId) || null : null;
+}
+
+function sourceTaskForChainEntry(entry) {
+  return entry?.task && typeof entry.task === 'object' ? entry.task : null;
+}
+
+function claimHash(claim) {
+  return sha256Of({ claim: compactString(claim) });
+}
+
+function surpriseHistoryForTask(task) {
+  return Array.isArray(task?.surpriseHistory) ? task.surpriseHistory.filter((entry) => entry && typeof entry === 'object') : [];
+}
+
+function contradictionRefsByKnownId(task) {
+  const refs = new Map();
+  for (const surprise of surpriseHistoryForTask(task)) {
+    const ids = Array.isArray(surprise.contradictedKnownIds) ? surprise.contradictedKnownIds : [];
+    for (const knownId of ids.map((id) => compactString(id)).filter(Boolean)) {
+      const list = refs.get(knownId) || [];
+      list.push(compactString(surprise.id) || 'surprise');
+      refs.set(knownId, list);
+    }
+  }
+  return refs;
+}
+
+function inheritedFailurePatternsForTask(task) {
+  const patterns = [];
+  for (const surprise of surpriseHistoryForTask(task)) {
+    const surpriseId = compactString(surprise.id) || `surprise-${patterns.length + 1}`;
+    const sourceTaskId = compactString(task?.id);
+    const summary = compactString(surprise.summary);
+    const contradicted = Array.isArray(surprise.contradictedKnownIds) ? surprise.contradictedKnownIds : [];
+    for (const knownId of contradicted.map((id) => compactString(id)).filter(Boolean)) {
+      patterns.push({
+        id: `fp-${sourceTaskId}-${surpriseId}-${knownId}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        type: 'contradicted_known',
+        sourceTaskId,
+        sourceSurpriseHistoryId: surpriseId,
+        sourceKnownId: knownId,
+        severity: 'warning',
+        ...(summary ? { summary } : {}),
+      });
+    }
+    if (String(surprise.surpriseLevel || '').trim() === 'high' || Number(surprise.surpriseScore) >= 0.67) {
+      patterns.push({
+        id: `fp-${sourceTaskId}-${surpriseId}-high-surprise`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        type: 'high_surprise',
+        sourceTaskId,
+        sourceSurpriseHistoryId: surpriseId,
+        severity: 'warning',
+        ...(summary ? { summary } : {}),
+      });
+    }
+    const blocking = Array.isArray(surprise.blockingNewUnknownIds) ? surprise.blockingNewUnknownIds : [];
+    for (const unknownId of blocking.map((id) => compactString(id)).filter(Boolean)) {
+      patterns.push({
+        id: `fp-${sourceTaskId}-${surpriseId}-${unknownId}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        type: 'blocking_unknown',
+        sourceTaskId,
+        sourceSurpriseHistoryId: surpriseId,
+        severity: 'warning',
+        summary: summary || `Blocking unknown ${unknownId} was discovered upstream.`,
+      });
+    }
+  }
+  return patterns;
+}
+
+function inheritedComparable(context) {
+  const normalizeRefs = (items, fields) => (Array.isArray(items) ? items : [])
+    .map((item) => Object.fromEntries(fields.map((field) => [field, item?.[field] ?? null])))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return {
+    parentChain: normalizeRefs(context?.parentChain, ['taskId', 'taskGroupId', 'taskGroupVersionId', 'childTaskGroupId', 'childTaskGroupVersionId', 'decomposedByRunId', 'decomposedByRunNodeId']),
+    inheritedKnownRefs: normalizeRefs(context?.inheritedKnownRefs, ['sourceTaskId', 'sourceTaskGroupVersionId', 'sourceKnownId', 'claimHash', 'trust', 'sourceSurpriseRefs']),
+    inheritedFailurePatterns: normalizeRefs(context?.inheritedFailurePatterns, ['type', 'sourceTaskId', 'sourceSurpriseHistoryId', 'sourceKnownId']),
+    inheritedSurpriseRefs: normalizeRefs(context?.inheritedSurpriseRefs, ['sourceTaskId', 'surpriseHistoryId']),
+  };
+}
+
+function inheritedSignature(context) {
+  return sha256Of(inheritedComparable(context));
+}
+
+function inheritedContextWithoutRuntimeFlags(context) {
+  const cloned = cloneJson(context);
+  if (!cloned || typeof cloned !== 'object') return cloned;
+  delete cloned.stale;
+  delete cloned.staleWarning;
+  delete cloned.birthSnapshotHash;
+  delete cloned.dynamicSnapshotHash;
+  return cloned;
+}
+
+export function hydrateInheritedContext(parsed, task, activeSnapshot = null, { capturedAt = null } = {}) {
+  const chain = ancestorChainForTask(parsed, task, activeSnapshot);
+  if (!Array.isArray(chain) || chain.length === 0) return null;
+  const parentChain = [];
+  const inheritedKnownRefs = [];
+  const inheritedFailurePatterns = [];
+  const inheritedSurpriseRefs = [];
+
+  for (const entry of chain) {
+    parentChain.push({
+      taskId: entry.taskId,
+      taskGroupId: entry.taskGroupId,
+      taskGroupVersionId: entry.taskGroupVersionId,
+      childTaskGroupId: entry.childTaskGroupId,
+      childTaskGroupVersionId: entry.childTaskGroupVersionId,
+      decomposedByRunId: entry.decomposedByRunId,
+      decomposedByRunNodeId: entry.decomposedByRunNodeId,
+    });
+    const sourceTask = sourceTaskForChainEntry(entry);
+    if (!sourceTask) continue;
+    const contradictions = contradictionRefsByKnownId(sourceTask);
+    const knownList = Array.isArray(sourceTask.knownList) ? sourceTask.knownList : [];
+    for (const known of knownList) {
+      const sourceKnownId = compactString(known?.id);
+      const claim = compactString(known?.claim);
+      if (!sourceKnownId || !claim) continue;
+      const sourceSurpriseRefs = contradictions.get(sourceKnownId) || [];
+      inheritedKnownRefs.push({
+        id: `inh-${sourceTask.id}-${sourceKnownId}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        sourceTaskId: sourceTask.id,
+        sourceTaskGroupVersionId: sourceTask.taskGroupVersionId,
+        sourceKnownId,
+        claimHash: claimHash(claim),
+        claimPreview: claim,
+        trust: sourceSurpriseRefs.length > 0 ? 'contradicted_upstream' : 'inherited_unverified',
+        sourceSurpriseRefs,
+        observedAt: compactString(known.observedAt || sourceTask.createdAt || capturedAt || isoNow()),
+      });
+    }
+    inheritedFailurePatterns.push(...inheritedFailurePatternsForTask(sourceTask));
+    for (const surprise of surpriseHistoryForTask(sourceTask)) {
+      const surpriseId = compactString(surprise.id);
+      if (!surpriseId) continue;
+      inheritedSurpriseRefs.push({
+        sourceTaskId: sourceTask.id,
+        surpriseHistoryId: surpriseId,
+      });
+    }
+  }
+
+  const context = {
+    schemaVersion: 'phase3b-v1',
+    capturedAt: capturedAt || isoNow(),
+    parentChain,
+    inheritedKnownRefs,
+    inheritedFailurePatterns,
+    inheritedSurpriseRefs,
+  };
+  if (task?.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) {
+    const birthSnapshotHash = inheritedSignature(task.inheritedFrom);
+    const dynamicSnapshotHash = inheritedSignature(context);
+    if (birthSnapshotHash !== dynamicSnapshotHash) {
+      context.stale = true;
+      context.staleWarning = 'birth inheritedFrom snapshot differs from latest ancestor known/surprise context';
+      context.birthSnapshotHash = birthSnapshotHash;
+      context.dynamicSnapshotHash = dynamicSnapshotHash;
+    }
+  }
+  return context;
+}
+
+function inheritedContextForTask(projectDir, task) {
+  try {
+    const parsed = parseProject(projectDir);
+    const parsedTask = parsed.tasks?.get(`${task.taskGroupVersionId}:${task.id}`) || task;
+    return hydrateInheritedContext(parsed, parsedTask, activeSnapshotForParsed(parsed));
+  } catch {
+    return null;
+  }
+}
+
+function filterLocalKnownCopiesOfInherited(knownList, inheritedContext) {
+  const list = Array.isArray(knownList) ? knownList : [];
+  const inheritedRefs = Array.isArray(inheritedContext?.inheritedKnownRefs) ? inheritedContext.inheritedKnownRefs : [];
+  if (list.length === 0 || inheritedRefs.length === 0) return { knownList: list, removed: [] };
+  const inheritedKnownIds = new Set(inheritedRefs.map((ref) => compactString(ref.sourceKnownId)).filter(Boolean));
+  const inheritedHashes = new Set(inheritedRefs.map((ref) => compactString(ref.claimHash)).filter(Boolean));
+  const kept = [];
+  const removed = [];
+  for (const item of list) {
+    const id = compactString(item?.id);
+    const hash = claimHash(item?.claim || '');
+    if ((id && inheritedKnownIds.has(id)) || (hash && inheritedHashes.has(hash))) {
+      removed.push(item);
+    } else {
+      kept.push(item);
+    }
+  }
+  return { knownList: kept, removed };
+}
+
+export function applyInheritedBirthSnapshotToChildVersion({ projectDir, childTaskGroupId, versionId, capturedAt = null }) {
+  const parsed = parseProject(projectDir);
+  const activeSnapshot = activeSnapshotForParsed(parsed);
+  const version = parsed.versions?.get(versionId);
+  if (!version || version.taskGroupId !== childTaskGroupId) return { applied: false, tasksUpdated: 0, removedKnownCopies: 0 };
+  let tasksUpdated = 0;
+  let removedKnownCopies = 0;
+  for (const childTask of version.tasks || []) {
+    const inherited = hydrateInheritedContext(parsed, childTask, activeSnapshot, { capturedAt });
+    if (!inherited || inherited.parentChain.length === 0) continue;
+    const staticInherited = inheritedContextWithoutRuntimeFlags(inherited);
+    rewriteFrontmatter(childTask.path, (fm) => {
+      const filtered = filterLocalKnownCopiesOfInherited(fm.knownList, staticInherited);
+      if (filtered.removed.length > 0) {
+        fm.knownList = filtered.knownList;
+        fm.inheritedKnownCopyRemoved = true;
+        fm.inheritedKnownCopyRemovedAt = capturedAt || isoNow();
+        fm.inheritedKnownCopyRemovedIds = filtered.removed.map((item) => compactString(item?.id)).filter(Boolean);
+        removedKnownCopies += filtered.removed.length;
+      }
+      fm.inheritedFrom = staticInherited;
+      return fm;
+    });
+    tasksUpdated += 1;
+  }
+  return { applied: true, tasksUpdated, removedKnownCopies };
 }
 
 function malformedSurpriseReason(parsed) {
@@ -1178,7 +1420,7 @@ function surpriseReportPromptLines({ artifactRequired = false } = {}) {
     locationLine,
     `Use prefix ${SURPRISE_REPORT_PREFIX} followed by one-line JSON.`,
     'The worker reports facts only; the runner computes surprise/penalty. Do not self-score surprise.',
-    'Schema: {"summary":"what changed relative to knownList","contradictedKnown":[{"knownId":"k1","observedEvidence":"what disproved or weakened it","correctedClaim":"optional corrected claim"}],"discoveredUnknowns":[{"id":"u1","question":"new uncertainty","whyDiscovered":"evidence or reason","blocksReadiness":true}],"newKnownDeltas":[{"id":"k2","claim":"new learned claim","evidence":"supporting evidence"}]}',
+    'Schema: {"summary":"what changed relative to knownList","contradictedKnown":[{"knownId":"k1","observedEvidence":"what disproved or weakened it","correctedClaim":"optional corrected claim"}],"discoveredUnknowns":[{"id":"u1","question":"new uncertainty","whyDiscovered":"evidence or reason","blocksReadiness":true}],"newKnownDeltas":[{"id":"k2","claim":"new learned claim","evidence":"supporting evidence","revalidatedFromInheritedRef":"optional inherited ref id when locally revalidated"}]}',
     'Use empty arrays when there is no contradiction, no new unknown, or no new known delta. Do not redeclare the whole knownList.',
   ];
 }
@@ -1292,7 +1534,7 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget = null }) {
+function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
@@ -1302,7 +1544,7 @@ function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budge
   }
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
-    const prompt = buildAgentExecutionPrompt({ project, task, budget });
+    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext });
     const result = invokeRuntimeAdapter(adapter, {
       prompt,
       agentId,
@@ -1808,6 +2050,7 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
 
 function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const projectDir = dirname(dirname(runDir));
+  const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -1834,7 +2077,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget });
+    result = invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err), executor };
   }
@@ -2200,13 +2443,13 @@ function performDryRunDecomposition({ projectDir, task }) {
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
 
-function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null }) {
+function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null }) {
   const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
   const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
-  const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget });
+  const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget, inheritedContext });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -2222,6 +2465,7 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
 }
 
 function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -2245,7 +2489,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   try {
     result = executor === 'dry-run'
       ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget });
+      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -2311,17 +2555,25 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   closeTaskWithEow({ task, reason: 'decomposed_by_runner', finishedAt });
   rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'decomposition_recorded', finishedAt });
+  const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    capturedAt: finishedAt,
+  });
 
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'decomposition_completed', runId,
     taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
     message: result.message || null,
+    inheritedBirthSnapshot,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
   return {
     taskId: task.id, runNodeId, kind: 'decompose', status: 'completed', executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, message: result.message || null,
+    inheritedBirthSnapshot,
     budget,
   };
 }
@@ -2358,12 +2610,12 @@ function performDryRunExploration({ runDir, runNodeId, task }) {
   return { ok: true, artifactPath, message: `Wrote dry-run exploration artifact at ${artifactPath}` };
 }
 
-function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null }) {
+function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null, inheritedContext = null }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
   const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget });
+  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget, inheritedContext });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -2379,6 +2631,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
 }
 
 function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -2402,7 +2655,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   try {
     result = executor === 'dry-run'
       ? performDryRunExploration({ runDir, runNodeId, task })
-      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
+      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget, inheritedContext });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
