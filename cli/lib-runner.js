@@ -39,6 +39,11 @@ export const FINISHING_MODE_RESERVE = (maxSteps) => {
   return Math.max(2, Math.ceil(Math.floor(n) * 0.2));
 };
 
+export const EXPECTED_PLAN_PHASE_THRESHOLDS = Object.freeze({
+  soft: 0.5,
+  hard: 0.85,
+});
+
 export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled = false } = {}) {
   if (!budgetEnabled || maxSteps == null) {
     return { enabled: false, finishingMode: false };
@@ -1334,7 +1339,42 @@ export function pickNextAction(parsed, target = {}) {
   return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE };
 }
 
-function budgetPromptLines(budget, { allowPartialRequest = false } = {}) {
+export function expectedPlanPhaseForProgress(planProgress, thresholds = EXPECTED_PLAN_PHASE_THRESHOLDS) {
+  const progress = Number(planProgress);
+  if (!Number.isFinite(progress)) return 'exploring';
+  if (progress >= thresholds.hard) return 'committing';
+  if (progress >= thresholds.soft) return 'converging';
+  return 'exploring';
+}
+
+function actionAwareExpectedPlanAdvisory(actionKind, phase) {
+  const action = actionKind || 'generic';
+  if (action === 'decompose') {
+    if (phase === 'committing') return 'Decomposition advisory: committing phase. Prefer closing this depth with bounded terminal children; do not open another scope unless it is strictly necessary and still fully closable within the remaining step budget.';
+    if (phase === 'converging') return 'Decomposition advisory: converging phase. Before opening deeper child scopes, check whether the current depth can be closed with runnable, blocked, or exploration-ready children.';
+    return 'Decomposition advisory: exploring phase. Decompose normally, but keep child scopes compatible with the declared expected plan.';
+  }
+  if (action === 'execute') {
+    if (phase === 'committing') return 'Execution advisory: committing phase. Prioritize honest completion or a clear partial request when finishing everything is not possible.';
+    if (phase === 'converging') return 'Execution advisory: converging phase. Keep execution focused on closure evidence and avoid expanding the task scope.';
+    return 'Execution advisory: exploring phase. Execute normally while preserving evidence that will help later closure.';
+  }
+  if (action === 'explore') {
+    if (phase === 'committing') return 'Exploration advisory: committing phase. Capture the smallest useful artifact that makes the current uncertainty closable or explicitly blocked.';
+    if (phase === 'converging') return 'Exploration advisory: converging phase. Prefer targeted evidence gathering over broad discovery.';
+    return 'Exploration advisory: exploring phase. Explore enough to reduce uncertainty without turning exploration into unbounded scope.';
+  }
+  if (action === 'loopback') {
+    if (phase === 'committing') return 'Loopback advisory: committing phase. Resolve the delegated question narrowly and return the graph to a closable state.';
+    if (phase === 'converging') return 'Loopback advisory: converging phase. Keep the resolution concise and avoid spawning new delegation scope.';
+    return 'Loopback advisory: exploring phase. Resolve the delegation while preserving enough context for downstream work.';
+  }
+  if (phase === 'committing') return 'Expected plan advisory: committing phase. Favor closure over expansion.';
+  if (phase === 'converging') return 'Expected plan advisory: converging phase. Favor narrowing over expansion.';
+  return 'Expected plan advisory: exploring phase. Continue within the expected plan.';
+}
+
+function budgetPromptLines(budget, { allowPartialRequest = false, actionKind = 'generic' } = {}) {
   const coordinate = budget?.expectedPlanCoordinate?.enabled === true
     ? budget.expectedPlanCoordinate
     : null;
@@ -1347,9 +1387,11 @@ function budgetPromptLines(budget, { allowPartialRequest = false } = {}) {
       '',
       'Budget / expected plan coordinate:',
       `Remaining step budget: ${budget.remaining} / ${budget.maxSteps}.`,
+      `Expected plan phase: ${coordinate.phase}.`,
       `Lineage depth consumed: ${coordinate.consumedDepth}. Current task expectedDepth: ${coordinate.expectedDepth}. Consumed/expected progress: ${coordinate.consumedDepthSinceDeclaration} / ${coordinate.expectedDepth} (${pct}%).`,
       `Current task expectedBreadth: ${coordinate.expectedBreadth}.`,
       `Expected plan rationale: ${coordinate.rationale}`,
+      actionAwareExpectedPlanAdvisory(actionKind, coordinate.phase),
     );
     if (diagnostic) {
       const diagnosticPct = Math.round(diagnostic.cumulativePlanProgress * 100);
@@ -1484,7 +1526,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
-  ], budget, { allowPartialRequest: true });
+  ], budget, { actionKind: 'execute', allowPartialRequest: true });
 }
 
 export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null }) {
@@ -1511,7 +1553,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     ...childTaskExpectedPlanPromptLines(),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
-  ], budget);
+  ], budget, { actionKind: 'decompose' });
 }
 
 export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget = null }) {
@@ -1531,7 +1573,7 @@ export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNod
     `Run id: ${runId}, loopback resolution run node id: ${loopbackNodeId}.`,
     `Write the loopback resolution artifact at: ${artifactRelPath}`,
     'Record the work taken, any decisions made, and what should happen next. Do not recursively invoke `taskops run`.',
-  ], budget);
+  ], budget, { actionKind: 'loopback' });
 }
 
 export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget = null, inheritedContext = null }) {
@@ -1554,7 +1596,7 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     `Run id: ${runId}, run node id: ${runNodeId}.`,
     ...surpriseReportPromptLines({ artifactRequired: true }),
     'Do not mark the parent task as done; the runner manages task graph state. Do not recursively invoke `taskops run`.',
-  ], budget);
+  ], budget, { actionKind: 'explore' });
 }
 
 function safeSessionPart(value, fallback = 'task') {
@@ -2572,6 +2614,8 @@ export function computeExpectedPlanCoordinate({ parsed, task, activeSnapshot = n
     expectedDepth,
     expectedBreadth,
     planProgress,
+    phase: expectedPlanPhaseForProgress(planProgress),
+    phaseThresholds: { ...EXPECTED_PLAN_PHASE_THRESHOLDS },
     rationale: normalized.value.rationale,
     lineageDiagnostic: {
       consumedDepth,

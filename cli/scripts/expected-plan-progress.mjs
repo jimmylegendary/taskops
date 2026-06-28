@@ -159,12 +159,14 @@ try {
   assert.equal(rootCoordinate.consumedDepthSinceDeclaration, 0);
   assert.equal(rootCoordinate.expectedDepth, 2);
   assert.equal(rootCoordinate.planProgress, 0);
+  assert.equal(rootCoordinate.phase, 'exploring');
 
   const childCoordinate = computeExpectedPlanCoordinate({ parsed, task: childTask, activeSnapshot });
   assert.equal(childCoordinate.consumedDepth, 1);
   assert.equal(childCoordinate.consumedDepthSinceDeclaration, 1);
   assert.equal(childCoordinate.expectedDepth, 2);
   assert.equal(childCoordinate.planProgress, 0.5);
+  assert.equal(childCoordinate.phase, 'converging');
   assert.equal(childCoordinate.lineageDiagnostic.cumulativeExpectedDepth, 4);
   assert.equal(childCoordinate.lineageDiagnostic.cumulativePlanProgress, 0.25);
 
@@ -172,6 +174,7 @@ try {
   assert.equal(grandchildCoordinate.consumedDepth, 2);
   assert.equal(grandchildCoordinate.expectedDepth, 0);
   assert.equal(grandchildCoordinate.planProgress, 1, 'expectedDepth=0 must be divide-by-zero safe and clamp to complete progress');
+  assert.equal(grandchildCoordinate.phase, 'committing');
   assert.equal(grandchildCoordinate.lineageDiagnostic.cumulativeExpectedDepth, 4);
   assert.equal(grandchildCoordinate.lineageDiagnostic.cumulativePlanProgress, 0.5);
 
@@ -212,11 +215,12 @@ try {
     budget: coordinateBudget,
   });
   assert.match(coordinatePrompt, /Budget \/ expected plan coordinate:/);
+  assert.match(coordinatePrompt, /Expected plan phase: converging\./);
   assert.match(coordinatePrompt, /Remaining step budget: 3 \/ 4\./);
   assert.match(coordinatePrompt, /Lineage depth consumed: 1\. Current task expectedDepth: 2\. Consumed\/expected progress: 1 \/ 2 \(50%\)\./);
   assert.match(coordinatePrompt, /Diagnostic only: lineage cumulative expectedDepth=4, lineage progress=1\/4 \(25%\)\./);
   assert.doesNotMatch(coordinatePrompt, /Budget \/ finishing mode:/);
-  assert.doesNotMatch(coordinatePrompt, /exploring|converging|committing/i);
+  assert.match(coordinatePrompt, /Do not use this as a hard stop policy\./);
 
   const executionCoordinatePrompt = buildAgentExecutionPrompt({
     project: promptProject,
