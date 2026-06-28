@@ -1418,6 +1418,16 @@ function childTaskUncertaintySchemaPromptLines() {
   ];
 }
 
+function childTaskExpectedPlanPromptLines() {
+  return [
+    'Expected plan metadata is required on each child task:',
+    '- expectedPlan.expectedDepth: non-negative integer estimate of how many more decomposition levels this child may need.',
+    '- expectedPlan.expectedBreadth: non-negative integer estimate of roughly how many child tasks this child may create if decomposed.',
+    '- expectedPlan.rationale: short evidence-based reason for the depth/breadth estimate.',
+    'Estimate per child. It is an approximate planning coordinate, not a promise. Do not add declaredAt; the runner may add timing metadata later.',
+  ];
+}
+
 function surpriseReportPromptLines({ artifactRequired = false } = {}) {
   const locationLine = artifactRequired
     ? 'Include this report inside the exploration artifact. You may also repeat it in the final response.'
@@ -1474,6 +1484,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     `Create the task group folder (with index.md) under task-groups/<id>/, then call \`taskops decompose ${workDirForPrompt} --task-group-id <child-tg-id> --spec <spec.json>\` to write the new version.`,
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
     ...childTaskUncertaintySchemaPromptLines(),
+    ...childTaskExpectedPlanPromptLines(),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
   ], budget);
@@ -2488,6 +2499,71 @@ function listChildTaskPaths(versionDir) {
     .sort();
 }
 
+function normalizeNonNegativeInteger(value) {
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
+function normalizeExpectedPlan(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, reason: 'expectedPlan must be an object' };
+  }
+  const expectedDepth = normalizeNonNegativeInteger(value.expectedDepth);
+  if (expectedDepth == null) return { ok: false, reason: 'expectedPlan.expectedDepth must be a non-negative integer' };
+  const expectedBreadth = normalizeNonNegativeInteger(value.expectedBreadth);
+  if (expectedBreadth == null) return { ok: false, reason: 'expectedPlan.expectedBreadth must be a non-negative integer' };
+  const rationale = typeof value.rationale === 'string' ? value.rationale.trim() : '';
+  if (!rationale) return { ok: false, reason: 'expectedPlan.rationale must be a non-empty string' };
+  const normalized = { expectedDepth, expectedBreadth, rationale };
+  if (typeof value.declaredAt === 'string' && value.declaredAt.trim()) normalized.declaredAt = value.declaredAt.trim();
+  return { ok: true, value: normalized };
+}
+
+function fallbackExpectedPlanForChild(parentTask, reason) {
+  const parent = normalizeExpectedPlan(parentTask?.expectedPlan);
+  const expectedDepth = parent.ok ? Math.max(0, parent.value.expectedDepth - 1) : 0;
+  const expectedBreadth = parent.ok ? parent.value.expectedBreadth : 1;
+  return {
+    expectedDepth,
+    expectedBreadth,
+    rationale: `Runner fallback: ${reason}; derived conservatively from ${parent.ok ? `parent task ${parentTask.id} expectedPlan` : `missing parent expectedPlan on ${parentTask?.id || 'source task'}`}.`,
+  };
+}
+
+function normalizeExpectedPlansForChildVersion({ projectDir, childTaskGroupId, versionId, parentTask }) {
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const taskPaths = listChildTaskPaths(versionDir);
+  const summary = {
+    taskCount: taskPaths.length,
+    validCount: 0,
+    fallbackCount: 0,
+    fallbacks: [],
+  };
+  for (const taskPath of taskPaths) {
+    const childTask = parseMarkdownFile(taskPath);
+    const normalized = normalizeExpectedPlan(childTask.expectedPlan);
+    if (normalized.ok) {
+      summary.validCount += 1;
+      continue;
+    }
+    const fallback = fallbackExpectedPlanForChild(parentTask, normalized.reason);
+    rewriteFrontmatter(taskPath, (fm) => {
+      fm.expectedPlan = fallback;
+      return fm;
+    });
+    summary.fallbackCount += 1;
+    summary.fallbacks.push({
+      taskId: childTask.id || null,
+      reason: normalized.reason,
+      expectedDepth: fallback.expectedDepth,
+      expectedBreadth: fallback.expectedBreadth,
+    });
+  }
+  return summary;
+}
+
 function hasManualReviewOrPartialMarker(value) {
   if (!value || typeof value !== 'object') return false;
   return value.needsManualReview === true
@@ -2716,6 +2792,22 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     };
   }
 
+  const expectedPlanNormalization = normalizeExpectedPlansForChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    parentTask: task,
+  });
+  if (expectedPlanNormalization.fallbackCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'expected_plan_fallback_applied', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      expectedPlanFallbacks: expectedPlanNormalization.fallbacks,
+    });
+    appendRunLog(runDir, `${finishedAt} expected_plan_fallback_applied taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${expectedPlanNormalization.fallbackCount}`);
+  }
+
   rewriteFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.childTaskGroupId = result.childTaskGroupId;
@@ -2748,6 +2840,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     adapterStatus: result.adapterFailureStatus || null,
     recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
+    expectedPlanNormalization,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
   return {
@@ -2758,6 +2851,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     adapterStatus: result.adapterFailureStatus || null,
     recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
+    expectedPlanNormalization,
     budget,
   };
 }
