@@ -2135,6 +2135,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     if (Array.isArray(task.knownList)) fm.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) fm.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
     if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) fm.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
+    if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) fm.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
@@ -2267,6 +2268,7 @@ function cloneTaskForPromotion(task) {
   if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
   if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
   if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
+  if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) cloned.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
@@ -3114,6 +3116,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
     if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
+    if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) cloned.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
     const order = task.order ?? 0;
     if (task.id === fromTaskId) {
       cloned.status = 'pending';
