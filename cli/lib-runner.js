@@ -1453,7 +1453,9 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
   ], budget, { allowPartialRequest: true });
 }
 
-export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget = null, inheritedContext = null }) {
+export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null }) {
+  if (!projectDir) throw new Error('Missing projectDir for decomposition prompt');
+  const workDirForPrompt = resolve(projectDir);
   return promptWithBudget([
     'You are a TaskOps decomposition agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1469,7 +1471,7 @@ export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId,
     'Author a TaskOps child task group and a v1 version that decomposes this task using the canonical md-first format.',
     `Target child task group id: ${childTaskGroupId}`,
     `Target version id: ${versionId}`,
-    'Create the task group folder (with index.md) under task-groups/<id>/, then call `taskops decompose <work-dir> --task-group-id <child-tg-id> --spec <spec.json>` to write the new version.',
+    `Create the task group folder (with index.md) under task-groups/<id>/, then call \`taskops decompose ${workDirForPrompt} --task-group-id <child-tg-id> --spec <spec.json>\` to write the new version.`,
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
     ...childTaskUncertaintySchemaPromptLines(),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
@@ -2456,7 +2458,7 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
-  const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget, inheritedContext });
+  const prompt = buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget, inheritedContext });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,

@@ -205,6 +205,7 @@ assert.equal(blockedStillBlocked.runReadiness, 'blocked');
 
 const decompositionPrompt = buildAgentDecompositionPrompt({
   project: { id: 'work-uncertainty', title: 'Uncertainty work', objective: 'Verify worker uncertainty declaration.' },
+  projectDir: '/tmp/taskops-uncertainty-readiness-prompt',
   task: {
     ...baseTask,
     uncertaintyState: 'known_unknown',
