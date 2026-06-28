@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -2464,11 +2464,159 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
     timeoutMs: stepTimeoutMs,
   });
-  if (!result.ok) return { ok: false, message: result.message };
+  if (!result.ok) return { ...result, ok: false, message: result.message };
   if (!existsSync(versionIndex)) {
     return { ok: false, message: `${adapter} did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
   }
   return { ok: true, childTaskGroupId, versionId, message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}` };
+}
+
+function isRecoverableDecompositionAdapterFailure(result) {
+  if (!result || result.ok) return false;
+  if (result.timedOut === true || result.status === 'timeout') return true;
+  return /\btimed out after \d+ms\.?$/i.test(String(result.message || '').trim());
+}
+
+function listChildTaskPaths(versionDir) {
+  const tasksDir = join(versionDir, 'tasks');
+  if (!existsSync(tasksDir)) return [];
+  return readdirSync(tasksDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'index.md')
+    .map((entry) => join(tasksDir, entry.name))
+    .sort();
+}
+
+function hasManualReviewOrPartialMarker(value) {
+  if (!value || typeof value !== 'object') return false;
+  return value.needsManualReview === true
+    || value.manualReviewReason != null
+    || value.awaitingPromotion === true
+    || value.awaitingPromotionPartialId != null
+    || value.followUpFromPartialId != null
+    || value.followUpForTaskId != null
+    || value.partialRepeatThreshold != null
+    || value.repeatedPartialNeedsReview === true;
+}
+
+function canApplyDecompositionBacklink({ projectDir, childTaskGroupId, versionId, task, runId, runNodeId }) {
+  const desired = {
+    decomposedFromTaskId: task.id,
+    decomposedFromTaskGroupId: task.taskGroupId,
+    decomposedFromTaskGroupVersionId: task.taskGroupVersionId,
+    decomposedByRunId: runId,
+    decomposedByRunNodeId: runNodeId,
+  };
+  const paths = [
+    join(projectDir, 'task-groups', childTaskGroupId, 'index.md'),
+    join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md'),
+  ];
+  for (const filePath of paths) {
+    if (!existsSync(filePath)) return { ok: false, reason: `missing decomposition target index at ${filePath}` };
+    const current = parseMarkdownFile(filePath);
+    for (const [key, value] of Object.entries(desired)) {
+      if (current[key] != null && current[key] !== '' && String(current[key]) !== String(value)) {
+        return { ok: false, reason: `conflicting decomposition backlink in ${filePath}: ${key}=${current[key]} expected ${value}` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+function probeCompletedDecompositionAfterAdapterFailure({ projectDir, project, task, runId, runNodeId }) {
+  const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
+  const childGroupIndex = join(projectDir, 'task-groups', childTaskGroupId, 'index.md');
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const versionIndex = join(versionDir, 'index.md');
+  if (!existsSync(childGroupIndex)) return { ok: false, reason: `missing child task group index at ${childGroupIndex}` };
+  if (!existsSync(versionIndex)) return { ok: false, reason: `missing child task group version index at ${versionIndex}` };
+
+  let childGroup;
+  let version;
+  try {
+    childGroup = parseMarkdownFile(childGroupIndex);
+    version = parseMarkdownFile(versionIndex);
+  } catch (err) {
+    return { ok: false, reason: `failed to parse child decomposition indexes: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  if (childGroup.entityType !== 'taskGroup') return { ok: false, reason: `child group entityType is '${childGroup.entityType}', expected taskGroup` };
+  if (childGroup.id !== childTaskGroupId) return { ok: false, reason: `child group id '${childGroup.id}' did not match expected '${childTaskGroupId}'` };
+  if (version.entityType !== 'taskGroupVersion') return { ok: false, reason: `child version entityType is '${version.entityType}', expected taskGroupVersion` };
+  if (version.id !== versionId) return { ok: false, reason: `child version id '${version.id}' did not match expected '${versionId}'` };
+  if (version.taskGroupId !== childTaskGroupId) return { ok: false, reason: `child version taskGroupId '${version.taskGroupId}' did not match expected '${childTaskGroupId}'` };
+  if (hasManualReviewOrPartialMarker(childGroup) || hasManualReviewOrPartialMarker(version)) {
+    return { ok: false, reason: 'child decomposition index carries manual-review or partial markers' };
+  }
+
+  const taskPaths = listChildTaskPaths(versionDir);
+  if (taskPaths.length === 0) return { ok: false, reason: `child version '${versionId}' has no child task files` };
+  const taskIds = [];
+  for (const taskPath of taskPaths) {
+    let childTask;
+    try {
+      childTask = parseMarkdownFile(taskPath);
+    } catch (err) {
+      return { ok: false, reason: `failed to parse child task ${taskPath}: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (childTask.entityType !== 'task') return { ok: false, reason: `child task ${taskPath} entityType is '${childTask.entityType}', expected task` };
+    if (!childTask.id || !taskPath.endsWith(`${childTask.id}.md`)) return { ok: false, reason: `child task ${taskPath} id does not match file name` };
+    if (childTask.taskGroupId !== childTaskGroupId) return { ok: false, reason: `child task '${childTask.id}' taskGroupId '${childTask.taskGroupId}' did not match expected '${childTaskGroupId}'` };
+    if (childTask.taskGroupVersionId !== versionId) return { ok: false, reason: `child task '${childTask.id}' taskGroupVersionId '${childTask.taskGroupVersionId}' did not match expected '${versionId}'` };
+    if (hasManualReviewOrPartialMarker(childTask)) return { ok: false, reason: `child task '${childTask.id}' carries manual-review or partial markers` };
+    taskIds.push(childTask.id);
+  }
+
+  const parsed = parseProject(projectDir);
+  const activeSnapshot = parsed.snapshots.get(project.activeSnapshotId);
+  const selectedVersions = Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions : [];
+  const selectedForChild = selectedVersions.filter((pair) => pair && pair.taskGroupId === childTaskGroupId);
+  if (selectedForChild.length > 1) return { ok: false, reason: `active snapshot has multiple selections for child task group '${childTaskGroupId}'` };
+  if (selectedForChild.length === 1 && selectedForChild[0].versionId !== versionId) {
+    return { ok: false, reason: `active snapshot selects '${selectedForChild[0].versionId}' for '${childTaskGroupId}', expected '${versionId}'` };
+  }
+  if (task.childTaskGroupId && task.childTaskGroupId !== childTaskGroupId) {
+    return { ok: false, reason: `source task already points at childTaskGroupId '${task.childTaskGroupId}', expected '${childTaskGroupId}'` };
+  }
+
+  const backlink = canApplyDecompositionBacklink({ projectDir, childTaskGroupId, versionId, task, runId, runNodeId });
+  if (!backlink.ok) return backlink;
+
+  return {
+    ok: true,
+    childTaskGroupId,
+    versionId,
+    childTaskCount: taskIds.length,
+    snapshotAlreadySelected: selectedForChild.length === 1,
+  };
+}
+
+function maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result }) {
+  if (!isRecoverableDecompositionAdapterFailure(result)) return result;
+  const probe = probeCompletedDecompositionAfterAdapterFailure({ projectDir, project, task, runId, runNodeId });
+  if (!probe.ok) {
+    return {
+      ...result,
+      message: `${result.message || 'adapter failed'}; timeout recovery rejected: ${probe.reason}`,
+      recoveryRejected: true,
+      recoveryRejectedReason: probe.reason,
+    };
+  }
+  const adapterFailureReason = result.message || 'adapter timed out';
+  return {
+    ...result,
+    ok: true,
+    childTaskGroupId: probe.childTaskGroupId,
+    versionId: probe.versionId,
+    message: `Recovered completed decomposition after adapter failure: ${adapterFailureReason}`,
+    recoveredAfterAdapterFailure: true,
+    adapterFailureReason,
+    adapterFailureStatus: result.status || null,
+    recoveryStatus: 'recovered_after_timeout',
+    recovery: {
+      childTaskCount: probe.childTaskCount,
+      snapshotAlreadySelected: probe.snapshotAlreadySelected,
+    },
+  };
 }
 
 function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
@@ -2502,6 +2650,21 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   }
 
   const finishedAt = isoNow();
+  if (!result.ok) {
+    result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
+    if (result.recoveredAfterAdapterFailure === true) {
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+        adapterFailureReason: result.adapterFailureReason || null,
+        adapterStatus: result.adapterFailureStatus || result.status || null,
+        recoveryStatus: result.recoveryStatus || null,
+        recovery: result.recovery || null,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
+    }
+  }
   if (!result.ok) {
     rewriteFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
@@ -2555,13 +2718,17 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     fm.status = 'done';
     fm.childTaskGroupId = result.childTaskGroupId;
     fm.runReadiness = 'needs_decomposition';
-    fm.runReadinessReason = sanitizeFmScalar(`Decomposed by taskops-runner (${executor}) into ${result.childTaskGroupId}/${result.versionId} at ${finishedAt}.`);
+    fm.runReadinessReason = sanitizeFmScalar(result.recoveredAfterAdapterFailure
+      ? `Decomposed by taskops-runner (${executor}) into ${result.childTaskGroupId}/${result.versionId} at ${finishedAt} after adapter timeout recovery: ${result.adapterFailureReason || 'adapter failed'}.`
+      : `Decomposed by taskops-runner (${executor}) into ${result.childTaskGroupId}/${result.versionId} at ${finishedAt}.`);
     delete fm.lastRunFailureReason;
     return fm;
   });
-  closeTaskWithEow({ task, reason: 'decomposed_by_runner', finishedAt });
+  const taskCloseReason = result.recoveredAfterAdapterFailure ? 'decomposed_by_runner_after_adapter_timeout_recovery' : 'decomposed_by_runner';
+  const runCloseReason = result.recoveredAfterAdapterFailure ? 'decomposition_recorded_after_adapter_timeout_recovery' : 'decomposition_recorded';
+  closeTaskWithEow({ task, reason: taskCloseReason, finishedAt });
   rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
-  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'decomposition_recorded', finishedAt });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, finishedAt });
   const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
     projectDir,
     childTaskGroupId: result.childTaskGroupId,
@@ -2574,12 +2741,20 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
     message: result.message || null,
+    recoveredAfterAdapterFailure: result.recoveredAfterAdapterFailure === true,
+    adapterFailureReason: result.adapterFailureReason || null,
+    adapterStatus: result.adapterFailureStatus || null,
+    recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
   return {
     taskId: task.id, runNodeId, kind: 'decompose', status: 'completed', executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, message: result.message || null,
+    recoveredAfterAdapterFailure: result.recoveredAfterAdapterFailure === true,
+    adapterFailureReason: result.adapterFailureReason || null,
+    adapterStatus: result.adapterFailureStatus || null,
+    recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
     budget,
   };
