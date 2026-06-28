@@ -1368,6 +1368,147 @@ export function informationGainConvergence(task, { window = 3, maxSurpriseScore 
   };
 }
 
+function surpriseHistoryForTask(task) {
+  return Array.isArray(task?.surpriseHistory) ? task.surpriseHistory.filter((entry) => entry && typeof entry === 'object') : [];
+}
+
+function lineageObservedAt(entry) {
+  return nonEmptyString(entry?.observedAt) ? String(entry.observedAt) : '';
+}
+
+function deterministicLineageEntryKey(entry) {
+  return [
+    lineageObservedAt(entry),
+    String(Number.isFinite(Number(entry?.lineageDistance)) ? Number(entry.lineageDistance) : 999),
+    String(entry?.sourceTaskGroupVersionId || ''),
+    String(entry?.sourceTaskId || ''),
+    String(entry?.runId || ''),
+    String(entry?.runNodeId || ''),
+    String(entry?.id || ''),
+  ].join('\u0000');
+}
+
+function sortLineageSurpriseEntries(entries) {
+  return [...entries].sort((a, b) => deterministicLineageEntryKey(a).localeCompare(deterministicLineageEntryKey(b)));
+}
+
+function lineageEntriesBySource(entries) {
+  const sources = new Map();
+  for (const entry of entries) {
+    const key = `${entry.sourceTaskGroupVersionId || ''}:${entry.sourceTaskId || ''}:${entry.lineageDistance ?? ''}:${entry.hydrationSource || ''}`;
+    const current = sources.get(key) || {
+      sourceTaskId: entry.sourceTaskId || null,
+      sourceTaskGroupId: entry.sourceTaskGroupId || null,
+      sourceTaskGroupVersionId: entry.sourceTaskGroupVersionId || null,
+      lineageDistance: entry.lineageDistance ?? null,
+      hydrationSource: entry.hydrationSource || null,
+      observedCount: 0,
+      surpriseIds: [],
+    };
+    current.observedCount += 1;
+    if (entry.id) current.surpriseIds.push(entry.id);
+    sources.set(key, current);
+  }
+  return [...sources.values()].sort((a, b) => {
+    const distance = Number(a.lineageDistance ?? 999) - Number(b.lineageDistance ?? 999);
+    if (distance !== 0) return distance;
+    return `${a.sourceTaskGroupVersionId}:${a.sourceTaskId}`.localeCompare(`${b.sourceTaskGroupVersionId}:${b.sourceTaskId}`);
+  });
+}
+
+function lineageSurpriseEntry(sourceTask, surprise, { lineageDistance, hydrationSource }) {
+  const cloned = cloneFrontmatterValue(surprise);
+  return {
+    ...cloned,
+    sourceTaskId: sourceTask?.id || null,
+    sourceTaskGroupId: sourceTask?.taskGroupId || null,
+    sourceTaskGroupVersionId: sourceTask?.taskGroupVersionId || null,
+    lineageDistance,
+    hydrationSource,
+    runId: cloned.runId || null,
+    runNodeId: cloned.runNodeId || null,
+  };
+}
+
+export function lineageInformationGainConvergence(parsed, task, activeSnapshot = null, { window = 3, maxSurpriseScore = 0.2 } = {}) {
+  const normalizedWindow = Math.max(1, Math.floor(Number(window) || 3));
+  const threshold = Number.isFinite(Number(maxSurpriseScore)) ? Number(maxSurpriseScore) : 0.2;
+  const lineageWarnings = [];
+  const entries = [];
+
+  if (task && typeof task === 'object') {
+    for (const surprise of surpriseHistoryForTask(task)) {
+      entries.push(lineageSurpriseEntry(task, surprise, {
+        lineageDistance: 0,
+        hydrationSource: 'current_task',
+      }));
+    }
+  }
+
+  const chain = ancestorChainForTask(parsed, task, activeSnapshot);
+  for (const [index, chainEntry] of chain.entries()) {
+    const resolved = hydrationSourceTaskForChainEntry(parsed, chainEntry);
+    if (resolved.warning) lineageWarnings.push(resolved.warning);
+    if (!resolved.task) continue;
+    for (const surprise of surpriseHistoryForTask(resolved.task)) {
+      entries.push(lineageSurpriseEntry(resolved.task, surprise, {
+        lineageDistance: index + 1,
+        hydrationSource: resolved.source,
+      }));
+    }
+  }
+
+  const sortedEntries = sortLineageSurpriseEntries(entries);
+  const observedCount = sortedEntries.length;
+  const lineageDepth = chain.length;
+  const entriesBySource = lineageEntriesBySource(sortedEntries);
+  if (observedCount < normalizedWindow) {
+    return {
+      converged: false,
+      window: normalizedWindow,
+      maxSurpriseScore: threshold,
+      observedCount,
+      lineageDepth,
+      entries: sortedEntries,
+      entriesBySource,
+      recentScores: sortedEntries.map((entry) => Number(entry.surpriseScore || 0)),
+      contradictedKnownIds: [],
+      blockingNewUnknownIds: [],
+      lineageWarnings,
+      insufficientEvidence: {
+        required: normalizedWindow,
+        observed: observedCount,
+        reason: `need ${normalizedWindow} lineage surprise observations; found ${observedCount}`,
+      },
+      reason: `insufficient_evidence: need ${normalizedWindow} lineage surprise observations; found ${observedCount}`,
+    };
+  }
+
+  const recent = sortedEntries.slice(-normalizedWindow);
+  const highSurprise = recent.filter((entry) => Number(entry.surpriseScore) > threshold);
+  const contradictedKnownIds = recent.flatMap((entry) => Array.isArray(entry.contradictedKnownIds) ? entry.contradictedKnownIds : []);
+  const blockingNewUnknownIds = recent.flatMap((entry) => Array.isArray(entry.blockingNewUnknownIds)
+    ? entry.blockingNewUnknownIds
+    : []);
+  const converged = highSurprise.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
+  return {
+    converged,
+    window: normalizedWindow,
+    maxSurpriseScore: threshold,
+    observedCount,
+    lineageDepth,
+    entries: sortedEntries,
+    entriesBySource,
+    recentScores: recent.map((entry) => Number(entry.surpriseScore || 0)),
+    contradictedKnownIds,
+    blockingNewUnknownIds,
+    lineageWarnings,
+    reason: converged
+      ? `${normalizedWindow} consecutive low-surprise lineage observations`
+      : 'recent lineage surprise history still contains high surprise, contradicted known claims, or blocking unknowns',
+  };
+}
+
 function hasRunnableTaskContract(task) {
   return nonEmptyString(task.objective)
     && nonEmptyString(task.responsibility)
@@ -2203,6 +2344,37 @@ export function ancestorChainForTask(parsed, task, activeSnapshot = null) {
     currentVersionId = version.decomposedFromTaskGroupVersionId;
   }
   return chain;
+}
+
+export function sourceTaskForChainEntry(entry) {
+  return entry?.task && typeof entry.task === 'object' ? entry.task : null;
+}
+
+export function hydrationSourceTaskForChainEntry(parsed, entry) {
+  const birthSource = sourceTaskForChainEntry(entry);
+  const active = entry?.activeParent;
+  if (!active?.taskId || !active?.taskGroupVersionId) {
+    return { task: birthSource, source: 'birth_backlink' };
+  }
+  const activeTask = parsed?.tasks?.get(`${active.taskGroupVersionId}:${active.taskId}`) || null;
+  if (!activeTask) {
+    return {
+      task: birthSource,
+      source: 'birth_backlink',
+      warning: `active selected parent ${active.taskGroupVersionId}:${active.taskId} was not found; using birth backlink source`,
+    };
+  }
+  if (activeTask.id !== entry.taskId || activeTask.childTaskGroupId !== entry.childTaskGroupId) {
+    return {
+      task: birthSource,
+      source: 'birth_backlink',
+      warning: `active selected parent ${activeTask.taskGroupVersionId}:${activeTask.id} does not match backlink parent ${entry.taskGroupVersionId}:${entry.taskId}; using birth backlink source`,
+    };
+  }
+  return {
+    task: activeTask,
+    source: activeTask.taskGroupVersionId === entry.taskGroupVersionId ? 'birth_backlink' : 'active_selected_parent',
+  };
 }
 
 function partialSkip(partial, reason, detail = null, extra = {}) {

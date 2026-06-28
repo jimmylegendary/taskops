@@ -7,6 +7,7 @@ import {
   discoverProjects,
   ensureDir,
   fmBlock,
+  hydrationSourceTaskForChainEntry,
   parseMarkdownFile,
   parseProject,
   readBody,
@@ -312,37 +313,6 @@ function cloneJson(value) {
 
 function activeSnapshotForParsed(parsed) {
   return parsed?.project?.activeSnapshotId ? parsed.snapshots?.get(parsed.project.activeSnapshotId) || null : null;
-}
-
-function sourceTaskForChainEntry(entry) {
-  return entry?.task && typeof entry.task === 'object' ? entry.task : null;
-}
-
-function hydrationSourceTaskForChainEntry(parsed, entry) {
-  const birthSource = sourceTaskForChainEntry(entry);
-  const active = entry?.activeParent;
-  if (!active?.taskId || !active?.taskGroupVersionId) {
-    return { task: birthSource, source: 'birth_backlink' };
-  }
-  const activeTask = parsed?.tasks?.get(`${active.taskGroupVersionId}:${active.taskId}`) || null;
-  if (!activeTask) {
-    return {
-      task: birthSource,
-      source: 'birth_backlink',
-      warning: `active selected parent ${active.taskGroupVersionId}:${active.taskId} was not found; using birth backlink source`,
-    };
-  }
-  if (activeTask.id !== entry.taskId || activeTask.childTaskGroupId !== entry.childTaskGroupId) {
-    return {
-      task: birthSource,
-      source: 'birth_backlink',
-      warning: `active selected parent ${activeTask.taskGroupVersionId}:${activeTask.id} does not match backlink parent ${entry.taskGroupVersionId}:${entry.taskId}; using birth backlink source`,
-    };
-  }
-  return {
-    task: activeTask,
-    source: activeTask.taskGroupVersionId === entry.taskGroupVersionId ? 'birth_backlink' : 'active_selected_parent',
-  };
 }
 
 function claimHash(claim) {
