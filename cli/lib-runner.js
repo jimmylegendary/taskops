@@ -1335,13 +1335,37 @@ export function pickNextAction(parsed, target = {}) {
 }
 
 function budgetPromptLines(budget, { allowPartialRequest = false } = {}) {
-  if (!budget || budget.enabled !== true || budget.finishingMode !== true) return [];
-  const lines = [
-    '',
-    'Budget / finishing mode:',
-    `남은 step이 얼마 없다 (remaining ${budget.remaining} / ${budget.maxSteps}). 새 작업 범위를 시작하지 마라. 진행 중인 것을 정직하게 마무리하고, 끝내지 못한 나머지는 follow-up으로 명시한 뒤 partial 상태로 닫을 준비를 해라. 무리하게 done으로 표시하지 마라.`,
-  ];
-  if (allowPartialRequest) {
+  const coordinate = budget?.expectedPlanCoordinate?.enabled === true
+    ? budget.expectedPlanCoordinate
+    : null;
+  if (!budget || budget.enabled !== true || (budget.finishingMode !== true && !coordinate)) return [];
+  const lines = [];
+  if (coordinate) {
+    const pct = Math.round(coordinate.planProgress * 100);
+    const diagnostic = coordinate.lineageDiagnostic;
+    lines.push(
+      '',
+      'Budget / expected plan coordinate:',
+      `Remaining step budget: ${budget.remaining} / ${budget.maxSteps}.`,
+      `Lineage depth consumed: ${coordinate.consumedDepth}. Current task expectedDepth: ${coordinate.expectedDepth}. Consumed/expected progress: ${coordinate.consumedDepthSinceDeclaration} / ${coordinate.expectedDepth} (${pct}%).`,
+      `Current task expectedBreadth: ${coordinate.expectedBreadth}.`,
+      `Expected plan rationale: ${coordinate.rationale}`,
+    );
+    if (diagnostic) {
+      const diagnosticPct = Math.round(diagnostic.cumulativePlanProgress * 100);
+      lines.push(
+        `Diagnostic only: lineage cumulative expectedDepth=${diagnostic.cumulativeExpectedDepth}, lineage progress=${diagnostic.consumedDepth}/${diagnostic.cumulativeExpectedDepth} (${diagnosticPct}%). Do not use this as a hard stop policy.`,
+      );
+    }
+  }
+  if (budget.finishingMode === true) {
+    lines.push(
+      '',
+      'Budget / finishing mode:',
+      `남은 step이 얼마 없다 (remaining ${budget.remaining} / ${budget.maxSteps}). 새 작업 범위를 시작하지 마라. 진행 중인 것을 정직하게 마무리하고, 끝내지 못한 나머지는 follow-up으로 명시한 뒤 partial 상태로 닫을 준비를 해라. 무리하게 done으로 표시하지 마라.`,
+    );
+  }
+  if (allowPartialRequest && budget.finishingMode === true) {
     lines.push(
       'Execution partial request protocol:',
       'Look at the full task scope. If you can finish this task completely and honestly in this turn, finish it normally.',
@@ -2521,6 +2545,50 @@ function normalizeExpectedPlan(value) {
   return { ok: true, value: normalized };
 }
 
+function progressRatio(consumedDepth, expectedDepth) {
+  if (expectedDepth === 0) return 1;
+  return Math.max(0, Math.min(1, consumedDepth / expectedDepth));
+}
+
+export function computeExpectedPlanCoordinate({ parsed, task, activeSnapshot = null } = {}) {
+  const normalized = normalizeExpectedPlan(task?.expectedPlan);
+  if (!normalized.ok) return null;
+  const chain = ancestorChainForTask(parsed, task, activeSnapshot);
+  const consumedDepth = Array.isArray(chain) ? chain.length : 0;
+  const expectedDepth = normalized.value.expectedDepth;
+  const expectedBreadth = normalized.value.expectedBreadth;
+  const planProgress = progressRatio(consumedDepth, expectedDepth);
+  const lineagePlans = [task, ...(chain || []).map((entry) => entry.task)]
+    .map((candidate) => normalizeExpectedPlan(candidate?.expectedPlan))
+    .filter((plan) => plan.ok)
+    .map((plan) => plan.value);
+  const cumulativeExpectedDepth = lineagePlans.reduce((sum, plan) => sum + plan.expectedDepth, 0);
+  return {
+    enabled: true,
+    source: 'expectedPlan',
+    taskId: task.id,
+    consumedDepth,
+    consumedDepthSinceDeclaration: consumedDepth,
+    expectedDepth,
+    expectedBreadth,
+    planProgress,
+    rationale: normalized.value.rationale,
+    lineageDiagnostic: {
+      consumedDepth,
+      cumulativeExpectedDepth,
+      cumulativePlanProgress: progressRatio(consumedDepth, cumulativeExpectedDepth),
+      planCount: lineagePlans.length,
+    },
+  };
+}
+
+function budgetWithExpectedPlanCoordinate(budget, { parsed, task, activeSnapshot = null } = {}) {
+  if (!budget || budget.enabled !== true || !task) return budget;
+  const coordinate = computeExpectedPlanCoordinate({ parsed, task, activeSnapshot });
+  if (!coordinate) return budget;
+  return { ...budget, expectedPlanCoordinate: coordinate };
+}
+
 function fallbackExpectedPlanForChild(parentTask, reason) {
   const parent = normalizeExpectedPlan(parentTask?.expectedPlan);
   const expectedDepth = parent.ok ? Math.max(0, parent.value.expectedDepth - 1) : 0;
@@ -3693,19 +3761,25 @@ export function runTaskOps(workDir, options = {}) {
         if (remaining <= 0) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
         if (stepTimeoutMs == null || remaining < stepTimeoutMs) stepTimeoutMs = remaining;
       }
+      const activeSnapshot = parsed.snapshots.get(parsed.project.activeSnapshotId) || null;
+      const stepBudget = budgetWithExpectedPlanCoordinate(finalBudget, {
+        parsed,
+        task: next.task,
+        activeSnapshot,
+      });
 
       let stepResult;
       if (next.kind === 'execute') {
         stepResult = executeRunnableTask({
           project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
-          budget: finalBudget,
+          budget: stepBudget,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
-          budget: finalBudget,
+          budget: stepBudget,
         });
         if (
           stepResult.status === 'completed'
@@ -3731,7 +3805,7 @@ export function runTaskOps(workDir, options = {}) {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
-          budget: finalBudget,
+          budget: stepBudget,
         });
       } else {
         throw new Error(`Unhandled action kind: ${next.kind}`);
