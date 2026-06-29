@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSync, watch } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
 
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
@@ -2214,12 +2215,13 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   return versionDir;
 }
 
-function rewriteFrontmatterInPlace(filePath, updater) {
-  const fm = parseMarkdownFile(filePath);
-  const body = readBody(filePath);
-  const next = updater({ ...fm }) ?? fm;
-  const text = fmBlock(next) + (body ? body + '\n' : '');
-  writeFileSync(filePath, text, 'utf8');
+function updateMarkdownFrontmatter(filePath, updater) {
+  return updateMarkdownFrontmatterViaStateWriter(filePath, updater, {
+    parseMarkdownFile,
+    readBody,
+    fmBlock,
+    writeTextFile: (targetPath, text) => writeFileSync(targetPath, text, 'utf8'),
+  });
 }
 
 function deriveRestartVersionId(taskGroup, sourceVersionId) {
@@ -2953,7 +2955,7 @@ function applyRepeatedPartialReviewPatches(parsed, patches) {
   for (const patch of patches || []) {
     const task = parsed.tasks.get(taskKey(patch.taskGroupVersionId, patch.taskId));
     if (!task?.path) continue;
-    rewriteFrontmatterInPlace(task.path, (fm) => applyRepeatedPartialReviewToTask(fm, [patch]));
+    updateMarkdownFrontmatter(task.path, (fm) => applyRepeatedPartialReviewToTask(fm, [patch]));
     applied.push({
       taskId: patch.taskId,
       taskGroupVersionId: patch.taskGroupVersionId,
@@ -3030,7 +3032,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
       supersedesVersionId: versionPlan.fromVersionId,
     });
 
-    rewriteFrontmatterInPlace(join(sourceVersion.path, 'index.md'), (fm) => {
+    updateMarkdownFrontmatter(join(sourceVersion.path, 'index.md'), (fm) => {
       fm.selected = false;
       fm.supersededByVersionId = versionPlan.toVersionId;
       fm.supersededAt = now;
@@ -3038,12 +3040,12 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
       return fm;
     });
 
-    rewriteFrontmatterInPlace(join(taskGroup.path, 'index.md'), (fm) => {
+    updateMarkdownFrontmatter(join(taskGroup.path, 'index.md'), (fm) => {
       fm.activeVersionId = versionPlan.toVersionId;
       return fm;
     });
 
-    rewriteFrontmatterInPlace(activeSnapshot.path, (fm) => {
+    updateMarkdownFrontmatter(activeSnapshot.path, (fm) => {
       const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
       fm.selectedVersions = list.map((p) => {
         if (!p || typeof p !== 'object') return p;
@@ -3066,7 +3068,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
     for (const promotion of versionPlan.promotions) {
       const partial = parsed.partialNodes.get(promotion.partialId);
       if (!partial) throw new Error(`Cannot promote partials: partial '${promotion.partialId}' disappeared before apply`);
-      rewriteFrontmatterInPlace(partial.path, (fm) => {
+      updateMarkdownFrontmatter(partial.path, (fm) => {
         fm.supersededBy = promotion.supersededBy;
         fm.supersededAt = now;
         fm.supersededReason = 'partial_follow_up_promotion';
@@ -3096,7 +3098,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
 
   const logLine = `- ${now} promote partials work=${plan.workId} promotions=${plan.promotionCount} skipped=${plan.skippedCount} versions=${appliedVersionPlans.map((p) => `${p.fromVersionId}->${p.toVersionId}`).join(',')}\n`;
   appendWorkLog(plan.projectDir, logLine);
-  rewriteFrontmatterInPlace(join(plan.projectDir, 'index.md'), (fm) => {
+  updateMarkdownFrontmatter(join(plan.projectDir, 'index.md'), (fm) => {
     fm.partialPromotionWaveBudget = plan.waveBudget.budget;
     fm.partialPromotionWaveCount = plan.waveBudget.nextCount;
     return fm;
@@ -3221,7 +3223,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
 
   const newVersionDir = writeVersionFromSpec(projectDir, taskGroup.id, spec, { supersedesVersionId: sourceVersion.id });
 
-  rewriteFrontmatterInPlace(join(sourceVersion.path, 'index.md'), (fm) => {
+  updateMarkdownFrontmatter(join(sourceVersion.path, 'index.md'), (fm) => {
     fm.selected = false;
     fm.supersededByVersionId = newVersionId;
     fm.supersededAt = now;
@@ -3229,12 +3231,12 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     return fm;
   });
 
-  rewriteFrontmatterInPlace(join(taskGroup.path, 'index.md'), (fm) => {
+  updateMarkdownFrontmatter(join(taskGroup.path, 'index.md'), (fm) => {
     if (fm.activeVersionId === sourceVersion.id) fm.activeVersionId = newVersionId;
     return fm;
   });
 
-  rewriteFrontmatterInPlace(activeSnapshot.path, (fm) => {
+  updateMarkdownFrontmatter(activeSnapshot.path, (fm) => {
     const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
     fm.selectedVersions = list.map((p) => {
       if (!p || typeof p !== 'object') return p;

@@ -14,6 +14,7 @@ import {
   readBody,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
+import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
 export const DEFAULT_RUN_ID = 'run-main';
@@ -293,12 +294,13 @@ export function sanitizeFmScalar(value, { maxLen = FM_SCALAR_MAX_LEN, fallback =
   return collapsed;
 }
 
-function rewriteFrontmatter(filePath, updater) {
-  const fm = parseMarkdownFile(filePath);
-  const body = readBody(filePath);
-  const next = updater({ ...fm }) ?? fm;
-  const text = fmBlock(next) + (body ? body + '\n' : '');
-  writeTextFileAtomic(filePath, text);
+function updateMarkdownFrontmatter(filePath, updater) {
+  return updateMarkdownFrontmatterViaStateWriter(filePath, updater, {
+    parseMarkdownFile,
+    readBody,
+    fmBlock,
+    writeTextFile: writeTextFileAtomic,
+  });
 }
 
 function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
@@ -306,7 +308,7 @@ function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, obs
   const normalizedReport = normalizeSurpriseReportPayload(report || {});
   const entry = computeSurpriseHistoryEntry({ task, report: normalizedReport, runId, runNodeId, actionKind, observedAt, evidenceRefs });
   const deltas = normalizedReport.newKnownDeltas;
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     const surpriseHistory = Array.isArray(fm.surpriseHistory) ? [...fm.surpriseHistory] : [];
     surpriseHistory.push(entry);
     fm.surpriseHistory = surpriseHistory;
@@ -542,7 +544,7 @@ export function applyInheritedBirthSnapshotToChildVersion({ projectDir, childTas
     const inherited = hydrateInheritedContext(parsed, childTask, activeSnapshot, { capturedAt });
     if (!inherited || inherited.parentChain.length === 0) continue;
     const staticInherited = inheritedContextWithoutRuntimeFlags(inherited);
-    rewriteFrontmatter(childTask.path, (fm) => {
+    updateMarkdownFrontmatter(childTask.path, (fm) => {
       const filtered = filterLocalKnownCopiesOfInherited(fm.knownList, staticInherited);
       if (filtered.removed.length > 0) {
         fm.knownList = filtered.knownList;
@@ -1324,7 +1326,7 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
     if (!isBlocked) continue;
     unblocked.push(item);
     if (dryRun) continue;
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       if (fm.status === 'blocked') fm.status = 'pending';
       if (fm.runReadiness === 'blocked') {
         if (fm.unblockRunReadiness) fm.runReadiness = fm.unblockRunReadiness;
@@ -1904,7 +1906,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     status: 'active',
     kindLabel: 'loopback',
   });
-  rewriteFrontmatter(loopbackPath, (fm) => {
+  updateMarkdownFrontmatter(loopbackPath, (fm) => {
     fm.loopbackOfRunNodeId = delegate.id;
     fm.loopbackPolicy = 'self';
     fm.loopbackIndex = loopbackIndex;
@@ -1947,7 +1949,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
 
   const finishedAt = isoNow();
   if (!result.ok) {
-    rewriteFrontmatter(loopbackPath, (fm) => {
+    updateMarkdownFrontmatter(loopbackPath, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(result.message);
       return fm;
@@ -1972,12 +1974,12 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     };
   }
 
-  rewriteFrontmatter(loopbackPath, (fm) => { fm.status = 'done'; return fm; });
+  updateMarkdownFrontmatter(loopbackPath, (fm) => { fm.status = 'done'; return fm; });
   closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: loopbackNodeId, reason: 'loopback_recorded', finishedAt });
 
   const delegatePath = delegate.path;
   if (delegatePath && existsSync(delegatePath)) {
-    rewriteFrontmatter(delegatePath, (fm) => {
+    updateMarkdownFrontmatter(delegatePath, (fm) => {
       fm.status = 'done';
       fm.resolvedBy = 'loopback';
       fm.resolvedAt = finishedAt;
@@ -2031,7 +2033,7 @@ function ensureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, so
     const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
     writeTextFileAtomic(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`);
   } else {
-    rewriteFrontmatter(runNodePath, (fm) => {
+    updateMarkdownFrontmatter(runNodePath, (fm) => {
       fm.status = status;
       return fm;
     });
@@ -2054,7 +2056,7 @@ function runNodeIdForTask(runDir, task) {
 }
 
 function attachRunRef(taskPath, runId, runNodeId, role) {
-  rewriteFrontmatter(taskPath, (fm) => {
+  updateMarkdownFrontmatter(taskPath, (fm) => {
     if (fm.status === 'pending') fm.status = 'active';
     const refs = Array.isArray(fm.runRefs) ? [...fm.runRefs] : [];
     if (!refs.some((r) => r && r.runId === runId && r.runNodeId === runNodeId)) {
@@ -2257,7 +2259,7 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
   });
   const report = buildReviewReport({ projectDir, task, runNode });
   const reviewReportHash = sha256Of(report);
-  rewriteFrontmatter(reviewNodePath, (fm) => {
+  updateMarkdownFrontmatter(reviewNodePath, (fm) => {
     fm.status = 'done';
     fm.reviewsRunNodeId = runNode.id;
     fm.reviewedRunId = runNode.runId;
@@ -2366,7 +2368,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         sourceRunId: runId,
         sourceRunNodeId: runNodeId,
       };
-      rewriteFrontmatter(task.path, (fm) => {
+      updateMarkdownFrontmatter(task.path, (fm) => {
         if (fm.status === 'active') fm.status = 'pending';
         fm.runReadiness = 'blocked';
         fm.runReadinessReason = sanitizeFmScalar(`Awaiting partial-driven follow-up promotion (partial: ${partial.partialId})`);
@@ -2375,7 +2377,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         delete fm.lastRunFailureReason;
         return fm;
       });
-      rewriteFrontmatter(runNodePath, (fm) => {
+      updateMarkdownFrontmatter(runNodePath, (fm) => {
         fm.status = 'done';
         fm.result = {
           ...executionResult,
@@ -2409,7 +2411,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     }
     if (partialRequest.markerFound && partialRequest.parseError) {
       const reason = sanitizeFmScalar(`malformed TASKOPS_PARTIAL_REQUEST marker: ${partialRequest.parseError}`);
-      rewriteFrontmatter(task.path, (fm) => {
+      updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'blocked';
         fm.runReadiness = 'blocked';
         fm.runReadinessReason = reason;
@@ -2418,7 +2420,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         fm.malformedPartialRequest = true;
         return fm;
       });
-      rewriteFrontmatter(runNodePath, (fm) => {
+      updateMarkdownFrontmatter(runNodePath, (fm) => {
         fm.status = 'blocked';
         fm.result = {
           ...executionResult,
@@ -2457,7 +2459,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     const surpriseReport = parseSurpriseReportFromExecutorResult(result);
     if (surpriseReport.markerFound && surpriseReport.parseError) {
       const reason = malformedSurpriseReason(surpriseReport);
-      rewriteFrontmatter(task.path, (fm) => {
+      updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'blocked';
         fm.runReadiness = 'blocked';
         fm.runReadinessReason = reason;
@@ -2466,7 +2468,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         fm.malformedSurpriseReport = true;
         return fm;
       });
-      rewriteFrontmatter(runNodePath, (fm) => {
+      updateMarkdownFrontmatter(runNodePath, (fm) => {
         fm.status = 'blocked';
         fm.result = {
           ...executionResult,
@@ -2513,8 +2515,8 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
           evidenceRefs: [`run:${runId}/node:${runNodeId}`],
         })
       : null;
-    rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
-    rewriteFrontmatter(runNodePath, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => {
       fm.status = 'done';
       fm.result = {
         ...executionResult,
@@ -2529,7 +2531,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
     const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
     if (review.reviewReport.decision !== 'approved' && isGuarded) {
-      rewriteFrontmatter(task.path, (fm) => {
+      updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'blocked';
         fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
         return fm;
@@ -2569,12 +2571,12 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
   }
 
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     fm.status = 'blocked';
     fm.lastRunFailureReason = sanitizeFmScalar(result.message);
     return fm;
   });
-  rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+  updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'task_failed', runId,
     taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
@@ -2600,7 +2602,7 @@ export function extendActiveSnapshot(parsed, addition) {
   if (existing.some((pair) => pair && pair.taskGroupId === addition.taskGroupId && pair.versionId === addition.versionId)) {
     return false;
   }
-  rewriteFrontmatter(snapshot.path, (fm) => {
+  updateMarkdownFrontmatter(snapshot.path, (fm) => {
     const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
     if (list.some((pair) => pair && pair.taskGroupId === addition.taskGroupId && pair.versionId === addition.versionId)) {
       return fm;
@@ -2648,7 +2650,7 @@ function ensureDecompositionBacklink({ projectDir, childTaskGroupId, versionId, 
   }
 
   for (const filePath of paths) {
-    rewriteFrontmatter(filePath, (fm) => {
+    updateMarkdownFrontmatter(filePath, (fm) => {
       for (const [key, value] of Object.entries(desired)) fm[key] = value;
       return fm;
     });
@@ -2886,7 +2888,7 @@ function normalizeExpectedPlansForChildVersion({ projectDir, childTaskGroupId, v
       continue;
     }
     const fallback = fallbackExpectedPlanForChild(parentTask, normalized.reason);
-    rewriteFrontmatter(taskPath, (fm) => {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
       fm.expectedPlan = fallback;
       return fm;
     });
@@ -3100,7 +3102,7 @@ function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versi
       return normalized.ref;
     });
     if (!changed) continue;
-    rewriteFrontmatter(taskPath, (fm) => {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
       fm.blockedBy = nextRefs;
       return fm;
     });
@@ -3157,7 +3159,7 @@ function deferCommittingScopeChildrenForChildVersion({ projectDir, childTaskGrou
       reason,
       expectedPlan: childTask.expectedPlan || null,
     });
-    rewriteFrontmatter(taskPath, (fm) => {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
       fm.status = 'blocked';
       fm.runReadiness = 'blocked';
       fm.runReadinessReason = reason;
@@ -3350,12 +3352,12 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     }
   }
   if (!result.ok) {
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(result.message);
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'decomposition_failed', runId,
       taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
@@ -3379,12 +3381,12 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     runNodeId,
   });
   if (!backlinkResult.ok) {
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(backlinkResult.message);
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'decomposition_failed', runId,
       taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
@@ -3458,7 +3460,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     appendRunLog(runDir, `${finishedAt} committing_scope_deferred taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${committingScopeDeferral.deferredCount}`);
   }
 
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.childTaskGroupId = result.childTaskGroupId;
     fm.runReadiness = 'needs_decomposition';
@@ -3471,7 +3473,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   const taskCloseReason = result.recoveredAfterAdapterFailure ? 'decomposed_by_runner_after_adapter_timeout_recovery' : 'decomposed_by_runner';
   const runCloseReason = result.recoveredAfterAdapterFailure ? 'decomposition_recorded_after_adapter_timeout_recovery' : 'decomposition_recorded';
   closeTaskWithEow({ task, reason: taskCloseReason, finishedAt });
-  rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
+  updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, finishedAt });
   const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
     projectDir,
@@ -3594,12 +3596,12 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
 
   const finishedAt = isoNow();
   if (!result.ok) {
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(result.message);
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'exploration_failed', runId,
       taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
@@ -3620,7 +3622,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   const surpriseReport = parseSurpriseReportFromExecutorResult(result, artifactText ? [artifactText] : []);
   if (surpriseReport.markerFound && surpriseReport.parseError) {
     const reason = malformedSurpriseReason(surpriseReport);
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.runReadiness = 'blocked';
       fm.runReadinessReason = reason;
@@ -3629,7 +3631,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
       fm.malformedSurpriseReport = true;
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => {
+    updateMarkdownFrontmatter(runNodePath, (fm) => {
       fm.status = 'blocked';
       fm.result = {
         artifactPath: result.artifactPath || null,
@@ -3676,7 +3678,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
       })
     : null;
 
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.runReadiness = 'needs_decomposition';
     fm.runReadinessReason = sanitizeFmScalar(`Exploration recorded by taskops-runner (${executor}) at ${finishedAt}; ready for decomposition with informed inputs.`);
@@ -3684,7 +3686,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     return fm;
   });
   closeTaskWithEow({ task, reason: 'exploration_recorded_by_runner', finishedAt });
-  rewriteFrontmatter(runNodePath, (fm) => {
+  updateMarkdownFrontmatter(runNodePath, (fm) => {
     fm.status = 'done';
     fm.result = {
       artifactPath: result.artifactPath || null,
@@ -3907,7 +3909,7 @@ function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedRev
     const taskMatch = task && eow.graphType === 'task' && eow.attachedToId === task.id && eow.taskGroupVersionId === task.taskGroupVersionId;
     const runMatch = eow.graphType === 'run' && eow.runId === runNode.runId && eow.attachedToId === runNode.id;
     if (!taskMatch && !runMatch) continue;
-    rewriteFrontmatter(eow.path, (fm) => {
+    updateMarkdownFrontmatter(eow.path, (fm) => {
       fm.approvedByReviewNodeId = approvedReview.reviewNodeId;
       fm.approvedReviewMode = approvedReview.reviewMode;
       fm.approvedReviewReportHash = approvedReview.reviewReportHash;
@@ -4030,7 +4032,7 @@ export function closeTarget(workDir, targetId, {
 
     const statusFlipped = task.status !== 'done' && declaredReason === 'manual_verified';
     if (statusFlipped) {
-      rewriteFrontmatter(task.path, (fm) => {
+      updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'done';
         fm.runReadinessReason = sanitizeFmScalar(`Closed by taskops close --reason manual_verified at ${declaredAt}.`);
         return fm;
