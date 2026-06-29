@@ -2212,6 +2212,195 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
   };
 }
 
+function closeExecutePartial({
+  task,
+  runDir,
+  runId,
+  eventsPath,
+  executor,
+  runNodeId,
+  runNodePath,
+  finishedAt,
+  result,
+  executionResult,
+  partialRequest,
+  budget,
+  artifactWorkspacePath,
+}) {
+  const partial = writeTaskPartialMarker({
+    task,
+    declaredAt: finishedAt,
+    options: {
+      completedSummary: partialRequest.completedSummary,
+      incompleteSummary: partialRequest.incompleteSummary,
+      followUpNeeded: partialRequest.followUpNeeded !== false,
+      budget: budget || { enabled: false },
+      declaredBy: 'taskops-runner',
+      sourceRunId: runId,
+      sourceRunNodeId: runNodeId,
+    },
+  });
+  const partialCompletion = {
+    partialId: partial.partialId,
+    partialPath: partial.partialPath,
+    taskId: task.id,
+    taskGroupVersionId: task.taskGroupVersionId,
+    completedSummary: partial.partial.completedSummary,
+    incompleteSummary: partial.partial.incompleteSummary,
+    followUpNeeded: partial.partial.followUpNeeded,
+    awaitingPromotion: true,
+    sourceRunId: runId,
+    sourceRunNodeId: runNodeId,
+  };
+  updateMarkdownFrontmatter(task.path, (fm) => {
+    if (fm.status === 'active') fm.status = 'pending';
+    fm.runReadiness = 'blocked';
+    fm.runReadinessReason = sanitizeFmScalar(`Awaiting partial-driven follow-up promotion (partial: ${partial.partialId})`);
+    fm.awaitingPromotion = true;
+    fm.awaitingPromotionPartialId = partial.partialId;
+    delete fm.lastRunFailureReason;
+    return fm;
+  });
+  updateMarkdownFrontmatter(runNodePath, (fm) => {
+    fm.status = 'done';
+    fm.result = {
+      ...executionResult,
+      partialRequest: {
+        partialRequested: true,
+        completedSummary: partial.partial.completedSummary,
+        incompleteSummary: partial.partial.incompleteSummary,
+        followUpNeeded: partial.partial.followUpNeeded,
+      },
+      partialCompletion,
+    };
+    return fm;
+  });
+  logEvent(eventsPath, {
+    timestamp: finishedAt, type: 'task_partial_requested', runId,
+    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    partialId: partial.partialId,
+  });
+  appendRunLog(runDir, `${finishedAt} task_partial_requested taskId=${task.id} runNodeId=${runNodeId} partialId=${partial.partialId}`);
+  return {
+    taskId: task.id,
+    runNodeId,
+    kind: 'execute',
+    status: 'partial',
+    executor,
+    message: result.message || null,
+    budget,
+    executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+    partialCompletion,
+  };
+}
+
+function closeExecuteFailure({
+  task,
+  runDir,
+  eventsPath,
+  runNodePath,
+  taskUpdater,
+  runNodeUpdater = null,
+  event,
+  logLine,
+  actionResult,
+}) {
+  updateMarkdownFrontmatter(task.path, taskUpdater);
+  if (runNodeUpdater) updateMarkdownFrontmatter(runNodePath, runNodeUpdater);
+  logEvent(eventsPath, event);
+  appendRunLog(runDir, logLine);
+  return actionResult;
+}
+
+function closeExecuteSuccess({
+  projectDir,
+  task,
+  runDir,
+  runId,
+  eventsPath,
+  executor,
+  runNodeId,
+  runNodePath,
+  finishedAt,
+  result,
+  executionResult,
+  surpriseReport,
+  budget,
+  artifactWorkspacePath,
+}) {
+  const surpriseHistoryEntry = surpriseReport.surpriseReported
+    ? appendSurpriseHistory({
+        task,
+        report: surpriseReport.report,
+        runId,
+        runNodeId,
+        actionKind: 'execute',
+        observedAt: finishedAt,
+        evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+      })
+    : null;
+  updateMarkdownFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
+  updateMarkdownFrontmatter(runNodePath, (fm) => {
+    fm.status = 'done';
+    fm.result = {
+      ...executionResult,
+      ...(surpriseReport.surpriseReported ? {
+        surpriseReport: surpriseReport.report,
+        surpriseHistoryEntry,
+      } : {}),
+    };
+    return fm;
+  });
+  const reviewedRunNode = parseMarkdownFile(runNodePath);
+  const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
+  const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
+  if (review.reviewReport.decision !== 'approved' && isGuarded) {
+    return closeExecuteFailure({
+      task,
+      runDir,
+      eventsPath,
+      runNodePath,
+      taskUpdater: (fm) => {
+        fm.status = 'blocked';
+        fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
+        return fm;
+      },
+      event: {
+        timestamp: finishedAt, type: 'task_review_failed', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
+        decision: review.reviewReport.decision,
+      },
+      logLine: `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`,
+      actionResult: {
+        taskId: task.id,
+        runNodeId,
+        reviewNodeId: review.reviewNodeId,
+        kind: 'execute',
+        status: 'failed',
+        executor,
+        message: result.message || null,
+        reviewDecision: review.reviewReport.decision,
+        budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+      },
+    });
+  }
+  const approvedReview = review.approvedReview;
+  const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
+  closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
+
+  logEvent(eventsPath, {
+    timestamp: finishedAt, type: 'task_completed', runId,
+    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    reviewNodeId: review.reviewNodeId,
+    reviewDecision: review.reviewReport.decision,
+    message: result.message || null,
+  });
+  appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
+  return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
+}
+
 function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
@@ -2254,253 +2443,172 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     const executionResult = buildExecutionResult({ task, runId, runNodeId, executorResult: result });
     const partialRequest = parsePartialRequestFromExecutorResult(result);
     if (partialRequest.partialRequested) {
-      const partial = writeTaskPartialMarker({
+      return closeExecutePartial({
         task,
-        declaredAt: finishedAt,
-        options: {
-          completedSummary: partialRequest.completedSummary,
-          incompleteSummary: partialRequest.incompleteSummary,
-          followUpNeeded: partialRequest.followUpNeeded !== false,
-          budget: budget || { enabled: false },
-          declaredBy: 'taskops-runner',
-          sourceRunId: runId,
-          sourceRunNodeId: runNodeId,
-        },
-      });
-      const partialCompletion = {
-        partialId: partial.partialId,
-        partialPath: partial.partialPath,
-        taskId: task.id,
-        taskGroupVersionId: task.taskGroupVersionId,
-        completedSummary: partial.partial.completedSummary,
-        incompleteSummary: partial.partial.incompleteSummary,
-        followUpNeeded: partial.partial.followUpNeeded,
-        awaitingPromotion: true,
-        sourceRunId: runId,
-        sourceRunNodeId: runNodeId,
-      };
-      updateMarkdownFrontmatter(task.path, (fm) => {
-        if (fm.status === 'active') fm.status = 'pending';
-        fm.runReadiness = 'blocked';
-        fm.runReadinessReason = sanitizeFmScalar(`Awaiting partial-driven follow-up promotion (partial: ${partial.partialId})`);
-        fm.awaitingPromotion = true;
-        fm.awaitingPromotionPartialId = partial.partialId;
-        delete fm.lastRunFailureReason;
-        return fm;
-      });
-      updateMarkdownFrontmatter(runNodePath, (fm) => {
-        fm.status = 'done';
-        fm.result = {
-          ...executionResult,
-          partialRequest: {
-            partialRequested: true,
-            completedSummary: partial.partial.completedSummary,
-            incompleteSummary: partial.partial.incompleteSummary,
-            followUpNeeded: partial.partial.followUpNeeded,
-          },
-          partialCompletion,
-        };
-        return fm;
-      });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_partial_requested', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        partialId: partial.partialId,
-      });
-      appendRunLog(runDir, `${finishedAt} task_partial_requested taskId=${task.id} runNodeId=${runNodeId} partialId=${partial.partialId}`);
-      return {
-        taskId: task.id,
         runNodeId,
-        kind: 'execute',
-        status: 'partial',
+        runNodePath,
+        runDir,
+        runId,
+        eventsPath,
         executor,
-        message: result.message || null,
+        finishedAt,
+        result,
+        executionResult,
+        partialRequest,
         budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-        partialCompletion,
-      };
+        artifactWorkspacePath,
+      });
     }
     if (partialRequest.markerFound && partialRequest.parseError) {
       const reason = sanitizeFmScalar(`malformed TASKOPS_PARTIAL_REQUEST marker: ${partialRequest.parseError}`);
-      updateMarkdownFrontmatter(task.path, (fm) => {
-        fm.status = 'blocked';
-        fm.runReadiness = 'blocked';
-        fm.runReadinessReason = reason;
-        fm.lastRunFailureReason = reason;
-        fm.needsManualReview = true;
-        fm.malformedPartialRequest = true;
-        return fm;
-      });
-      updateMarkdownFrontmatter(runNodePath, (fm) => {
-        fm.status = 'blocked';
-        fm.result = {
-          ...executionResult,
+      return closeExecuteFailure({
+        task,
+        runDir,
+        eventsPath,
+        runNodePath,
+        taskUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.runReadiness = 'blocked';
+          fm.runReadinessReason = reason;
+          fm.lastRunFailureReason = reason;
+          fm.needsManualReview = true;
+          fm.malformedPartialRequest = true;
+          return fm;
+        },
+        runNodeUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.result = {
+            ...executionResult,
+            malformedPartialRequest: {
+              markerFound: true,
+              parseError: partialRequest.parseError,
+              rawLine: partialRequest.rawLine || '',
+              needsManualReview: true,
+            },
+          };
+          return fm;
+        },
+        event: {
+          timestamp: finishedAt, type: 'task_malformed_partial_request', runId,
+          taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+          parseError: partialRequest.parseError,
+        },
+        logLine: `${finishedAt} task_malformed_partial_request taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`,
+        actionResult: {
+          taskId: task.id,
+          runNodeId,
+          kind: 'execute',
+          status: 'failed',
+          failureKind: 'malformed_partial_request',
+          executor,
+          message: reason,
+          budget,
+          executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
           malformedPartialRequest: {
             markerFound: true,
             parseError: partialRequest.parseError,
             rawLine: partialRequest.rawLine || '',
-            needsManualReview: true,
           },
-        };
-        return fm;
-      });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_malformed_partial_request', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        parseError: partialRequest.parseError,
-      });
-      appendRunLog(runDir, `${finishedAt} task_malformed_partial_request taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
-      return {
-        taskId: task.id,
-        runNodeId,
-        kind: 'execute',
-        status: 'failed',
-        failureKind: 'malformed_partial_request',
-        executor,
-        message: reason,
-        budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-        malformedPartialRequest: {
-          markerFound: true,
-          parseError: partialRequest.parseError,
-          rawLine: partialRequest.rawLine || '',
         },
-      };
+      });
     }
     const surpriseReport = parseSurpriseReportFromExecutorResult(result);
     if (surpriseReport.markerFound && surpriseReport.parseError) {
       const reason = malformedSurpriseReason(surpriseReport);
-      updateMarkdownFrontmatter(task.path, (fm) => {
-        fm.status = 'blocked';
-        fm.runReadiness = 'blocked';
-        fm.runReadinessReason = reason;
-        fm.lastRunFailureReason = reason;
-        fm.needsManualReview = true;
-        fm.malformedSurpriseReport = true;
-        return fm;
-      });
-      updateMarkdownFrontmatter(runNodePath, (fm) => {
-        fm.status = 'blocked';
-        fm.result = {
-          ...executionResult,
+      return closeExecuteFailure({
+        task,
+        runDir,
+        eventsPath,
+        runNodePath,
+        taskUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.runReadiness = 'blocked';
+          fm.runReadinessReason = reason;
+          fm.lastRunFailureReason = reason;
+          fm.needsManualReview = true;
+          fm.malformedSurpriseReport = true;
+          return fm;
+        },
+        runNodeUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.result = {
+            ...executionResult,
+            malformedSurpriseReport: {
+              markerFound: true,
+              parseError: surpriseReport.parseError,
+              rawLine: surpriseReport.rawLine || '',
+              needsManualReview: true,
+            },
+          };
+          return fm;
+        },
+        event: {
+          timestamp: finishedAt, type: 'task_malformed_surprise_report', runId,
+          taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+          parseError: surpriseReport.parseError,
+        },
+        logLine: `${finishedAt} task_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`,
+        actionResult: {
+          taskId: task.id,
+          runNodeId,
+          kind: 'execute',
+          status: 'failed',
+          failureKind: 'malformed_surprise_report',
+          executor,
+          message: reason,
+          budget,
+          executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
           malformedSurpriseReport: {
             markerFound: true,
             parseError: surpriseReport.parseError,
             rawLine: surpriseReport.rawLine || '',
-            needsManualReview: true,
           },
-        };
-        return fm;
-      });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_malformed_surprise_report', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        parseError: surpriseReport.parseError,
-      });
-      appendRunLog(runDir, `${finishedAt} task_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
-      return {
-        taskId: task.id,
-        runNodeId,
-        kind: 'execute',
-        status: 'failed',
-        failureKind: 'malformed_surprise_report',
-        executor,
-        message: reason,
-        budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-        malformedSurpriseReport: {
-          markerFound: true,
-          parseError: surpriseReport.parseError,
-          rawLine: surpriseReport.rawLine || '',
         },
-      };
-    }
-    const surpriseHistoryEntry = surpriseReport.surpriseReported
-      ? appendSurpriseHistory({
-          task,
-          report: surpriseReport.report,
-          runId,
-          runNodeId,
-          actionKind: 'execute',
-          observedAt: finishedAt,
-          evidenceRefs: [`run:${runId}/node:${runNodeId}`],
-        })
-      : null;
-    updateMarkdownFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
-    updateMarkdownFrontmatter(runNodePath, (fm) => {
-      fm.status = 'done';
-      fm.result = {
-        ...executionResult,
-        ...(surpriseReport.surpriseReported ? {
-          surpriseReport: surpriseReport.report,
-          surpriseHistoryEntry,
-        } : {}),
-      };
-      return fm;
-    });
-    const reviewedRunNode = parseMarkdownFile(runNodePath);
-    const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
-    const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
-    if (review.reviewReport.decision !== 'approved' && isGuarded) {
-      updateMarkdownFrontmatter(task.path, (fm) => {
-        fm.status = 'blocked';
-        fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
-        return fm;
       });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_review_failed', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
-        decision: review.reviewReport.decision,
-      });
-      appendRunLog(runDir, `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`);
-      return {
-        taskId: task.id,
-        runNodeId,
-        reviewNodeId: review.reviewNodeId,
-        kind: 'execute',
-        status: 'failed',
-        executor,
-        message: result.message || null,
-        reviewDecision: review.reviewReport.decision,
-        budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-      };
     }
-    const approvedReview = review.approvedReview;
-    const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
-    closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
-    closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
-
-    logEvent(eventsPath, {
-      timestamp: finishedAt, type: 'task_completed', runId,
-      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-      reviewNodeId: review.reviewNodeId,
-      reviewDecision: review.reviewReport.decision,
-      message: result.message || null,
+    return closeExecuteSuccess({
+      projectDir,
+      task,
+      runDir,
+      runId,
+      eventsPath,
+      executor,
+      runNodeId,
+      runNodePath,
+      finishedAt,
+      result,
+      executionResult,
+      surpriseReport,
+      budget,
+      artifactWorkspacePath,
     });
-    appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
-    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
   }
 
-  updateMarkdownFrontmatter(task.path, (fm) => {
-    fm.status = 'blocked';
-    fm.lastRunFailureReason = sanitizeFmScalar(result.message);
-    return fm;
+  return closeExecuteFailure({
+    task,
+    runDir,
+    eventsPath,
+    runNodePath,
+    taskUpdater: (fm) => {
+      fm.status = 'blocked';
+      fm.lastRunFailureReason = sanitizeFmScalar(result.message);
+      return fm;
+    },
+    runNodeUpdater: (fm) => { fm.status = 'blocked'; return fm; },
+    event: {
+      timestamp: finishedAt, type: 'task_failed', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      message: result.message || null,
+    },
+    logLine: `${finishedAt} task_failed taskId=${task.id} reason=${result.message || ''}`,
+    actionResult: {
+      taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '',
+      budget,
+      executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+    },
   });
-  updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
-  logEvent(eventsPath, {
-    timestamp: finishedAt, type: 'task_failed', runId,
-    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-    message: result.message || null,
-  });
-  appendRunLog(runDir, `${finishedAt} task_failed taskId=${task.id} reason=${result.message || ''}`);
-  return {
-    taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
-    executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-  };
 }
 
 export function extendActiveSnapshot(parsed, addition) {
