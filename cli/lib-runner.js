@@ -1508,6 +1508,14 @@ function childTaskExpectedPlanPromptLines() {
   ];
 }
 
+function childTaskBlockedByPromptLines(versionId) {
+  return [
+    'When a child task is blocked by another task, use blockedBy as a list of structured refs, not strings:',
+    `- sibling task blocker: { type: 'task', id: '<task-id>', taskGroupVersionId: '${versionId}' }`,
+    "- run-node blocker, only when truly needed: { type: 'runNode', runId: '<run-id>', runNodeId: '<run-node-id>' }",
+  ];
+}
+
 function surpriseReportPromptLines({ artifactRequired = false } = {}) {
   const locationLine = artifactRequired
     ? 'Include this report inside the exploration artifact. You may also repeat it in the final response.'
@@ -1565,6 +1573,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
     ...childTaskUncertaintySchemaPromptLines(),
     ...childTaskExpectedPlanPromptLines(),
+    ...childTaskBlockedByPromptLines(versionId),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
   ], budget, { actionKind: 'decompose' });
@@ -2693,6 +2702,144 @@ function normalizeExpectedPlansForChildVersion({ projectDir, childTaskGroupId, v
   return summary;
 }
 
+function unresolvedBlockedByMarker({ rawRef, reason, versionId, index }) {
+  const raw = String(rawRef ?? '').trim();
+  const id = raw || `empty-blockedby-ref-${index + 1}`;
+  return {
+    type: 'unresolved',
+    id,
+    rawRef: raw,
+    taskGroupVersionId: versionId,
+    reason: sanitizeFmScalar(reason),
+  };
+}
+
+function normalizeChildBlockedByRef(ref, { taskIds, versionId, index }) {
+  if (typeof ref === 'string') {
+    const id = ref.trim();
+    if (id && taskIds.has(id)) {
+      return {
+        ref: { type: 'task', id, taskGroupVersionId: versionId },
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: 'string_task_ref',
+      };
+    }
+    const reason = id
+      ? `blockedBy string ref '${id}' does not match any task id in child version ${versionId}`
+      : `blockedBy string ref at index ${index + 1} is empty`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: ref, reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
+  }
+
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) {
+    const reason = `blockedBy ref at index ${index + 1} must be an object or task id string`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref ?? null), reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
+  }
+
+  if (ref.type === 'task') {
+    const id = compactString(ref.id || ref.taskId);
+    if (!id) return { ref, changed: false };
+    if ((!ref.taskGroupVersionId || ref.taskGroupVersionId === versionId) && taskIds.has(id)) {
+      const canonical = { type: 'task', id, taskGroupVersionId: versionId };
+      if (
+        ref.id === canonical.id
+        && ref.taskGroupVersionId === canonical.taskGroupVersionId
+        && ref.type === canonical.type
+        && ref.taskId == null
+      ) {
+        return { ref, changed: false };
+      }
+      return {
+        ref: canonical,
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: ref.taskGroupVersionId ? 'canonical_task_ref' : 'defaulted_child_task_group_version',
+      };
+    }
+  }
+
+  if (ref.type === 'runNode' && ref.id && !ref.runNodeId) {
+    return {
+      ref: { ...ref, runNodeId: ref.id },
+      changed: true,
+      normalized: true,
+      originalRef: ref,
+      reason: 'canonical_run_node_ref',
+    };
+  }
+
+  return { ref, changed: false };
+}
+
+function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versionId }) {
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const taskPaths = listChildTaskPaths(versionDir);
+  const childTasks = taskPaths.map((taskPath) => ({ taskPath, task: parseMarkdownFile(taskPath) }));
+  const taskIds = new Set(childTasks.map(({ task }) => task.id).filter(Boolean));
+  const summary = {
+    taskCount: childTasks.length,
+    checkedTaskCount: 0,
+    normalizedRefCount: 0,
+    unresolvedCount: 0,
+    normalizedRefs: [],
+    unresolvedRefs: [],
+  };
+
+  for (const { taskPath, task: childTask } of childTasks) {
+    if (childTask.blockedBy == null) continue;
+    summary.checkedTaskCount += 1;
+    const originalRefs = Array.isArray(childTask.blockedBy) ? childTask.blockedBy : [childTask.blockedBy];
+    let changed = false;
+    const nextRefs = originalRefs.map((ref, index) => {
+      const normalized = normalizeChildBlockedByRef(ref, { taskIds, versionId, index });
+      if (!normalized.changed) return normalized.ref;
+      changed = true;
+      if (normalized.normalized) {
+        summary.normalizedRefCount += 1;
+        summary.normalizedRefs.push({
+          taskId: childTask.id || null,
+          index,
+          originalRef: normalized.originalRef,
+          normalizedRef: normalized.ref,
+          reason: normalized.reason,
+        });
+      }
+      if (normalized.unresolved) {
+        summary.unresolvedCount += 1;
+        summary.unresolvedRefs.push({
+          taskId: childTask.id || null,
+          index,
+          originalRef: normalized.originalRef,
+          unresolvedRef: normalized.ref,
+          reason: normalized.reason,
+        });
+      }
+      return normalized.ref;
+    });
+    if (!changed) continue;
+    rewriteFrontmatter(taskPath, (fm) => {
+      fm.blockedBy = nextRefs;
+      return fm;
+    });
+  }
+
+  return summary;
+}
+
 function committingScopeDeferralReason({ executor, finishedAt }) {
   return sanitizeFmScalar(`Committing scope deferred by taskops-runner (${executor}) at ${finishedAt}: worker authored runReadiness=needs_decomposition during committing phase; review or restart explicitly before expanding this child scope.`);
 }
@@ -2996,6 +3143,26 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     appendRunLog(runDir, `${finishedAt} expected_plan_fallback_applied taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${expectedPlanNormalization.fallbackCount}`);
   }
 
+  const blockedByNormalization = normalizeBlockedByForChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+  });
+  if (blockedByNormalization.unresolvedCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'blockedby_normalization_unresolved', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      unresolvedRefs: blockedByNormalization.unresolvedRefs,
+      summary: {
+        unresolvedCount: blockedByNormalization.unresolvedCount,
+        normalizedRefCount: blockedByNormalization.normalizedRefCount,
+        reason: 'blockedby_ref_unresolved_in_child_version',
+      },
+    });
+    appendRunLog(runDir, `${finishedAt} blockedby_normalization_unresolved taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${blockedByNormalization.unresolvedCount}`);
+  }
+
   const committingScopeDeferral = deferCommittingScopeChildrenForChildVersion({
     projectDir,
     childTaskGroupId: result.childTaskGroupId,
@@ -3053,6 +3220,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
     expectedPlanNormalization,
+    blockedByNormalization,
     committingScopeDeferral,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
@@ -3065,6 +3233,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
     expectedPlanNormalization,
+    blockedByNormalization,
     committingScopeDeferral,
     budget,
   };
