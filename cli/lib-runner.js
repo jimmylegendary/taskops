@@ -14,7 +14,16 @@ import {
   readBody,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
-import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
+import {
+  appendRunEvent as appendRunEventViaStateWriter,
+  appendRunLogEntry as appendRunLogViaStateWriter,
+  attachTaskRunRef as attachTaskRunRefViaStateWriter,
+  closeRunNodeWithEowFiles as closeRunNodeWithEowViaStateWriter,
+  closeTaskWithEowFile as closeTaskWithEowViaStateWriter,
+  ensureRunNodeFile as ensureRunNodeViaStateWriter,
+  updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter,
+  writeRunEdgeFile as writeRunEdgeViaStateWriter,
+} from './lib-state-writer.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
 export const DEFAULT_RUN_ID = 'run-main';
@@ -303,6 +312,21 @@ function updateMarkdownFrontmatter(filePath, updater) {
   });
 }
 
+function stateWriterIo() {
+  return {
+    appendTextFile: (filePath, text) => appendFileSync(filePath, text, 'utf8'),
+    ensureDir,
+    exists: existsSync,
+    fmBlock,
+    now: isoNow,
+    parseMarkdownFile,
+    readBody,
+    sanitizeFmScalar,
+    updateMarkdownFrontmatter,
+    writeTextFile: writeTextFileAtomic,
+  };
+}
+
 function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
   if (!task?.path) return null;
   const normalizedReport = normalizeSurpriseReportPayload(report || {});
@@ -566,13 +590,11 @@ function malformedSurpriseReason(parsed) {
 }
 
 function logEvent(eventsPath, event) {
-  appendFileSync(eventsPath, JSON.stringify(event) + '\n', 'utf8');
+  return appendRunEventViaStateWriter(eventsPath, event, stateWriterIo());
 }
 
 function appendRunLog(runDir, line) {
-  const logPath = join(runDir, 'run-log.md');
-  if (!existsSync(logPath)) writeFileSync(logPath, '# Run log\n\n', 'utf8');
-  appendFileSync(logPath, `- ${line}\n`, 'utf8');
+  return appendRunLogViaStateWriter(runDir, line, stateWriterIo());
 }
 
 function stableForHash(value) {
@@ -1873,22 +1895,7 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
 }
 
 function writeRunEdge({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeType, createdAt, note }) {
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
-  if (existsSync(edgePath)) return edgePath;
-  const fm = {
-    taskOpsVersion: 'v1',
-    entityType: 'runEdge',
-    id: edgeId,
-    runId,
-    fromRunNodeId,
-    toRunNodeId,
-    edgeType,
-    createdAt,
-    status: 'done',
-  };
-  if (note) fm.note = sanitizeFmScalar(note);
-  writeTextFileAtomic(edgePath, fmBlock(fm) + `# Run edge: ${fromRunNodeId} -${edgeType}-> ${toRunNodeId}\n`);
-  return edgePath;
+  return writeRunEdgeViaStateWriter({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeType, createdAt, note }, stateWriterIo());
 }
 
 function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, loopbackIndex, actorName, budget = null }) {
@@ -2016,29 +2023,9 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
 }
 
 function ensureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status = 'active', kindLabel }) {
-  const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
-  if (!existsSync(runNodePath)) {
-    const nodeFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'runNode',
-      id: runNodeId,
-      runId,
-      type,
-      title,
-      status,
-      createdAt: isoNow(),
-    };
-    if (sourceTaskId != null && sourceTaskId !== '') nodeFm.sourceTaskId = sourceTaskId;
-    if (sourceTaskGroupVersionId != null && sourceTaskGroupVersionId !== '') nodeFm.sourceTaskGroupVersionId = sourceTaskGroupVersionId;
-    const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
-    writeTextFileAtomic(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`);
-  } else {
-    updateMarkdownFrontmatter(runNodePath, (fm) => {
-      fm.status = status;
-      return fm;
-    });
-  }
-  return runNodePath;
+  return ensureRunNodeViaStateWriter({
+    runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status, kindLabel,
+  }, stateWriterIo());
 }
 
 function runNodeIdForTask(runDir, task) {
@@ -2056,91 +2043,15 @@ function runNodeIdForTask(runDir, task) {
 }
 
 function attachRunRef(taskPath, runId, runNodeId, role) {
-  updateMarkdownFrontmatter(taskPath, (fm) => {
-    if (fm.status === 'pending') fm.status = 'active';
-    const refs = Array.isArray(fm.runRefs) ? [...fm.runRefs] : [];
-    if (!refs.some((r) => r && r.runId === runId && r.runNodeId === runNodeId)) {
-      refs.push({ runId, runNodeId, role });
-    }
-    fm.runRefs = refs;
-    return fm;
-  });
+  return attachTaskRunRefViaStateWriter(taskPath, runId, runNodeId, role, stateWriterIo());
 }
 
 function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null }) {
-  const eowRunNodeId = `eow-${runNodeId}`;
-  const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
-  if (!existsSync(eowRunPath)) {
-    const eowFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: eowRunNodeId,
-      runId,
-      graphType: 'run',
-      attachedToType: 'runNode',
-      attachedToId: runNodeId,
-      reason,
-      declaredBy: 'taskops-runner',
-      declaredAt: finishedAt,
-      createdAt: finishedAt,
-      status: 'done',
-    };
-    if (approvedReview) {
-      eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
-      eowFm.approvedReviewMode = approvedReview.reviewMode;
-      eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
-      eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
-      eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
-    }
-    writeTextFileAtomic(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
-  }
-  const edgeId = `edge-${runNodeId}-to-eow`;
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
-  if (!existsSync(edgePath)) {
-    const edgeFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'runEdge',
-      id: edgeId,
-      runId,
-      fromRunNodeId: runNodeId,
-      toRunNodeId: eowRunNodeId,
-      edgeType: 'closes_with',
-      createdAt: finishedAt,
-      status: 'done',
-    };
-    writeTextFileAtomic(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNodeId} closes with EoW\n`);
-  }
+  return closeRunNodeWithEowViaStateWriter({ runDir, runId, runNodeId, reason, finishedAt, approvedReview }, stateWriterIo());
 }
 
 function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
-  const versionDir = dirname(dirname(task.path));
-  const eowTaskId = `eow-${task.id}`;
-  const eowTaskDir = join(versionDir, 'eow');
-  ensureDir(eowTaskDir);
-  const eowTaskPath = join(eowTaskDir, `${eowTaskId}.md`);
-  if (!existsSync(eowTaskPath)) {
-    const eowFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: eowTaskId,
-      graphType: 'task',
-      attachedToType: 'task',
-      attachedToId: task.id,
-      reason,
-      declaredBy: 'taskops-runner',
-      declaredAt: finishedAt,
-      createdAt: finishedAt,
-      status: 'done',
-    };
-    if (approvedReview) {
-      eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
-      eowFm.approvedReviewMode = approvedReview.reviewMode;
-      eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
-      eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
-      eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
-    }
-    writeTextFileAtomic(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
-  }
+  return closeTaskWithEowViaStateWriter({ task, reason, finishedAt, approvedReview }, stateWriterIo());
 }
 
 function partialIdTimestamp(iso) {
