@@ -130,7 +130,7 @@ try {
     task,
     runId: 'run-main',
     runNodeId: 'run-node-explore',
-    artifactRelPath: 'runs/run-main/artifacts/run-node-explore.md',
+    artifactPath: join(tempRoot, 'runs', 'run-main', 'artifacts', 'run-node-explore.md'),
     budget: budgetFor(0.499),
   });
   assert.match(explore, /Expected plan phase: exploring\./);
@@ -151,7 +151,7 @@ try {
     },
     runId: 'run-main',
     loopbackNodeId: 'run-node-loopback',
-    artifactRelPath: 'runs/run-main/artifacts/run-node-loopback.md',
+    artifactPath: join(tempRoot, 'runs', 'run-main', 'artifacts', 'run-node-loopback.md'),
     actorName: 'self',
     budget: budgetFor(0.85),
   });

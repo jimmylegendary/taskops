@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   ancestorChainForTask,
   classifyTaskReadiness,
@@ -68,6 +69,19 @@ export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled
 
 export const PARTIAL_REQUEST_PREFIX = 'TASKOPS_PARTIAL_REQUEST:';
 export const SURPRISE_REPORT_PREFIX = 'TASKOPS_SURPRISE_REPORT:';
+
+const RUNNER_DIR = dirname(fileURLToPath(import.meta.url));
+const TASKOPS_CLI_PATH = realpathSync(join(RUNNER_DIR, 'bin', 'taskops.js'));
+
+function shellQuote(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9_/:=.,+%-]+$/.test(text)) return text;
+  return `'${text.replace(/'/g, "'\\''")}'`;
+}
+
+function taskopsCliCommandForPrompt() {
+  return `${shellQuote(process.execPath)} ${shellQuote(TASKOPS_CLI_PATH)}`;
+}
 export const SURPRISE_PENALTY_WEIGHTS = Object.freeze({
   wrongKnown: 3,
   discoveredUnknown: 1,
@@ -1547,7 +1561,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     'Author a TaskOps child task group and a v1 version that decomposes this task using the canonical md-first format.',
     `Target child task group id: ${childTaskGroupId}`,
     `Target version id: ${versionId}`,
-    `Create the task group folder (with index.md) under task-groups/<id>/, then call \`taskops decompose ${workDirForPrompt} --task-group-id <child-tg-id> --spec <spec.json>\` to write the new version.`,
+    `Create the task group folder (with index.md) under task-groups/<id>/, then call \`${taskopsCliCommandForPrompt()} decompose ${shellQuote(workDirForPrompt)} --task-group-id <child-tg-id> --spec <spec.json>\` to write the new version.`,
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
     ...childTaskUncertaintySchemaPromptLines(),
     ...childTaskExpectedPlanPromptLines(),
@@ -1556,7 +1570,9 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
   ], budget, { actionKind: 'decompose' });
 }
 
-export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget = null }) {
+export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactPath, actorName, budget = null }) {
+  if (!artifactPath) throw new Error('Missing artifactPath for loopback prompt');
+  const artifactPathForPrompt = resolve(artifactPath);
   return promptWithBudget([
     'You are a TaskOps loopback resolution agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1571,12 +1587,14 @@ export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNod
     'Loopback mode is enabled: take this waiting delegation back into the runner and produce a concrete resolution that lets downstream execution continue.',
     'Record that the actual executor handled this delegation under loopback mode. Do not pretend the original delegatee executed it.',
     `Run id: ${runId}, loopback resolution run node id: ${loopbackNodeId}.`,
-    `Write the loopback resolution artifact at: ${artifactRelPath}`,
+    `Write the loopback resolution artifact at: ${artifactPathForPrompt}`,
     'Record the work taken, any decisions made, and what should happen next. Do not recursively invoke `taskops run`.',
   ], budget, { actionKind: 'loopback' });
 }
 
-export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget = null, inheritedContext = null }) {
+export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget = null, inheritedContext = null }) {
+  if (!artifactPath) throw new Error('Missing artifactPath for exploration prompt');
+  const artifactPathForPrompt = resolve(artifactPath);
   return promptWithBudget([
     'You are a TaskOps exploration agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1592,7 +1610,7 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     ...inheritedContextPromptLines(inheritedContext),
     '',
     'Run a minimal, safe exploration pass: search/read/try just enough to record learned facts, discovered constraints, failed/successful approaches, remaining unknowns, and a recommended next decomposition or runnable task.',
-    `Write the exploration artifact at: ${artifactRelPath}`,
+    `Write the exploration artifact at: ${artifactPathForPrompt}`,
     `Run id: ${runId}, run node id: ${runNodeId}.`,
     ...surpriseReportPromptLines({ artifactRequired: true }),
     'Do not mark the parent task as done; the runner manages task graph state. Do not recursively invoke `taskops run`.',
@@ -1689,8 +1707,7 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${loopbackNodeId}.md`);
-  const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget });
+  const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactPath, actorName, budget });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -3089,8 +3106,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
-  const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget, inheritedContext });
+  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget, inheritedContext });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,

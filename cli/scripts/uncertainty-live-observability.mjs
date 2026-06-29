@@ -27,7 +27,7 @@ function writeFakeClaude() {
   const fakePath = join(tempRoot, 'fake-claude-live-observability.mjs');
   writeFileSync(fakePath, `#!/usr/bin/env node
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 
 const SURPRISE_REPORT_PREFIX = ${JSON.stringify(SURPRISE_REPORT_PREFIX)};
 
@@ -47,6 +47,7 @@ function explorationArtifactPath() {
   const match = prompt.match(/Write the exploration artifact at: ([^\\n]+)/);
   if (!match) return null;
   const rel = match[1].trim();
+  if (isAbsolute(rel)) return rel;
   const workDir = process.env.TASKOPS_LIVE_OBSERVABILITY_WORK_DIR;
   return workDir ? join(workDir, rel) : rel;
 }

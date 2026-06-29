@@ -1,13 +1,25 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildAgentDecompositionPrompt } from '../lib-runner.js';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-decomposition-prompt-workdir-'));
 const projectDir = join(tempRoot, 'relative-work');
 const resolvedProjectDir = resolve(projectDir);
+const taskopsCliPath = realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'taskops.js'));
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function shellQuote(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9_/:=.,+%-]+$/.test(text)) return text;
+  return `'${text.replace(/'/g, "'\\''")}'`;
+}
 
 const prompt = buildAgentDecompositionPrompt({
   project: {
@@ -30,11 +42,9 @@ const prompt = buildAgentDecompositionPrompt({
 });
 
 assert.equal(prompt.includes('<work-dir>'), false, 'decomposition prompt must not leak literal <work-dir>');
-assert.match(
-  prompt,
-  new RegExp(`taskops decompose ${resolvedProjectDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --task-group-id <child-tg-id> --spec <spec\\.json>`),
-  'decomposition prompt must include the resolved absolute project dir in the taskops decompose command',
-);
+assert.doesNotMatch(prompt, /`taskops decompose /, 'decomposition prompt must not rely on PATH-resolved bare taskops');
+const expectedCommand = `${shellQuote(process.execPath)} ${shellQuote(taskopsCliPath)} decompose ${shellQuote(resolvedProjectDir)} --task-group-id <child-tg-id> --spec <spec.json>`;
+assert.match(prompt, new RegExp(escapeRegExp(expectedCommand)), 'decomposition prompt must pin the repo CLI and resolved absolute project dir');
 assert.equal(prompt.includes('Target child task group id: tg-open-child'), true);
 assert.equal(prompt.includes('Target version id: tgv-open-child-v1'), true);
 

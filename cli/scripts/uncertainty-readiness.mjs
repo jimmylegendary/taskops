@@ -255,7 +255,7 @@ const explorationPrompt = buildAgentExplorationPrompt({
   },
   runId: 'run-main',
   runNodeId: 'run-node-explore',
-  artifactRelPath: 'runs/run-main/artifacts/run-node-explore.md',
+  artifactPath: join(tempRoot, 'runs', 'run-main', 'artifacts', 'run-node-explore.md'),
 });
 assert.match(explorationPrompt, /Include this report inside the exploration artifact/);
 
