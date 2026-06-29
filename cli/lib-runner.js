@@ -2676,6 +2676,65 @@ function normalizeExpectedPlansForChildVersion({ projectDir, childTaskGroupId, v
   return summary;
 }
 
+function committingScopeDeferralReason({ executor, finishedAt }) {
+  return sanitizeFmScalar(`Committing scope deferred by taskops-runner (${executor}) at ${finishedAt}: worker authored runReadiness=needs_decomposition during committing phase; review or restart explicitly before expanding this child scope.`);
+}
+
+function expectedPlanCoordinateSnapshot(budget) {
+  const coordinate = budget?.expectedPlanCoordinate?.enabled === true ? budget.expectedPlanCoordinate : null;
+  if (!coordinate) return null;
+  return {
+    phase: coordinate.phase || null,
+    planProgress: coordinate.planProgress,
+    consumedDepth: coordinate.consumedDepth,
+    consumedDepthSinceDeclaration: coordinate.consumedDepthSinceDeclaration,
+    expectedDepth: coordinate.expectedDepth,
+    expectedBreadth: coordinate.expectedBreadth,
+    remainingSteps: budget.remaining,
+    maxSteps: budget.maxSteps,
+  };
+}
+
+function deferCommittingScopeChildrenForChildVersion({ projectDir, childTaskGroupId, versionId, budget, executor, finishedAt }) {
+  const coordinate = budget?.expectedPlanCoordinate?.enabled === true ? budget.expectedPlanCoordinate : null;
+  const summary = {
+    enabled: false,
+    deferredCount: 0,
+    guardMode: 'soft_post_authoring',
+    reason: 'committing_phase_needs_decomposition_child',
+    coordinate: expectedPlanCoordinateSnapshot(budget),
+    deferredChildren: [],
+  };
+  if (!coordinate || coordinate.phase !== 'committing') return summary;
+
+  summary.enabled = true;
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  for (const taskPath of listChildTaskPaths(versionDir)) {
+    const childTask = parseMarkdownFile(taskPath);
+    if (childTask.runReadiness !== 'needs_decomposition') continue;
+
+    const reason = committingScopeDeferralReason({ executor, finishedAt });
+    summary.deferredChildren.push({
+      taskId: childTask.id || null,
+      originalStatus: childTask.status || null,
+      originalRunReadiness: childTask.runReadiness || null,
+      originalRunReadinessReason: childTask.runReadinessReason || null,
+      newStatus: 'blocked',
+      newRunReadiness: 'blocked',
+      reason,
+      expectedPlan: childTask.expectedPlan || null,
+    });
+    rewriteFrontmatter(taskPath, (fm) => {
+      fm.status = 'blocked';
+      fm.runReadiness = 'blocked';
+      fm.runReadinessReason = reason;
+      return fm;
+    });
+  }
+  summary.deferredCount = summary.deferredChildren.length;
+  return summary;
+}
+
 function hasManualReviewOrPartialMarker(value) {
   if (!value || typeof value !== 'object') return false;
   return value.needsManualReview === true
@@ -2920,6 +2979,30 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     appendRunLog(runDir, `${finishedAt} expected_plan_fallback_applied taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${expectedPlanNormalization.fallbackCount}`);
   }
 
+  const committingScopeDeferral = deferCommittingScopeChildrenForChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    budget,
+    executor,
+    finishedAt,
+  });
+  if (committingScopeDeferral.deferredCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'committing_scope_deferred', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      coordinate: committingScopeDeferral.coordinate,
+      deferredChildren: committingScopeDeferral.deferredChildren,
+      summary: {
+        deferredCount: committingScopeDeferral.deferredCount,
+        guardMode: committingScopeDeferral.guardMode,
+        reason: committingScopeDeferral.reason,
+      },
+    });
+    appendRunLog(runDir, `${finishedAt} committing_scope_deferred taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${committingScopeDeferral.deferredCount}`);
+  }
+
   rewriteFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.childTaskGroupId = result.childTaskGroupId;
@@ -2953,6 +3036,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
     expectedPlanNormalization,
+    committingScopeDeferral,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
   return {
@@ -2964,6 +3048,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     recoveryStatus: result.recoveryStatus || null,
     inheritedBirthSnapshot,
     expectedPlanNormalization,
+    committingScopeDeferral,
     budget,
   };
 }
