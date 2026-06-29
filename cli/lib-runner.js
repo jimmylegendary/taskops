@@ -3324,73 +3324,20 @@ function maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, 
   };
 }
 
-function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
-  const inheritedContext = inheritedContextForTask(projectDir, task);
-  const startedAt = isoNow();
-  const runNodeId = runNodeIdForTask(runDir, task);
-  const runNodePath = ensureRunNode({
-    runDir, runId, runNodeId,
-    type: 'decomposition',
-    title: `Decompose: ${task.title}`,
-    sourceTaskId: task.id,
-    sourceTaskGroupVersionId: task.taskGroupVersionId,
-    status: 'active',
-    kindLabel: 'decompose',
-  });
-  attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
-
-  logEvent(eventsPath, {
-    timestamp: startedAt, type: 'decomposition_started', runId,
-    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-  });
-  appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
-
-  let result;
-  try {
-    result = executor === 'dry-run'
-      ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
-  } catch (err) {
-    result = { ok: false, message: err instanceof Error ? err.message : String(err) };
-  }
-
-  const finishedAt = isoNow();
-  if (!result.ok) {
-    result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
-    if (result.recoveredAfterAdapterFailure === true) {
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
-        adapterFailureReason: result.adapterFailureReason || null,
-        adapterStatus: result.adapterFailureStatus || result.status || null,
-        recoveryStatus: result.recoveryStatus || null,
-        recovery: result.recovery || null,
-      });
-      appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
-    }
-  }
-  if (!result.ok) {
-    updateMarkdownFrontmatter(task.path, (fm) => {
-      fm.status = 'blocked';
-      fm.lastRunFailureReason = sanitizeFmScalar(result.message);
-      return fm;
-    });
-    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
-    logEvent(eventsPath, {
-      timestamp: finishedAt, type: 'decomposition_failed', runId,
-      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-      message: result.message || null,
-    });
-    appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
-    return {
-    taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
-    };
-  }
-
+function closeDecomposeSuccess({
+  projectDir,
+  parsed,
+  task,
+  runDir,
+  runId,
+  eventsPath,
+  executor,
+  budget,
+  runNodeId,
+  runNodePath,
+  result,
+  finishedAt,
+}) {
   const backlinkResult = ensureDecompositionBacklink({
     projectDir,
     childTaskGroupId: result.childTaskGroupId,
@@ -3516,6 +3463,22 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     committingScopeDeferral,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
+
+  const extended = extendActiveSnapshot(parsed, {
+    taskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+  });
+  if (extended) {
+    logEvent(eventsPath, {
+      timestamp: isoNow(), type: 'snapshot_extended', runId,
+      snapshotId: parsed.project.activeSnapshotId,
+      taskGroupId: result.childTaskGroupId,
+      versionId: result.versionId,
+      source: { taskId: task.id, runNodeId },
+    });
+    appendRunLog(runDir, `${isoNow()} snapshot_extended snapshotId=${parsed.project.activeSnapshotId} taskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
+  }
+
   return {
     taskId: task.id, runNodeId, kind: 'decompose', status: 'completed', executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, message: result.message || null,
@@ -3529,6 +3492,89 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     committingScopeDeferral,
     budget,
   };
+}
+
+function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const inheritedContext = inheritedContextForTask(projectDir, task);
+  const startedAt = isoNow();
+  const runNodeId = runNodeIdForTask(runDir, task);
+  const runNodePath = ensureRunNode({
+    runDir, runId, runNodeId,
+    type: 'decomposition',
+    title: `Decompose: ${task.title}`,
+    sourceTaskId: task.id,
+    sourceTaskGroupVersionId: task.taskGroupVersionId,
+    status: 'active',
+    kindLabel: 'decompose',
+  });
+  attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
+
+  logEvent(eventsPath, {
+    timestamp: startedAt, type: 'decomposition_started', runId,
+    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+  });
+  appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
+
+  let result;
+  try {
+    result = executor === 'dry-run'
+      ? performDryRunDecomposition({ projectDir, task })
+      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
+  } catch (err) {
+    result = { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+
+  const finishedAt = isoNow();
+  if (!result.ok) {
+    result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
+    if (result.recoveredAfterAdapterFailure === true) {
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+        adapterFailureReason: result.adapterFailureReason || null,
+        adapterStatus: result.adapterFailureStatus || result.status || null,
+        recoveryStatus: result.recoveryStatus || null,
+        recovery: result.recovery || null,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
+    }
+  }
+  if (!result.ok) {
+    updateMarkdownFrontmatter(task.path, (fm) => {
+      fm.status = 'blocked';
+      fm.lastRunFailureReason = sanitizeFmScalar(result.message);
+      return fm;
+    });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'decomposition_failed', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      message: result.message || null,
+    });
+    appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
+    return {
+    taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+    message: result.message || null, adapterStatus: result.status || null,
+    stdout: result.stdout || '', stderr: result.stderr || '',
+    budget,
+    };
+  }
+
+  return closeDecomposeSuccess({
+    projectDir,
+    parsed,
+    task,
+    runDir,
+    runId,
+    eventsPath,
+    executor,
+    budget,
+    runNodeId,
+    runNodePath,
+    result,
+    finishedAt,
+  });
 }
 
 function performDryRunExploration({ runDir, runNodeId, task }) {
@@ -4405,30 +4451,10 @@ export function runTaskOps(workDir, options = {}) {
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
-          projectDir, project: parsed.project, task: next.task,
+          projectDir, parsed, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
           budget: stepBudget,
         });
-        if (
-          stepResult.status === 'completed'
-          && stepResult.childTaskGroupId
-          && stepResult.versionId
-        ) {
-          const extended = extendActiveSnapshot(parsed, {
-            taskGroupId: stepResult.childTaskGroupId,
-            versionId: stepResult.versionId,
-          });
-          if (extended) {
-            logEvent(eventsPath, {
-              timestamp: isoNow(), type: 'snapshot_extended', runId,
-              snapshotId: parsed.project.activeSnapshotId,
-              taskGroupId: stepResult.childTaskGroupId,
-              versionId: stepResult.versionId,
-              source: { taskId: stepResult.taskId, runNodeId: stepResult.runNodeId },
-            });
-            appendRunLog(runDir, `${isoNow()} snapshot_extended snapshotId=${parsed.project.activeSnapshotId} taskGroupId=${stepResult.childTaskGroupId} versionId=${stepResult.versionId}`);
-          }
-        }
       } else if (next.kind === 'explore') {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,
