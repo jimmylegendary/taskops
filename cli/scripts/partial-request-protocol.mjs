@@ -26,6 +26,7 @@ assert.match(executionPrompt, /"partialRequested": true/);
 
 const decompositionPrompt = buildAgentDecompositionPrompt({
   project,
+  projectDir: '/tmp/taskops-partial-request-protocol-prompt',
   task,
   childTaskGroupId: 'tg-child',
   versionId: 'tgv-child-v1',

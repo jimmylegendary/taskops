@@ -1,11 +1,14 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  ancestorChainForTask,
   classifyTaskReadiness,
   discoverProjects,
   ensureDir,
   fmBlock,
+  hydrationSourceTaskForChainEntry,
   parseMarkdownFile,
   parseProject,
   readBody,
@@ -37,6 +40,11 @@ export const FINISHING_MODE_RESERVE = (maxSteps) => {
   return Math.max(2, Math.ceil(Math.floor(n) * 0.2));
 };
 
+export const EXPECTED_PLAN_PHASE_THRESHOLDS = Object.freeze({
+  soft: 0.5,
+  hard: 0.85,
+});
+
 export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled = false } = {}) {
   if (!budgetEnabled || maxSteps == null) {
     return { enabled: false, finishingMode: false };
@@ -60,6 +68,25 @@ export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled
 }
 
 export const PARTIAL_REQUEST_PREFIX = 'TASKOPS_PARTIAL_REQUEST:';
+export const SURPRISE_REPORT_PREFIX = 'TASKOPS_SURPRISE_REPORT:';
+
+const RUNNER_DIR = dirname(fileURLToPath(import.meta.url));
+const TASKOPS_CLI_PATH = realpathSync(join(RUNNER_DIR, 'bin', 'taskops.js'));
+
+function shellQuote(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9_/:=.,+%-]+$/.test(text)) return text;
+  return `'${text.replace(/'/g, "'\\''")}'`;
+}
+
+function taskopsCliCommandForPrompt() {
+  return `${shellQuote(process.execPath)} ${shellQuote(TASKOPS_CLI_PATH)}`;
+}
+export const SURPRISE_PENALTY_WEIGHTS = Object.freeze({
+  wrongKnown: 3,
+  discoveredUnknown: 1,
+  nonBlockingUnknown: 0.5,
+});
 
 function looksLikeJson(value) {
   const text = String(value || '').trim();
@@ -142,6 +169,100 @@ export function parsePartialRequestFromExecutorResult(executorResult) {
   return malformed || { partialRequested: false, markerFound: false };
 }
 
+function compactString(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeObjectList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+}
+
+function normalizeContradictedKnown(value) {
+  return normalizeObjectList(value).map((item) => ({
+    knownId: compactString(item.knownId || item.id),
+    priorClaim: compactString(item.priorClaim),
+    observedEvidence: compactString(item.observedEvidence || item.evidence),
+    correctedClaim: compactString(item.correctedClaim),
+  })).filter((item) => item.knownId);
+}
+
+function normalizeDiscoveredUnknowns(value) {
+  return normalizeObjectList(value).map((item, index) => ({
+    id: compactString(item.id) || `u${index + 1}`,
+    question: compactString(item.question || item.claim || item.unknown),
+    whyDiscovered: compactString(item.whyDiscovered || item.reason || item.evidence),
+    blocksReadiness: item.blocksReadiness !== false,
+  })).filter((item) => item.question);
+}
+
+function normalizeNewKnownDeltas(value) {
+  return normalizeObjectList(value).map((item, index) => {
+    const delta = {
+      id: compactString(item.id) || `k-delta-${index + 1}`,
+      claim: compactString(item.claim),
+      verificationStatus: 'unverified',
+      evidence: compactString(item.evidence || item.observedEvidence),
+    };
+    if (compactString(item.revalidatedFromInheritedRef)) delta.revalidatedFromInheritedRef = compactString(item.revalidatedFromInheritedRef);
+    if (compactString(item.sourceTaskId)) delta.sourceTaskId = compactString(item.sourceTaskId);
+    if (compactString(item.sourceKnownId)) delta.sourceKnownId = compactString(item.sourceKnownId);
+    if (Array.isArray(item.sourceSurpriseRefs)) {
+      delta.sourceSurpriseRefs = item.sourceSurpriseRefs.map((ref) => String(ref || '').trim()).filter(Boolean);
+    }
+    return delta;
+  }).filter((item) => item.claim);
+}
+
+function normalizeSurpriseReportPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('surprise report must be a JSON object');
+  }
+  return {
+    summary: compactString(payload.summary),
+    contradictedKnown: normalizeContradictedKnown(payload.contradictedKnown || payload.contradictedKnownClaims || payload.wrongKnown),
+    discoveredUnknowns: normalizeDiscoveredUnknowns(payload.discoveredUnknowns || payload.newUnknowns || payload.unknownsDiscovered),
+    newKnownDeltas: normalizeNewKnownDeltas(payload.newKnownDeltas || payload.newKnown || payload.learnedKnown),
+  };
+}
+
+function parseSurpriseReportText(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  let malformed = null;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith(SURPRISE_REPORT_PREFIX)) continue;
+    const jsonText = trimmed.slice(SURPRISE_REPORT_PREFIX.length).trim();
+    try {
+      return {
+        surpriseReported: true,
+        markerFound: true,
+        report: normalizeSurpriseReportPayload(JSON.parse(jsonText)),
+        rawLine: line,
+      };
+    } catch (error) {
+      malformed = {
+        surpriseReported: false,
+        markerFound: true,
+        parseError: error instanceof Error ? error.message : String(error),
+        rawLine: line,
+      };
+    }
+  }
+  return malformed || { surpriseReported: false, markerFound: false };
+}
+
+export function parseSurpriseReportFromExecutorResult(executorResult, extraTexts = []) {
+  const texts = [...collectPartialRequestTexts(executorResult), ...asArray(extraTexts)];
+  let malformed = null;
+  for (const text of texts) {
+    const parsed = parseSurpriseReportText(text);
+    if (parsed.surpriseReported === true) return parsed;
+    if (parsed.markerFound && parsed.parseError && !malformed) malformed = parsed;
+  }
+  return malformed || { surpriseReported: false, markerFound: false };
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -180,6 +301,268 @@ function rewriteFrontmatter(filePath, updater) {
   writeTextFileAtomic(filePath, text);
 }
 
+function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
+  if (!task?.path) return null;
+  const normalizedReport = normalizeSurpriseReportPayload(report || {});
+  const entry = computeSurpriseHistoryEntry({ task, report: normalizedReport, runId, runNodeId, actionKind, observedAt, evidenceRefs });
+  const deltas = normalizedReport.newKnownDeltas;
+  rewriteFrontmatter(task.path, (fm) => {
+    const surpriseHistory = Array.isArray(fm.surpriseHistory) ? [...fm.surpriseHistory] : [];
+    surpriseHistory.push(entry);
+    fm.surpriseHistory = surpriseHistory;
+    if (deltas.length > 0) {
+      const knownList = Array.isArray(fm.knownList) ? [...fm.knownList] : [];
+      const knownIds = new Set(knownList.map((item) => compactString(item?.id)).filter(Boolean));
+      for (const delta of deltas) {
+        if (knownIds.has(delta.id)) continue;
+        knownList.push(delta);
+        knownIds.add(delta.id);
+      }
+      fm.knownList = knownList;
+    }
+    return fm;
+  });
+  return entry;
+}
+
+function cloneJson(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function activeSnapshotForParsed(parsed) {
+  return parsed?.project?.activeSnapshotId ? parsed.snapshots?.get(parsed.project.activeSnapshotId) || null : null;
+}
+
+function claimHash(claim) {
+  return sha256Of({ claim: compactString(claim) });
+}
+
+function surpriseHistoryForTask(task) {
+  return Array.isArray(task?.surpriseHistory) ? task.surpriseHistory.filter((entry) => entry && typeof entry === 'object') : [];
+}
+
+function contradictionRefsByKnownId(task) {
+  const refs = new Map();
+  for (const surprise of surpriseHistoryForTask(task)) {
+    const ids = Array.isArray(surprise.contradictedKnownIds) ? surprise.contradictedKnownIds : [];
+    for (const knownId of ids.map((id) => compactString(id)).filter(Boolean)) {
+      const list = refs.get(knownId) || [];
+      list.push(compactString(surprise.id) || 'surprise');
+      refs.set(knownId, list);
+    }
+  }
+  return refs;
+}
+
+function inheritedFailurePatternsForTask(task) {
+  const patterns = [];
+  for (const surprise of surpriseHistoryForTask(task)) {
+    const surpriseId = compactString(surprise.id) || `surprise-${patterns.length + 1}`;
+    const sourceTaskId = compactString(task?.id);
+    const summary = compactString(surprise.summary);
+    const contradicted = Array.isArray(surprise.contradictedKnownIds) ? surprise.contradictedKnownIds : [];
+    for (const knownId of contradicted.map((id) => compactString(id)).filter(Boolean)) {
+      patterns.push({
+        id: `fp-${sourceTaskId}-${surpriseId}-${knownId}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        type: 'contradicted_known',
+        sourceTaskId,
+        sourceSurpriseHistoryId: surpriseId,
+        sourceKnownId: knownId,
+        severity: 'warning',
+        ...(summary ? { summary } : {}),
+      });
+    }
+    if (String(surprise.surpriseLevel || '').trim() === 'high' || Number(surprise.surpriseScore) >= 0.67) {
+      patterns.push({
+        id: `fp-${sourceTaskId}-${surpriseId}-high-surprise`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        type: 'high_surprise',
+        sourceTaskId,
+        sourceSurpriseHistoryId: surpriseId,
+        severity: 'warning',
+        ...(summary ? { summary } : {}),
+      });
+    }
+    const blocking = Array.isArray(surprise.blockingNewUnknownIds) ? surprise.blockingNewUnknownIds : [];
+    for (const unknownId of blocking.map((id) => compactString(id)).filter(Boolean)) {
+      patterns.push({
+        id: `fp-${sourceTaskId}-${surpriseId}-${unknownId}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        type: 'blocking_unknown',
+        sourceTaskId,
+        sourceSurpriseHistoryId: surpriseId,
+        severity: 'warning',
+        summary: summary || `Blocking unknown ${unknownId} was discovered upstream.`,
+      });
+    }
+  }
+  return patterns;
+}
+
+function inheritedComparable(context) {
+  const normalizeRefs = (items, fields) => (Array.isArray(items) ? items : [])
+    .map((item) => Object.fromEntries(fields.map((field) => [field, item?.[field] ?? null])))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return {
+    parentChain: normalizeRefs(context?.parentChain, ['taskId', 'taskGroupId', 'taskGroupVersionId', 'childTaskGroupId', 'childTaskGroupVersionId', 'decomposedByRunId', 'decomposedByRunNodeId']),
+    inheritedKnownRefs: normalizeRefs(context?.inheritedKnownRefs, ['sourceTaskId', 'sourceTaskGroupVersionId', 'sourceKnownId', 'claimHash', 'trust', 'sourceSurpriseRefs']),
+    inheritedFailurePatterns: normalizeRefs(context?.inheritedFailurePatterns, ['type', 'sourceTaskId', 'sourceSurpriseHistoryId', 'sourceKnownId']),
+    inheritedSurpriseRefs: normalizeRefs(context?.inheritedSurpriseRefs, ['sourceTaskId', 'surpriseHistoryId']),
+  };
+}
+
+function inheritedSignature(context) {
+  return sha256Of(inheritedComparable(context));
+}
+
+function inheritedContextWithoutRuntimeFlags(context) {
+  const cloned = cloneJson(context);
+  if (!cloned || typeof cloned !== 'object') return cloned;
+  delete cloned.stale;
+  delete cloned.staleWarning;
+  delete cloned.birthSnapshotHash;
+  delete cloned.dynamicSnapshotHash;
+  delete cloned.lineageWarnings;
+  return cloned;
+}
+
+export function hydrateInheritedContext(parsed, task, activeSnapshot = null, { capturedAt = null } = {}) {
+  const chain = ancestorChainForTask(parsed, task, activeSnapshot);
+  if (!Array.isArray(chain) || chain.length === 0) return null;
+  const parentChain = [];
+  const inheritedKnownRefs = [];
+  const inheritedFailurePatterns = [];
+  const inheritedSurpriseRefs = [];
+  const lineageWarnings = [];
+
+  for (const entry of chain) {
+    parentChain.push({
+      taskId: entry.taskId,
+      taskGroupId: entry.taskGroupId,
+      taskGroupVersionId: entry.taskGroupVersionId,
+      childTaskGroupId: entry.childTaskGroupId,
+      childTaskGroupVersionId: entry.childTaskGroupVersionId,
+      decomposedByRunId: entry.decomposedByRunId,
+      decomposedByRunNodeId: entry.decomposedByRunNodeId,
+    });
+    const source = hydrationSourceTaskForChainEntry(parsed, entry);
+    if (source.warning) lineageWarnings.push(source.warning);
+    const sourceTask = source.task;
+    if (!sourceTask) continue;
+    const contradictions = contradictionRefsByKnownId(sourceTask);
+    const knownList = Array.isArray(sourceTask.knownList) ? sourceTask.knownList : [];
+    for (const known of knownList) {
+      const sourceKnownId = compactString(known?.id);
+      const claim = compactString(known?.claim);
+      if (!sourceKnownId || !claim) continue;
+      const sourceSurpriseRefs = contradictions.get(sourceKnownId) || [];
+      inheritedKnownRefs.push({
+        id: `inh-${sourceTask.id}-${sourceKnownId}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+        sourceTaskId: sourceTask.id,
+        sourceTaskGroupVersionId: sourceTask.taskGroupVersionId,
+        sourceKnownId,
+        claimHash: claimHash(claim),
+        claimPreview: claim,
+        trust: sourceSurpriseRefs.length > 0 ? 'contradicted_upstream' : 'inherited_unverified',
+        sourceSurpriseRefs,
+        hydrationSource: source.source,
+        observedAt: compactString(known.observedAt || sourceTask.createdAt || capturedAt || isoNow()),
+      });
+    }
+    inheritedFailurePatterns.push(...inheritedFailurePatternsForTask(sourceTask));
+    for (const surprise of surpriseHistoryForTask(sourceTask)) {
+      const surpriseId = compactString(surprise.id);
+      if (!surpriseId) continue;
+      inheritedSurpriseRefs.push({
+        sourceTaskId: sourceTask.id,
+        surpriseHistoryId: surpriseId,
+      });
+    }
+  }
+
+  const context = {
+    schemaVersion: 'phase3b-v1',
+    capturedAt: capturedAt || isoNow(),
+    parentChain,
+    inheritedKnownRefs,
+    inheritedFailurePatterns,
+    inheritedSurpriseRefs,
+  };
+  if (lineageWarnings.length > 0) context.lineageWarnings = lineageWarnings;
+  if (task?.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) {
+    const birthSnapshotHash = inheritedSignature(task.inheritedFrom);
+    const dynamicSnapshotHash = inheritedSignature(context);
+    if (birthSnapshotHash !== dynamicSnapshotHash) {
+      context.stale = true;
+      context.staleWarning = 'birth inheritedFrom snapshot differs from latest ancestor known/surprise context';
+      context.birthSnapshotHash = birthSnapshotHash;
+      context.dynamicSnapshotHash = dynamicSnapshotHash;
+    }
+  }
+  return context;
+}
+
+function inheritedContextForTask(projectDir, task) {
+  try {
+    const parsed = parseProject(projectDir);
+    const parsedTask = parsed.tasks?.get(`${task.taskGroupVersionId}:${task.id}`) || task;
+    return hydrateInheritedContext(parsed, parsedTask, activeSnapshotForParsed(parsed));
+  } catch {
+    return null;
+  }
+}
+
+function filterLocalKnownCopiesOfInherited(knownList, inheritedContext) {
+  const list = Array.isArray(knownList) ? knownList : [];
+  const inheritedRefs = Array.isArray(inheritedContext?.inheritedKnownRefs) ? inheritedContext.inheritedKnownRefs : [];
+  if (list.length === 0 || inheritedRefs.length === 0) return { knownList: list, removed: [] };
+  const inheritedKnownIds = new Set(inheritedRefs.map((ref) => compactString(ref.sourceKnownId)).filter(Boolean));
+  const inheritedHashes = new Set(inheritedRefs.map((ref) => compactString(ref.claimHash)).filter(Boolean));
+  const kept = [];
+  const removed = [];
+  for (const item of list) {
+    const id = compactString(item?.id);
+    const hash = claimHash(item?.claim || '');
+    if ((id && inheritedKnownIds.has(id)) || (hash && inheritedHashes.has(hash))) {
+      removed.push(item);
+    } else {
+      kept.push(item);
+    }
+  }
+  return { knownList: kept, removed };
+}
+
+export function applyInheritedBirthSnapshotToChildVersion({ projectDir, childTaskGroupId, versionId, capturedAt = null }) {
+  const parsed = parseProject(projectDir);
+  const activeSnapshot = activeSnapshotForParsed(parsed);
+  const version = parsed.versions?.get(versionId);
+  if (!version || version.taskGroupId !== childTaskGroupId) return { applied: false, tasksUpdated: 0, removedKnownCopies: 0 };
+  let tasksUpdated = 0;
+  let removedKnownCopies = 0;
+  for (const childTask of version.tasks || []) {
+    const inherited = hydrateInheritedContext(parsed, childTask, activeSnapshot, { capturedAt });
+    if (!inherited || inherited.parentChain.length === 0) continue;
+    const staticInherited = inheritedContextWithoutRuntimeFlags(inherited);
+    rewriteFrontmatter(childTask.path, (fm) => {
+      const filtered = filterLocalKnownCopiesOfInherited(fm.knownList, staticInherited);
+      if (filtered.removed.length > 0) {
+        fm.knownList = filtered.knownList;
+        fm.inheritedKnownCopyRemoved = true;
+        fm.inheritedKnownCopyRemovedAt = capturedAt || isoNow();
+        fm.inheritedKnownCopyRemovedIds = filtered.removed.map((item) => compactString(item?.id)).filter(Boolean);
+        removedKnownCopies += filtered.removed.length;
+      }
+      fm.inheritedFrom = staticInherited;
+      return fm;
+    });
+    tasksUpdated += 1;
+  }
+  return { applied: true, tasksUpdated, removedKnownCopies };
+}
+
+function malformedSurpriseReason(parsed) {
+  return sanitizeFmScalar(`malformed ${SURPRISE_REPORT_PREFIX.trim()} marker: ${parsed?.parseError || 'invalid surprise report'}`);
+}
+
 function logEvent(eventsPath, event) {
   appendFileSync(eventsPath, JSON.stringify(event) + '\n', 'utf8');
 }
@@ -205,6 +588,82 @@ function sha256Of(value) {
 function asArray(value) {
   if (value == null || value === '') return [];
   return Array.isArray(value) ? value : [value];
+}
+
+function clamp01(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(1, Math.max(0, n));
+}
+
+function round3(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n * 1000) / 1000;
+}
+
+function taskKnownIds(task) {
+  return new Set((Array.isArray(task?.knownList) ? task.knownList : [])
+    .map((item) => compactString(item?.id))
+    .filter(Boolean));
+}
+
+function surpriseLevel(score) {
+  if (score >= 0.67) return 'high';
+  if (score >= 0.34) return 'medium';
+  if (score > 0) return 'low';
+  return 'none';
+}
+
+export function computeSurpriseHistoryEntry({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
+  const normalizedReport = normalizeSurpriseReportPayload(report || {});
+  const knownIds = taskKnownIds(task);
+  const contradictedKnown = normalizedReport.contradictedKnown;
+  const discoveredUnknowns = normalizedReport.discoveredUnknowns;
+  const newKnownDeltas = normalizedReport.newKnownDeltas;
+  const contradictedKnownIds = contradictedKnown.map((item) => item.knownId);
+  const unknownKnownReferences = contradictedKnownIds.filter((id) => !knownIds.has(id));
+  const blockingUnknowns = discoveredUnknowns.filter((item) => item.blocksReadiness !== false);
+  const nonBlockingUnknowns = discoveredUnknowns.filter((item) => item.blocksReadiness === false);
+  const rawPenalty =
+    contradictedKnown.length * SURPRISE_PENALTY_WEIGHTS.wrongKnown
+    + blockingUnknowns.length * SURPRISE_PENALTY_WEIGHTS.discoveredUnknown
+    + nonBlockingUnknowns.length * SURPRISE_PENALTY_WEIGHTS.nonBlockingUnknown;
+  const score = round3(Math.min(1, rawPenalty / SURPRISE_PENALTY_WEIGHTS.wrongKnown));
+  const confidenceBefore = clamp01(task?.confidenceScore);
+  const confidenceDrop = Math.min(1, rawPenalty * 0.1);
+  const confidenceAfter = confidenceBefore == null ? null : round3(Math.max(0, confidenceBefore - confidenceDrop));
+  const safeAction = compactString(actionKind) || 'observe';
+  const safeObservedAt = compactString(observedAt) || isoNow();
+  const safeRunNodeId = compactString(runNodeId) || 'run-node';
+  const safeIdTime = safeObservedAt.replace(/[^0-9A-Za-z]+/g, '').slice(0, 14) || String(Date.now());
+  return {
+    id: `surprise-${safeAction}-${safeRunNodeId}-${safeIdTime}`.replace(/[^A-Za-z0-9._-]+/g, '-'),
+    actionKind: safeAction,
+    runId: compactString(runId),
+    runNodeId: safeRunNodeId,
+    observedAt: safeObservedAt,
+    surpriseScore: score,
+    surpriseLevel: surpriseLevel(score),
+    penaltyModel: {
+      wrongKnown: SURPRISE_PENALTY_WEIGHTS.wrongKnown,
+      discoveredUnknown: SURPRISE_PENALTY_WEIGHTS.discoveredUnknown,
+      nonBlockingUnknown: SURPRISE_PENALTY_WEIGHTS.nonBlockingUnknown,
+    },
+    rawPenalty: round3(rawPenalty),
+    confidenceBefore,
+    confidenceAfter,
+    confidenceAdjustment: confidenceBefore == null || confidenceAfter == null ? null : round3(confidenceAfter - confidenceBefore),
+    contradictedKnownIds,
+    unknownKnownReferences,
+    newUnknownIds: discoveredUnknowns.map((item) => item.id),
+    blockingNewUnknownIds: blockingUnknowns.map((item) => item.id),
+    nonBlockingNewUnknownIds: nonBlockingUnknowns.map((item) => item.id),
+    newKnownIds: newKnownDeltas.map((item) => item.id),
+    reportHash: sha256Of(normalizedReport),
+    evidenceRefs: asArray(evidenceRefs).map((item) => String(item || '').trim()).filter(Boolean),
+    summary: sanitizeFmScalar(normalizedReport.summary || `surprise ${surpriseLevel(score)} (${score})`, { maxLen: 500, fallback: `surprise ${surpriseLevel(score)}` }),
+  };
 }
 
 function stringList(value) {
@@ -446,12 +905,22 @@ function buildExecutionResult({ task, runId, runNodeId, executorResult }) {
     executorResult?.message || `Executor completed task ${task.id}.`,
     { maxLen: 1000, fallback: `Executor completed task ${task.id}.` },
   );
+  const artifactRefs = [];
+  const evidenceRefs = [`run:${runId}/node:${runNodeId}`];
+  for (const ref of [executorResult?.artifactPath, executorResult?.workspacePath]) {
+    if (!ref || artifactRefs.includes(ref)) continue;
+    artifactRefs.push(ref);
+  }
+  if (executorResult?.workspacePath && !evidenceRefs.includes(executorResult.workspacePath)) {
+    evidenceRefs.push(executorResult.workspacePath);
+  }
   return {
     executorSummary: summary,
+    ...(executorResult?.workspacePath ? { executionWorkspacePath: executorResult.workspacePath } : {}),
     observed: {
       outcomeSummary: summary,
-      artifactRefs: executorResult?.artifactPath ? [executorResult.artifactPath] : [],
-      evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+      artifactRefs,
+      evidenceRefs,
       checkResults: [],
     },
   };
@@ -698,6 +1167,84 @@ function normalizeBlockedBy(task) {
   return Array.isArray(task.blockedBy) ? task.blockedBy : [task.blockedBy];
 }
 
+function hasManualBlockerMarker(task) {
+  return Boolean(
+    task?.needsManualReview === true
+    || task?.manualReviewReason
+    || task?.awaitingPromotion === true
+    || task?.awaitingPromotionPartialId
+    || task?.repeatedPartialNeedsReview === true
+    || task?.lastRunFailureReason
+    || task?.malformedPartialRequest === true
+    || task?.malformedSurpriseReport === true
+  );
+}
+
+function blockedTaskMissingEvidence(task) {
+  const isBlocked = task?.status === 'blocked' || task?.runReadiness === 'blocked';
+  return Boolean(isBlocked && normalizeBlockedBy(task).length === 0 && !hasManualBlockerMarker(task));
+}
+
+function blockedEvidenceIssueForTask(task) {
+  return {
+    taskId: task.id,
+    taskGroupVersionId: task.taskGroupVersionId,
+    path: task.path,
+    status: task.status || null,
+    runReadiness: task.runReadiness || null,
+    runReadinessReason: task.runReadinessReason || null,
+    reason: 'blocked_task_missing_machine_readable_blocker',
+    message: `Task ${task.taskGroupVersionId}:${task.id} is blocked but has no blockedBy or explicit manual/external blocker marker.`,
+  };
+}
+
+function blockedEvidenceIssues(parsed) {
+  return [...parsed.tasks.values()]
+    .filter((task) => !['done', 'cancelled'].includes(task.status))
+    .filter(blockedTaskMissingEvidence)
+    .map(blockedEvidenceIssueForTask);
+}
+
+function blockerEvaluationForTask(parsed, task) {
+  const blockers = normalizeBlockedBy(task);
+  if (blockers.length === 0) {
+    return {
+      hasBlockers: false,
+      allResolved: true,
+      unresolved: false,
+      blockers: [],
+    };
+  }
+  const results = blockers.map((ref) => ({ ref, key: blockerKey(ref), ...resolveBlocker(parsed, ref) }));
+  const allResolved = results.every((result) => result.resolved);
+  return {
+    hasBlockers: true,
+    allResolved,
+    unresolved: !allResolved,
+    blockers: results,
+  };
+}
+
+function applyBlockerGate(parsed, task, classification) {
+  const blockerEvaluation = blockerEvaluationForTask(parsed, task);
+  if (!blockerEvaluation.hasBlockers || blockerEvaluation.allResolved) {
+    return { ...classification, blockerEvaluation };
+  }
+  const unresolved = blockerEvaluation.blockers
+    .filter((result) => !result.resolved)
+    .map((result) => result.key)
+    .join(', ');
+  return {
+    ...classification,
+    runReadiness: 'blocked',
+    originalRunReadiness: classification.runReadiness,
+    source: 'blocked_by_gate',
+    reason: `Task has unresolved blockedBy reference(s): ${unresolved || 'unknown blocker'}.`,
+    nextAction: 'resolve_blocker',
+    blockerEvaluation,
+  };
+}
+
 export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTarget = false, runId = null } = {}) {
   const workRoot = resolve(workDir);
   const projects = discoverProjects(workRoot);
@@ -720,8 +1267,8 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
   const now = isoNow();
 
   for (const task of parsed.tasks.values()) {
+    if (['done', 'cancelled'].includes(task.status)) continue;
     const isBlocked = task.status === 'blocked' || task.runReadiness === 'blocked';
-    if (!isBlocked) continue;
     if (task.awaitingPromotion === true || task.awaitingPromotionPartialId) {
       const item = {
         taskId: task.id,
@@ -737,7 +1284,35 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
       continue;
     }
     const blockers = normalizeBlockedBy(task);
-    if (blockers.length === 0) continue;
+    if (!isBlocked && blockers.length === 0) continue;
+    if (blockers.length === 0) {
+      if (hasManualBlockerMarker(task)) {
+        const item = {
+          taskId: task.id,
+          taskGroupVersionId: task.taskGroupVersionId,
+          path: task.path,
+          allResolved: false,
+          manualBlockerMarker: true,
+          blockers: [],
+          detail: 'blocked task uses an explicit manual/external blocker marker',
+        };
+        checked.push(item);
+        stillBlocked.push(item);
+        continue;
+      }
+      const item = {
+        taskId: task.id,
+        taskGroupVersionId: task.taskGroupVersionId,
+        path: task.path,
+        allResolved: false,
+        missingBlockerEvidence: true,
+        blockers: [],
+        detail: 'blocked task has no blockedBy or explicit manual/external blocker marker',
+      };
+      checked.push(item);
+      stillBlocked.push(item);
+      continue;
+    }
     const results = blockers.map((ref) => ({ ref, key: blockerKey(ref), ...resolveBlocker(parsed, ref) }));
     const allResolved = results.every((result) => result.resolved);
     const item = { taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, path: task.path, allResolved, blockers: results };
@@ -746,6 +1321,7 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
       stillBlocked.push(item);
       continue;
     }
+    if (!isBlocked) continue;
     unblocked.push(item);
     if (dryRun) continue;
     rewriteFrontmatter(task.path, (fm) => {
@@ -834,7 +1410,7 @@ export function pickNextAction(parsed, target = {}) {
         source: { type: 'task', id: task.id },
       };
     }
-    const classification = classifyTaskReadiness(task);
+    const classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (classification.runReadiness === 'blocked') {
       return {
         kind: 'stop',
@@ -873,7 +1449,7 @@ export function pickNextAction(parsed, target = {}) {
       default:
         break;
     }
-    const classification = classifyTaskReadiness(task);
+    const classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (classification.runReadiness === 'blocked') continue;
     onlyBlockedSeen = false;
     const action = ACTION_BY_READINESS[classification.runReadiness];
@@ -894,14 +1470,75 @@ export function pickNextAction(parsed, target = {}) {
   return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE };
 }
 
-function budgetPromptLines(budget, { allowPartialRequest = false } = {}) {
-  if (!budget || budget.enabled !== true || budget.finishingMode !== true) return [];
-  const lines = [
-    '',
-    'Budget / finishing mode:',
-    `남은 step이 얼마 없다 (remaining ${budget.remaining} / ${budget.maxSteps}). 새 작업 범위를 시작하지 마라. 진행 중인 것을 정직하게 마무리하고, 끝내지 못한 나머지는 follow-up으로 명시한 뒤 partial 상태로 닫을 준비를 해라. 무리하게 done으로 표시하지 마라.`,
-  ];
-  if (allowPartialRequest) {
+export function expectedPlanPhaseForProgress(planProgress, thresholds = EXPECTED_PLAN_PHASE_THRESHOLDS) {
+  const progress = Number(planProgress);
+  if (!Number.isFinite(progress)) return 'exploring';
+  if (progress >= thresholds.hard) return 'committing';
+  if (progress >= thresholds.soft) return 'converging';
+  return 'exploring';
+}
+
+function actionAwareExpectedPlanAdvisory(actionKind, phase) {
+  const action = actionKind || 'generic';
+  if (action === 'decompose') {
+    if (phase === 'committing') return 'Decomposition advisory: committing phase. Prefer closing this depth with bounded terminal children; do not open another scope unless it is strictly necessary and still fully closable within the remaining step budget.';
+    if (phase === 'converging') return 'Decomposition advisory: converging phase. Before opening deeper child scopes, check whether the current depth can be closed with runnable, blocked, or exploration-ready children.';
+    return 'Decomposition advisory: exploring phase. Decompose normally, but keep child scopes compatible with the declared expected plan.';
+  }
+  if (action === 'execute') {
+    if (phase === 'committing') return 'Execution advisory: committing phase. Prioritize honest completion or a clear partial request when finishing everything is not possible.';
+    if (phase === 'converging') return 'Execution advisory: converging phase. Keep execution focused on closure evidence and avoid expanding the task scope.';
+    return 'Execution advisory: exploring phase. Execute normally while preserving evidence that will help later closure.';
+  }
+  if (action === 'explore') {
+    if (phase === 'committing') return 'Exploration advisory: committing phase. Capture the smallest useful artifact that makes the current uncertainty closable or explicitly blocked.';
+    if (phase === 'converging') return 'Exploration advisory: converging phase. Prefer targeted evidence gathering over broad discovery.';
+    return 'Exploration advisory: exploring phase. Explore enough to reduce uncertainty without turning exploration into unbounded scope.';
+  }
+  if (action === 'loopback') {
+    if (phase === 'committing') return 'Loopback advisory: committing phase. Resolve the delegated question narrowly and return the graph to a closable state.';
+    if (phase === 'converging') return 'Loopback advisory: converging phase. Keep the resolution concise and avoid spawning new delegation scope.';
+    return 'Loopback advisory: exploring phase. Resolve the delegation while preserving enough context for downstream work.';
+  }
+  if (phase === 'committing') return 'Expected plan advisory: committing phase. Favor closure over expansion.';
+  if (phase === 'converging') return 'Expected plan advisory: converging phase. Favor narrowing over expansion.';
+  return 'Expected plan advisory: exploring phase. Continue within the expected plan.';
+}
+
+function budgetPromptLines(budget, { allowPartialRequest = false, actionKind = 'generic' } = {}) {
+  const coordinate = budget?.expectedPlanCoordinate?.enabled === true
+    ? budget.expectedPlanCoordinate
+    : null;
+  if (!budget || budget.enabled !== true || (budget.finishingMode !== true && !coordinate)) return [];
+  const lines = [];
+  if (coordinate) {
+    const pct = Math.round(coordinate.planProgress * 100);
+    const diagnostic = coordinate.lineageDiagnostic;
+    lines.push(
+      '',
+      'Budget / expected plan coordinate:',
+      `Remaining step budget: ${budget.remaining} / ${budget.maxSteps}.`,
+      `Expected plan phase: ${coordinate.phase}.`,
+      `Lineage depth consumed: ${coordinate.consumedDepth}. Current task expectedDepth: ${coordinate.expectedDepth}. Consumed/expected progress: ${coordinate.consumedDepthSinceDeclaration} / ${coordinate.expectedDepth} (${pct}%).`,
+      `Current task expectedBreadth: ${coordinate.expectedBreadth}.`,
+      `Expected plan rationale: ${coordinate.rationale}`,
+      actionAwareExpectedPlanAdvisory(actionKind, coordinate.phase),
+    );
+    if (diagnostic) {
+      const diagnosticPct = Math.round(diagnostic.cumulativePlanProgress * 100);
+      lines.push(
+        `Diagnostic only: lineage cumulative expectedDepth=${diagnostic.cumulativeExpectedDepth}, lineage progress=${diagnostic.consumedDepth}/${diagnostic.cumulativeExpectedDepth} (${diagnosticPct}%). Do not use this as a hard stop policy.`,
+      );
+    }
+  }
+  if (budget.finishingMode === true) {
+    lines.push(
+      '',
+      'Budget / finishing mode:',
+      `남은 step이 얼마 없다 (remaining ${budget.remaining} / ${budget.maxSteps}). 새 작업 범위를 시작하지 마라. 진행 중인 것을 정직하게 마무리하고, 끝내지 못한 나머지는 follow-up으로 명시한 뒤 partial 상태로 닫을 준비를 해라. 무리하게 done으로 표시하지 마라.`,
+    );
+  }
+  if (allowPartialRequest && budget.finishingMode === true) {
     lines.push(
       'Execution partial request protocol:',
       'Look at the full task scope. If you can finish this task completely and honestly in this turn, finish it normally.',
@@ -917,25 +1554,142 @@ function promptWithBudget(lines, budget, options = {}) {
   return [...lines, ...budgetPromptLines(budget, options)].join('\n');
 }
 
-export function buildAgentExecutionPrompt({ project, task, budget = null }) {
+function taskUncertaintyPromptLines(task) {
+  const knownList = Array.isArray(task.knownList) && task.knownList.length
+    ? task.knownList.map((item) => `${item?.id || '(no id)'}: ${item?.claim || ''} [${item?.verificationStatus || 'unverified'}]`).join('; ')
+    : '(none declared)';
+  return [
+    `Task uncertaintyState: ${task.uncertaintyState || '(none declared)'}`,
+    `Task confidenceScore: ${task.confidenceScore ?? '(none declared)'}`,
+    `Task knownList: ${knownList}`,
+  ];
+}
+
+function inheritedContextPromptLines(inheritedContext = null) {
+  const context = inheritedContext && typeof inheritedContext === 'object' && !Array.isArray(inheritedContext)
+    ? inheritedContext
+    : null;
+  if (!context) return [];
+  const parentChain = Array.isArray(context.parentChain) && context.parentChain.length
+    ? context.parentChain.map((item) => `${item?.taskId || '(unknown task)'}@${item?.taskGroupVersionId || '(unknown version)'}`).join(' -> ')
+    : '(none)';
+  const inheritedKnownRefs = Array.isArray(context.inheritedKnownRefs) && context.inheritedKnownRefs.length
+    ? context.inheritedKnownRefs.map((item) => `${item?.id || '(no id)'}: source ${item?.sourceTaskId || '?'}:${item?.sourceKnownId || '?'} trust=${item?.trust || 'inherited_unverified'}${item?.claimPreview ? ` claimPreview="${item.claimPreview}"` : ''}`).join('; ')
+    : '(none)';
+  const inheritedFailurePatterns = Array.isArray(context.inheritedFailurePatterns) && context.inheritedFailurePatterns.length
+    ? context.inheritedFailurePatterns.map((item) => `${item?.id || '(no id)'}: ${item?.type || 'failure_pattern'} from ${item?.sourceTaskId || '?'}${item?.sourceKnownId ? ` known=${item.sourceKnownId}` : ''}${item?.summary ? ` summary="${item.summary}"` : ''}`).join('; ')
+    : '(none)';
+  const inheritedSurpriseRefs = Array.isArray(context.inheritedSurpriseRefs) && context.inheritedSurpriseRefs.length
+    ? context.inheritedSurpriseRefs.map((item) => `${item?.sourceTaskId || '?'}:${item?.surpriseHistoryId || '?'}`).join('; ')
+    : '(none)';
+  const staleWarning = context.stale === true || context.staleWarning
+    ? `Stale warning: ${context.staleWarning || 'birth snapshot differs from dynamically hydrated ancestor context'}`
+    : 'Stale warning: (none)';
+  const lineageWarnings = Array.isArray(context.lineageWarnings) && context.lineageWarnings.length
+    ? context.lineageWarnings.join('; ')
+    : '(none)';
+  return [
+    '',
+    'Inherited context (not ground truth):',
+    'Inherited context is not local knowledge. Treat it only as revalidation targets and failure-pattern warnings.',
+    'Do not copy inherited claims into knownList unless this task locally revalidates them.',
+    `Parent chain: ${parentChain}`,
+    `Inherited known refs: ${inheritedKnownRefs}`,
+    `Inherited failure patterns: ${inheritedFailurePatterns}`,
+    `Inherited surprise refs: ${inheritedSurpriseRefs}`,
+    staleWarning,
+    `Lineage warnings: ${lineageWarnings}`,
+  ];
+}
+
+function childTaskUncertaintySchemaPromptLines() {
+  return [
+    'Phase 1 uncertainty metadata is required on each child task:',
+    '- uncertaintyState: unknown_unknown | known_unknown | known',
+    '- confidenceScore: number from 0.0 to 1.0. This is only a weak self-estimate; do not overstate certainty.',
+    '- knownList: append-only list of concrete claims the task currently treats as known. Each item must have id, claim, verificationStatus: unverified.',
+    "Use unknown_unknown when the task's internal structure is not understood enough to decompose or execute honestly.",
+    'Use known_unknown when the objective boundary is meaningful but important unknowns remain.',
+    'Use known only when the task has enough understood context to be runnable under its stated completionCriteria.',
+    'Do not copy inherited context into knownList unless the child task locally revalidates it.',
+  ];
+}
+
+function childTaskExpectedPlanPromptLines() {
+  return [
+    'Expected plan metadata is required on each child task:',
+    '- expectedPlan.expectedDepth: non-negative integer estimate of how many more decomposition levels this child may need.',
+    '- expectedPlan.expectedBreadth: non-negative integer estimate of roughly how many child tasks this child may create if decomposed.',
+    '- expectedPlan.rationale: short evidence-based reason for the depth/breadth estimate.',
+    'Estimate per child. It is an approximate planning coordinate, not a promise. Do not add declaredAt; the runner may add timing metadata later.',
+  ];
+}
+
+function childTaskBlockedByPromptLines(versionId, blockerCatalog = []) {
+  const catalogLines = Array.isArray(blockerCatalog) && blockerCatalog.length
+    ? [
+      'Available blocker refs from the active snapshot:',
+      ...blockerCatalog.map((item) => `- { type: 'task', id: '${item.id}', taskGroupVersionId: '${item.taskGroupVersionId}' } status=${item.status || 'unknown'} readiness=${item.runReadiness || 'unknown'} terminal=${item.terminal === true ? 'yes' : 'no'} decomposed=${item.decomposed === true ? 'yes' : 'no'}`),
+      'If a child depends on implementation output from another active branch, reference the exact terminal descendant task from this catalog. A decomposed parent is not implementation-complete evidence by itself.',
+    ]
+    : [
+      'If a child depends on another active branch, use the exact task id and taskGroupVersionId from the active snapshot when available. Do not replace machine-readable blockedBy with prose.',
+      'A decomposed parent is not implementation-complete evidence by itself; implementation dependencies should point at the terminal descendant that produces the evidence.',
+    ];
+  return [
+    'When a child task is blocked by another task, use blockedBy as a list of structured refs, not strings:',
+    `- sibling task blocker: { type: 'task', id: '<task-id>', taskGroupVersionId: '${versionId}' }`,
+    "- run-node blocker, only when truly needed: { type: 'runNode', runId: '<run-id>', runNodeId: '<run-node-id>' }",
+    ...catalogLines,
+  ];
+}
+
+function surpriseReportPromptLines({ artifactRequired = false } = {}) {
+  const locationLine = artifactRequired
+    ? 'Include this report inside the exploration artifact. You may also repeat it in the final response.'
+    : 'Include this report as exactly one final-response line when the task completes normally.';
+  return [
+    'Phase 2 surprise report protocol:',
+    locationLine,
+    `Use prefix ${SURPRISE_REPORT_PREFIX} followed by one-line JSON.`,
+    'The worker reports facts only; the runner computes surprise/penalty. Do not self-score surprise.',
+    'Schema: {"summary":"what changed relative to knownList","contradictedKnown":[{"knownId":"k1","observedEvidence":"what disproved or weakened it","correctedClaim":"optional corrected claim"}],"discoveredUnknowns":[{"id":"u1","question":"new uncertainty","whyDiscovered":"evidence or reason","blocksReadiness":true}],"newKnownDeltas":[{"id":"k2","claim":"new learned claim","evidence":"supporting evidence","revalidatedFromInheritedRef":"optional inherited ref id when locally revalidated"}]}',
+    'Use empty arrays when there is no contradiction, no new unknown, or no new known delta. Do not redeclare the whole knownList.',
+  ];
+}
+
+export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null }) {
+  const projectDirForPrompt = projectDir ? resolve(projectDir) : null;
+  const artifactWorkspaceForPrompt = artifactWorkspacePath ? resolve(artifactWorkspacePath) : null;
   return promptWithBudget([
     'You are a TaskOps worker agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
+    ...(projectDirForPrompt ? [`TaskOps work directory: ${projectDirForPrompt}`] : []),
     '',
     `Task: ${task.id} — ${task.title}`,
     `Task objective: ${task.objective || ''}`,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
+    ...taskUncertaintyPromptLines(task),
+    ...inheritedContextPromptLines(inheritedContext),
     '',
     'Execute this single TaskOps task. Do not recursively invoke `taskops run`.',
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
+    ...(artifactWorkspaceForPrompt ? [
+      `Task artifact workspace: ${artifactWorkspaceForPrompt}`,
+      'Write any files, code, test fixtures, or other task artifacts under the task artifact workspace only, unless the task explicitly names a different absolute target path.',
+      'The runner invokes you with the task artifact workspace as cwd. Relative paths for new files must stay inside that workspace.',
+    ] : []),
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
+    ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
-  ], budget, { allowPartialRequest: true });
+  ], budget, { actionKind: 'execute', allowPartialRequest: true });
 }
 
-export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget = null }) {
+export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null, blockerCatalog = [] }) {
+  if (!projectDir) throw new Error('Missing projectDir for decomposition prompt');
+  const workDirForPrompt = resolve(projectDir);
   return promptWithBudget([
     'You are a TaskOps decomposition agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -945,18 +1699,25 @@ export function buildAgentDecompositionPrompt({ project, task, childTaskGroupId,
     `Task objective: ${task.objective || ''}`,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
+    ...taskUncertaintyPromptLines(task),
+    ...inheritedContextPromptLines(inheritedContext),
     '',
     'Author a TaskOps child task group and a v1 version that decomposes this task using the canonical md-first format.',
     `Target child task group id: ${childTaskGroupId}`,
     `Target version id: ${versionId}`,
-    'Create the task group folder (with index.md) under task-groups/<id>/, then call `taskops decompose <work-dir> --task-group-id <child-tg-id> --spec <spec.json>` to write the new version.',
+    `Create the task group folder (with index.md) under task-groups/<id>/, then call \`${taskopsCliCommandForPrompt()} decompose ${shellQuote(workDirForPrompt)} --task-group-id <child-tg-id> --spec <spec.json>\` to write the new version.`,
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
+    ...childTaskUncertaintySchemaPromptLines(),
+    ...childTaskExpectedPlanPromptLines(),
+    ...childTaskBlockedByPromptLines(versionId, blockerCatalog),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
-  ], budget);
+  ], budget, { actionKind: 'decompose' });
 }
 
-export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget = null }) {
+export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactPath, actorName, budget = null }) {
+  if (!artifactPath) throw new Error('Missing artifactPath for loopback prompt');
+  const artifactPathForPrompt = resolve(artifactPath);
   return promptWithBudget([
     'You are a TaskOps loopback resolution agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -971,12 +1732,14 @@ export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNod
     'Loopback mode is enabled: take this waiting delegation back into the runner and produce a concrete resolution that lets downstream execution continue.',
     'Record that the actual executor handled this delegation under loopback mode. Do not pretend the original delegatee executed it.',
     `Run id: ${runId}, loopback resolution run node id: ${loopbackNodeId}.`,
-    `Write the loopback resolution artifact at: ${artifactRelPath}`,
+    `Write the loopback resolution artifact at: ${artifactPathForPrompt}`,
     'Record the work taken, any decisions made, and what should happen next. Do not recursively invoke `taskops run`.',
-  ], budget);
+  ], budget, { actionKind: 'loopback' });
 }
 
-export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget = null }) {
+export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget = null, inheritedContext = null }) {
+  if (!artifactPath) throw new Error('Missing artifactPath for exploration prompt');
+  const artifactPathForPrompt = resolve(artifactPath);
   return promptWithBudget([
     'You are a TaskOps exploration agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -988,12 +1751,15 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     `Task completion criteria: ${task.completionCriteria || ''}`,
     `Declared unknowns: ${Array.isArray(task.unknowns) && task.unknowns.length ? task.unknowns.join('; ') : '(none declared)'}`,
     `Next learning goal: ${task.nextLearningGoal || '(none declared)'}`,
+    ...taskUncertaintyPromptLines(task),
+    ...inheritedContextPromptLines(inheritedContext),
     '',
     'Run a minimal, safe exploration pass: search/read/try just enough to record learned facts, discovered constraints, failed/successful approaches, remaining unknowns, and a recommended next decomposition or runnable task.',
-    `Write the exploration artifact at: ${artifactRelPath}`,
+    `Write the exploration artifact at: ${artifactPathForPrompt}`,
     `Run id: ${runId}, run node id: ${runNodeId}.`,
+    ...surpriseReportPromptLines({ artifactRequired: true }),
     'Do not mark the parent task as done; the runner manages task graph state. Do not recursively invoke `taskops run`.',
-  ], budget);
+  ], budget, { actionKind: 'explore' });
 }
 
 function safeSessionPart(value, fallback = 'task') {
@@ -1017,24 +1783,26 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget = null }) {
+function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
       message: `dry-run executor synthetically completed task ${task.id}`,
       executor: 'dry-run',
+      ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}),
     };
   }
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
-    const prompt = buildAgentExecutionPrompt({ project, task, budget });
+    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath });
     const result = invokeRuntimeAdapter(adapter, {
       prompt,
       agentId,
       sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'execute' }),
       timeoutMs: stepTimeoutMs,
+      ...(artifactWorkspacePath ? { cwd: artifactWorkspacePath } : {}),
     });
-    return { ...result, executor, message: result.message || `${adapter} completed task ${task.id}` };
+    return { ...result, executor, message: result.message || `${adapter} completed task ${task.id}`, ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}) };
   }
   return { ok: false, message: `Unknown executor '${executor}'`, executor };
 }
@@ -1086,14 +1854,14 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${loopbackNodeId}.md`);
-  const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactRelPath, actorName, budget });
+  const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactPath, actorName, budget });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: delegate.sourceTaskId || delegate.id, action: 'loopback' }),
     timeoutMs: stepTimeoutMs,
+    cwd: artifactsDir,
   });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
@@ -1533,8 +2301,11 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
 
 function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const projectDir = dirname(dirname(runDir));
+  const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
+  const artifactWorkspacePath = join(runDir, 'artifacts', runNodeId, 'workspace');
+  ensureDir(artifactWorkspacePath);
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
     type: 'implementation',
@@ -1559,9 +2330,9 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget });
+    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath });
   } catch (err) {
-    result = { ok: false, message: err instanceof Error ? err.message : String(err), executor };
+    result = { ok: false, message: err instanceof Error ? err.message : String(err), executor, workspacePath: artifactWorkspacePath };
   }
 
   const finishedAt = isoNow();
@@ -1632,6 +2403,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         executor,
         message: result.message || null,
         budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
         partialCompletion,
       };
     }
@@ -1674,6 +2446,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         executor,
         message: reason,
         budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
         malformedPartialRequest: {
           markerFound: true,
           parseError: partialRequest.parseError,
@@ -1681,10 +2454,75 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         },
       };
     }
+    const surpriseReport = parseSurpriseReportFromExecutorResult(result);
+    if (surpriseReport.markerFound && surpriseReport.parseError) {
+      const reason = malformedSurpriseReason(surpriseReport);
+      rewriteFrontmatter(task.path, (fm) => {
+        fm.status = 'blocked';
+        fm.runReadiness = 'blocked';
+        fm.runReadinessReason = reason;
+        fm.lastRunFailureReason = reason;
+        fm.needsManualReview = true;
+        fm.malformedSurpriseReport = true;
+        return fm;
+      });
+      rewriteFrontmatter(runNodePath, (fm) => {
+        fm.status = 'blocked';
+        fm.result = {
+          ...executionResult,
+          malformedSurpriseReport: {
+            markerFound: true,
+            parseError: surpriseReport.parseError,
+            rawLine: surpriseReport.rawLine || '',
+            needsManualReview: true,
+          },
+        };
+        return fm;
+      });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'task_malformed_surprise_report', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        parseError: surpriseReport.parseError,
+      });
+      appendRunLog(runDir, `${finishedAt} task_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
+      return {
+        taskId: task.id,
+        runNodeId,
+        kind: 'execute',
+        status: 'failed',
+        failureKind: 'malformed_surprise_report',
+        executor,
+        message: reason,
+        budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+        malformedSurpriseReport: {
+          markerFound: true,
+          parseError: surpriseReport.parseError,
+          rawLine: surpriseReport.rawLine || '',
+        },
+      };
+    }
+    const surpriseHistoryEntry = surpriseReport.surpriseReported
+      ? appendSurpriseHistory({
+          task,
+          report: surpriseReport.report,
+          runId,
+          runNodeId,
+          actionKind: 'execute',
+          observedAt: finishedAt,
+          evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+        })
+      : null;
     rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
     rewriteFrontmatter(runNodePath, (fm) => {
       fm.status = 'done';
-      fm.result = executionResult;
+      fm.result = {
+        ...executionResult,
+        ...(surpriseReport.surpriseReported ? {
+          surpriseReport: surpriseReport.report,
+          surpriseHistoryEntry,
+        } : {}),
+      };
       return fm;
     });
     const reviewedRunNode = parseMarkdownFile(runNodePath);
@@ -1702,7 +2540,18 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         decision: review.reviewReport.decision,
       });
       appendRunLog(runDir, `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`);
-      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget };
+      return {
+        taskId: task.id,
+        runNodeId,
+        reviewNodeId: review.reviewNodeId,
+        kind: 'execute',
+        status: 'failed',
+        executor,
+        message: result.message || null,
+        reviewDecision: review.reviewReport.decision,
+        budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+      };
     }
     const approvedReview = review.approvedReview;
     const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
@@ -1717,7 +2566,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       message: result.message || null,
     });
     appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
-    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget };
+    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
   }
 
   rewriteFrontmatter(task.path, (fm) => {
@@ -1737,6 +2586,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     message: result.message || null, adapterStatus: result.status || null,
     stdout: result.stdout || '', stderr: result.stderr || '',
     budget,
+    executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
   };
 }
 
@@ -1769,6 +2619,42 @@ function deriveDecompositionIds(task) {
     versionId: `tgv-${suffix}-v1`,
     suffix,
   };
+}
+
+function ensureDecompositionBacklink({ projectDir, childTaskGroupId, versionId, task, runId, runNodeId }) {
+  const desired = {
+    decomposedFromTaskId: task.id,
+    decomposedFromTaskGroupId: task.taskGroupId,
+    decomposedFromTaskGroupVersionId: task.taskGroupVersionId,
+    decomposedByRunId: runId,
+    decomposedByRunNodeId: runNodeId,
+  };
+  const paths = [
+    join(projectDir, 'task-groups', childTaskGroupId, 'index.md'),
+    join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md'),
+  ];
+
+  for (const filePath of paths) {
+    if (!existsSync(filePath)) return { ok: false, message: `Missing decomposition target index at ${filePath}` };
+    const current = parseMarkdownFile(filePath);
+    for (const [key, value] of Object.entries(desired)) {
+      if (current[key] != null && current[key] !== '' && String(current[key]) !== String(value)) {
+        return {
+          ok: false,
+          message: `Conflicting decomposition backlink in ${filePath}: ${key}=${current[key]} expected ${value}`,
+        };
+      }
+    }
+  }
+
+  for (const filePath of paths) {
+    rewriteFrontmatter(filePath, (fm) => {
+      for (const [key, value] of Object.entries(desired)) fm[key] = value;
+      return fm;
+    });
+  }
+
+  return { ok: true };
 }
 
 function performDryRunDecomposition({ projectDir, task }) {
@@ -1816,6 +2702,8 @@ function performDryRunDecomposition({ projectDir, task }) {
     order: 1, createdAt: now, status: 'pending',
     runReadiness: 'blocked',
     runReadinessReason: 'Synthetic dry-run placeholder. A human must supply real inputs before this becomes runnable.',
+    needsManualReview: true,
+    manualReviewReason: 'Synthetic dry-run placeholder requires human-supplied real inputs.',
     understandingLevel: 'unknown',
   };
   writeTextFileAtomic(
@@ -1825,28 +2713,598 @@ function performDryRunDecomposition({ projectDir, task }) {
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
 
-function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null }) {
+function activeBlockerCatalogForPrompt(projectDir, sourceTask) {
+  let parsed;
+  try {
+    parsed = parseProject(projectDir);
+  } catch {
+    return [];
+  }
+  const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
+  const selectedVersions = Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions : [];
+  const selectedTaskGroupIds = new Set(selectedVersions.map((pair) => pair?.taskGroupId).filter(Boolean));
+  const items = [];
+  for (const pair of selectedVersions) {
+    if (!pair?.versionId) continue;
+    const version = parsed.versions.get(pair.versionId);
+    if (!version) continue;
+    for (const candidate of version.tasks) {
+      if (candidate.id === sourceTask.id && candidate.taskGroupVersionId === sourceTask.taskGroupVersionId) continue;
+      const classification = applyBlockerGate(parsed, candidate, classifyTaskReadiness(candidate));
+      items.push({
+        id: candidate.id,
+        taskGroupVersionId: candidate.taskGroupVersionId,
+        status: candidate.status || null,
+        runReadiness: classification.runReadiness || candidate.runReadiness || null,
+        terminal: !(candidate.childTaskGroupId && selectedTaskGroupIds.has(candidate.childTaskGroupId)),
+        decomposed: Boolean(candidate.childTaskGroupId && selectedTaskGroupIds.has(candidate.childTaskGroupId)),
+      });
+    }
+  }
+  return items.slice(0, 30);
+}
+
+function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null }) {
   const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
   const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
-  const prompt = buildAgentDecompositionPrompt({ project, task, childTaskGroupId, versionId, budget });
+  const prompt = buildAgentDecompositionPrompt({
+    project,
+    projectDir,
+    task,
+    childTaskGroupId,
+    versionId,
+    budget,
+    inheritedContext,
+    blockerCatalog: activeBlockerCatalogForPrompt(projectDir, task),
+  });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
     timeoutMs: stepTimeoutMs,
+    cwd: projectDir,
   });
-  if (!result.ok) return { ok: false, message: result.message };
+  if (!result.ok) return { ...result, ok: false, message: result.message };
   if (!existsSync(versionIndex)) {
     return { ok: false, message: `${adapter} did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
   }
   return { ok: true, childTaskGroupId, versionId, message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}` };
 }
 
+function isRecoverableDecompositionAdapterFailure(result) {
+  if (!result || result.ok) return false;
+  if (result.timedOut === true || result.status === 'timeout') return true;
+  return /\btimed out after \d+ms\.?$/i.test(String(result.message || '').trim());
+}
+
+function listChildTaskPaths(versionDir) {
+  const tasksDir = join(versionDir, 'tasks');
+  if (!existsSync(tasksDir)) return [];
+  return readdirSync(tasksDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'index.md')
+    .map((entry) => join(tasksDir, entry.name))
+    .sort();
+}
+
+function normalizeNonNegativeInteger(value) {
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
+function normalizeExpectedPlan(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, reason: 'expectedPlan must be an object' };
+  }
+  const expectedDepth = normalizeNonNegativeInteger(value.expectedDepth);
+  if (expectedDepth == null) return { ok: false, reason: 'expectedPlan.expectedDepth must be a non-negative integer' };
+  const expectedBreadth = normalizeNonNegativeInteger(value.expectedBreadth);
+  if (expectedBreadth == null) return { ok: false, reason: 'expectedPlan.expectedBreadth must be a non-negative integer' };
+  const rationale = typeof value.rationale === 'string' ? value.rationale.trim() : '';
+  if (!rationale) return { ok: false, reason: 'expectedPlan.rationale must be a non-empty string' };
+  const normalized = { expectedDepth, expectedBreadth, rationale };
+  if (typeof value.declaredAt === 'string' && value.declaredAt.trim()) normalized.declaredAt = value.declaredAt.trim();
+  return { ok: true, value: normalized };
+}
+
+function progressRatio(consumedDepth, expectedDepth) {
+  if (expectedDepth === 0) return 1;
+  return Math.max(0, Math.min(1, consumedDepth / expectedDepth));
+}
+
+export function computeExpectedPlanCoordinate({ parsed, task, activeSnapshot = null } = {}) {
+  const normalized = normalizeExpectedPlan(task?.expectedPlan);
+  if (!normalized.ok) return null;
+  const chain = ancestorChainForTask(parsed, task, activeSnapshot);
+  const consumedDepth = Array.isArray(chain) ? chain.length : 0;
+  const expectedDepth = normalized.value.expectedDepth;
+  const expectedBreadth = normalized.value.expectedBreadth;
+  const planProgress = progressRatio(consumedDepth, expectedDepth);
+  const lineagePlans = [task, ...(chain || []).map((entry) => entry.task)]
+    .map((candidate) => normalizeExpectedPlan(candidate?.expectedPlan))
+    .filter((plan) => plan.ok)
+    .map((plan) => plan.value);
+  const cumulativeExpectedDepth = lineagePlans.reduce((sum, plan) => sum + plan.expectedDepth, 0);
+  return {
+    enabled: true,
+    source: 'expectedPlan',
+    taskId: task.id,
+    consumedDepth,
+    consumedDepthSinceDeclaration: consumedDepth,
+    expectedDepth,
+    expectedBreadth,
+    planProgress,
+    phase: expectedPlanPhaseForProgress(planProgress),
+    phaseThresholds: { ...EXPECTED_PLAN_PHASE_THRESHOLDS },
+    rationale: normalized.value.rationale,
+    lineageDiagnostic: {
+      consumedDepth,
+      cumulativeExpectedDepth,
+      cumulativePlanProgress: progressRatio(consumedDepth, cumulativeExpectedDepth),
+      planCount: lineagePlans.length,
+    },
+  };
+}
+
+function budgetWithExpectedPlanCoordinate(budget, { parsed, task, activeSnapshot = null } = {}) {
+  if (!budget || budget.enabled !== true || !task) return budget;
+  const coordinate = computeExpectedPlanCoordinate({ parsed, task, activeSnapshot });
+  if (!coordinate) return budget;
+  return { ...budget, expectedPlanCoordinate: coordinate };
+}
+
+function fallbackExpectedPlanForChild(parentTask, reason) {
+  const parent = normalizeExpectedPlan(parentTask?.expectedPlan);
+  const expectedDepth = parent.ok ? Math.max(0, parent.value.expectedDepth - 1) : 0;
+  const expectedBreadth = parent.ok ? parent.value.expectedBreadth : 1;
+  return {
+    expectedDepth,
+    expectedBreadth,
+    rationale: `Runner fallback: ${reason}; derived conservatively from ${parent.ok ? `parent task ${parentTask.id} expectedPlan` : `missing parent expectedPlan on ${parentTask?.id || 'source task'}`}.`,
+  };
+}
+
+function normalizeExpectedPlansForChildVersion({ projectDir, childTaskGroupId, versionId, parentTask }) {
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const taskPaths = listChildTaskPaths(versionDir);
+  const summary = {
+    taskCount: taskPaths.length,
+    validCount: 0,
+    fallbackCount: 0,
+    fallbacks: [],
+  };
+  for (const taskPath of taskPaths) {
+    const childTask = parseMarkdownFile(taskPath);
+    const normalized = normalizeExpectedPlan(childTask.expectedPlan);
+    if (normalized.ok) {
+      summary.validCount += 1;
+      continue;
+    }
+    const fallback = fallbackExpectedPlanForChild(parentTask, normalized.reason);
+    rewriteFrontmatter(taskPath, (fm) => {
+      fm.expectedPlan = fallback;
+      return fm;
+    });
+    summary.fallbackCount += 1;
+    summary.fallbacks.push({
+      taskId: childTask.id || null,
+      reason: normalized.reason,
+      expectedDepth: fallback.expectedDepth,
+      expectedBreadth: fallback.expectedBreadth,
+    });
+  }
+  return summary;
+}
+
+function unresolvedBlockedByMarker({ rawRef, reason, versionId, index }) {
+  const raw = String(rawRef ?? '').trim();
+  const id = raw || `empty-blockedby-ref-${index + 1}`;
+  return {
+    type: 'unresolved',
+    id,
+    rawRef: raw,
+    taskGroupVersionId: versionId,
+    reason: sanitizeFmScalar(reason),
+  };
+}
+
+function normalizeChildBlockedByRef(ref, { taskIds, allTaskKeys, allTasksById, runNodeKeys, versionId, index }) {
+  if (typeof ref === 'string') {
+    const id = ref.trim();
+    if (id && taskIds.has(id)) {
+      return {
+        ref: { type: 'task', id, taskGroupVersionId: versionId },
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: 'string_task_ref',
+      };
+    }
+    const reason = id
+      ? `blockedBy string ref '${id}' does not match any task id in child version ${versionId}`
+      : `blockedBy string ref at index ${index + 1} is empty`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: ref, reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
+  }
+
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) {
+    const reason = `blockedBy ref at index ${index + 1} must be an object or task id string`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref ?? null), reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
+  }
+
+  if (ref.type === 'task') {
+    const id = compactString(ref.id || ref.taskId);
+    if (!id) {
+      const reason = `blockedBy task ref at index ${index + 1} is missing id`;
+      return {
+        ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref), reason, versionId, index }),
+        changed: true,
+        unresolved: true,
+        originalRef: ref,
+        reason,
+      };
+    }
+    const targetVersionId = compactString(ref.taskGroupVersionId);
+    if ((!targetVersionId || targetVersionId === versionId) && taskIds.has(id)) {
+      const canonical = { type: 'task', id, taskGroupVersionId: versionId };
+      if (
+        ref.id === canonical.id
+        && ref.taskGroupVersionId === canonical.taskGroupVersionId
+        && ref.type === canonical.type
+        && ref.taskId == null
+      ) {
+        return { ref, changed: false };
+      }
+      return {
+        ref: canonical,
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: ref.taskGroupVersionId ? 'canonical_task_ref' : 'defaulted_child_task_group_version',
+      };
+    }
+    if (targetVersionId && allTaskKeys.has(`${targetVersionId}:${id}`)) {
+      const canonical = { type: 'task', id, taskGroupVersionId: targetVersionId };
+      if (ref.id === canonical.id && ref.taskGroupVersionId === canonical.taskGroupVersionId && ref.type === canonical.type && ref.taskId == null) {
+        return { ref, changed: false };
+      }
+      return {
+        ref: canonical,
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: 'canonical_cross_branch_task_ref',
+      };
+    }
+    if (!targetVersionId) {
+      const matches = allTasksById.get(id) || [];
+      if (matches.length === 1) {
+        const canonical = { type: 'task', id, taskGroupVersionId: matches[0].taskGroupVersionId };
+        return {
+          ref: canonical,
+          changed: true,
+          normalized: true,
+          originalRef: ref,
+          reason: 'defaulted_unique_task_group_version',
+        };
+      }
+    }
+    const reason = targetVersionId
+      ? `blockedBy task ref '${targetVersionId}:${id}' does not match any task`
+      : `blockedBy task ref '${id}' is ambiguous or not found; include taskGroupVersionId`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref), reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
+  }
+
+  if (ref.type === 'runNode') {
+    const runId = compactString(ref.runId);
+    const runNodeId = compactString(ref.runNodeId || ref.id);
+    if (runId && runNodeId && runNodeKeys.has(`${runId}:${runNodeId}`)) {
+      const canonical = { type: 'runNode', runId, runNodeId };
+      if (ref.type === canonical.type && ref.runId === canonical.runId && ref.runNodeId === canonical.runNodeId && ref.id == null) {
+        return { ref, changed: false };
+      }
+      return {
+        ref: canonical,
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: 'canonical_run_node_ref',
+      };
+    }
+    const reason = `blockedBy runNode ref at index ${index + 1} does not match any run node`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref), reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
+  }
+
+  return { ref, changed: false };
+}
+
+function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versionId }) {
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const taskPaths = listChildTaskPaths(versionDir);
+  const childTasks = taskPaths.map((taskPath) => ({ taskPath, task: parseMarkdownFile(taskPath) }));
+  const taskIds = new Set(childTasks.map(({ task }) => task.id).filter(Boolean));
+  const parsed = parseProject(projectDir);
+  const allTaskKeys = new Set([...parsed.tasks.values()].map((task) => `${task.taskGroupVersionId}:${task.id}`));
+  const allTasksById = new Map();
+  for (const task of parsed.tasks.values()) {
+    if (!allTasksById.has(task.id)) allTasksById.set(task.id, []);
+    allTasksById.get(task.id).push(task);
+  }
+  const runNodeKeys = new Set(parsed.runNodes.keys());
+  const summary = {
+    taskCount: childTasks.length,
+    checkedTaskCount: 0,
+    normalizedRefCount: 0,
+    unresolvedCount: 0,
+    normalizedRefs: [],
+    unresolvedRefs: [],
+  };
+
+  for (const { taskPath, task: childTask } of childTasks) {
+    if (childTask.blockedBy == null) continue;
+    summary.checkedTaskCount += 1;
+    const originalRefs = Array.isArray(childTask.blockedBy) ? childTask.blockedBy : [childTask.blockedBy];
+    let changed = false;
+    const nextRefs = originalRefs.map((ref, index) => {
+      const normalized = normalizeChildBlockedByRef(ref, { taskIds, allTaskKeys, allTasksById, runNodeKeys, versionId, index });
+      if (!normalized.changed) return normalized.ref;
+      changed = true;
+      if (normalized.normalized) {
+        summary.normalizedRefCount += 1;
+        summary.normalizedRefs.push({
+          taskId: childTask.id || null,
+          index,
+          originalRef: normalized.originalRef,
+          normalizedRef: normalized.ref,
+          reason: normalized.reason,
+        });
+      }
+      if (normalized.unresolved) {
+        summary.unresolvedCount += 1;
+        summary.unresolvedRefs.push({
+          taskId: childTask.id || null,
+          index,
+          originalRef: normalized.originalRef,
+          unresolvedRef: normalized.ref,
+          reason: normalized.reason,
+        });
+      }
+      return normalized.ref;
+    });
+    if (!changed) continue;
+    rewriteFrontmatter(taskPath, (fm) => {
+      fm.blockedBy = nextRefs;
+      return fm;
+    });
+  }
+
+  return summary;
+}
+
+function committingScopeDeferralReason({ executor, finishedAt }) {
+  return sanitizeFmScalar(`Committing scope deferred by taskops-runner (${executor}) at ${finishedAt}: worker authored runReadiness=needs_decomposition during committing phase; review or restart explicitly before expanding this child scope.`);
+}
+
+function expectedPlanCoordinateSnapshot(budget) {
+  const coordinate = budget?.expectedPlanCoordinate?.enabled === true ? budget.expectedPlanCoordinate : null;
+  if (!coordinate) return null;
+  return {
+    phase: coordinate.phase || null,
+    planProgress: coordinate.planProgress,
+    consumedDepth: coordinate.consumedDepth,
+    consumedDepthSinceDeclaration: coordinate.consumedDepthSinceDeclaration,
+    expectedDepth: coordinate.expectedDepth,
+    expectedBreadth: coordinate.expectedBreadth,
+    remainingSteps: budget.remaining,
+    maxSteps: budget.maxSteps,
+  };
+}
+
+function deferCommittingScopeChildrenForChildVersion({ projectDir, childTaskGroupId, versionId, budget, executor, finishedAt }) {
+  const coordinate = budget?.expectedPlanCoordinate?.enabled === true ? budget.expectedPlanCoordinate : null;
+  const summary = {
+    enabled: false,
+    deferredCount: 0,
+    guardMode: 'soft_post_authoring',
+    reason: 'committing_phase_needs_decomposition_child',
+    coordinate: expectedPlanCoordinateSnapshot(budget),
+    deferredChildren: [],
+  };
+  if (!coordinate || coordinate.phase !== 'committing') return summary;
+
+  summary.enabled = true;
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  for (const taskPath of listChildTaskPaths(versionDir)) {
+    const childTask = parseMarkdownFile(taskPath);
+    if (childTask.runReadiness !== 'needs_decomposition') continue;
+
+    const reason = committingScopeDeferralReason({ executor, finishedAt });
+    summary.deferredChildren.push({
+      taskId: childTask.id || null,
+      originalStatus: childTask.status || null,
+      originalRunReadiness: childTask.runReadiness || null,
+      originalRunReadinessReason: childTask.runReadinessReason || null,
+      newStatus: 'blocked',
+      newRunReadiness: 'blocked',
+      reason,
+      expectedPlan: childTask.expectedPlan || null,
+    });
+    rewriteFrontmatter(taskPath, (fm) => {
+      fm.status = 'blocked';
+      fm.runReadiness = 'blocked';
+      fm.runReadinessReason = reason;
+      fm.needsManualReview = true;
+      fm.manualReviewReason = reason;
+      return fm;
+    });
+  }
+  summary.deferredCount = summary.deferredChildren.length;
+  return summary;
+}
+
+function hasManualReviewOrPartialMarker(value) {
+  if (!value || typeof value !== 'object') return false;
+  return value.needsManualReview === true
+    || value.manualReviewReason != null
+    || value.awaitingPromotion === true
+    || value.awaitingPromotionPartialId != null
+    || value.followUpFromPartialId != null
+    || value.followUpForTaskId != null
+    || value.partialRepeatThreshold != null
+    || value.repeatedPartialNeedsReview === true;
+}
+
+function canApplyDecompositionBacklink({ projectDir, childTaskGroupId, versionId, task, runId, runNodeId }) {
+  const desired = {
+    decomposedFromTaskId: task.id,
+    decomposedFromTaskGroupId: task.taskGroupId,
+    decomposedFromTaskGroupVersionId: task.taskGroupVersionId,
+    decomposedByRunId: runId,
+    decomposedByRunNodeId: runNodeId,
+  };
+  const paths = [
+    join(projectDir, 'task-groups', childTaskGroupId, 'index.md'),
+    join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md'),
+  ];
+  for (const filePath of paths) {
+    if (!existsSync(filePath)) return { ok: false, reason: `missing decomposition target index at ${filePath}` };
+    const current = parseMarkdownFile(filePath);
+    for (const [key, value] of Object.entries(desired)) {
+      if (current[key] != null && current[key] !== '' && String(current[key]) !== String(value)) {
+        return { ok: false, reason: `conflicting decomposition backlink in ${filePath}: ${key}=${current[key]} expected ${value}` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+function probeCompletedDecompositionAfterAdapterFailure({ projectDir, project, task, runId, runNodeId }) {
+  const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
+  const childGroupIndex = join(projectDir, 'task-groups', childTaskGroupId, 'index.md');
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const versionIndex = join(versionDir, 'index.md');
+  if (!existsSync(childGroupIndex)) return { ok: false, reason: `missing child task group index at ${childGroupIndex}` };
+  if (!existsSync(versionIndex)) return { ok: false, reason: `missing child task group version index at ${versionIndex}` };
+
+  let childGroup;
+  let version;
+  try {
+    childGroup = parseMarkdownFile(childGroupIndex);
+    version = parseMarkdownFile(versionIndex);
+  } catch (err) {
+    return { ok: false, reason: `failed to parse child decomposition indexes: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  if (childGroup.entityType !== 'taskGroup') return { ok: false, reason: `child group entityType is '${childGroup.entityType}', expected taskGroup` };
+  if (childGroup.id !== childTaskGroupId) return { ok: false, reason: `child group id '${childGroup.id}' did not match expected '${childTaskGroupId}'` };
+  if (version.entityType !== 'taskGroupVersion') return { ok: false, reason: `child version entityType is '${version.entityType}', expected taskGroupVersion` };
+  if (version.id !== versionId) return { ok: false, reason: `child version id '${version.id}' did not match expected '${versionId}'` };
+  if (version.taskGroupId !== childTaskGroupId) return { ok: false, reason: `child version taskGroupId '${version.taskGroupId}' did not match expected '${childTaskGroupId}'` };
+  if (hasManualReviewOrPartialMarker(childGroup) || hasManualReviewOrPartialMarker(version)) {
+    return { ok: false, reason: 'child decomposition index carries manual-review or partial markers' };
+  }
+
+  const taskPaths = listChildTaskPaths(versionDir);
+  if (taskPaths.length === 0) return { ok: false, reason: `child version '${versionId}' has no child task files` };
+  const taskIds = [];
+  for (const taskPath of taskPaths) {
+    let childTask;
+    try {
+      childTask = parseMarkdownFile(taskPath);
+    } catch (err) {
+      return { ok: false, reason: `failed to parse child task ${taskPath}: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (childTask.entityType !== 'task') return { ok: false, reason: `child task ${taskPath} entityType is '${childTask.entityType}', expected task` };
+    if (!childTask.id || !taskPath.endsWith(`${childTask.id}.md`)) return { ok: false, reason: `child task ${taskPath} id does not match file name` };
+    if (childTask.taskGroupId !== childTaskGroupId) return { ok: false, reason: `child task '${childTask.id}' taskGroupId '${childTask.taskGroupId}' did not match expected '${childTaskGroupId}'` };
+    if (childTask.taskGroupVersionId !== versionId) return { ok: false, reason: `child task '${childTask.id}' taskGroupVersionId '${childTask.taskGroupVersionId}' did not match expected '${versionId}'` };
+    if (hasManualReviewOrPartialMarker(childTask)) return { ok: false, reason: `child task '${childTask.id}' carries manual-review or partial markers` };
+    taskIds.push(childTask.id);
+  }
+
+  const parsed = parseProject(projectDir);
+  const activeSnapshot = parsed.snapshots.get(project.activeSnapshotId);
+  const selectedVersions = Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions : [];
+  const selectedForChild = selectedVersions.filter((pair) => pair && pair.taskGroupId === childTaskGroupId);
+  if (selectedForChild.length > 1) return { ok: false, reason: `active snapshot has multiple selections for child task group '${childTaskGroupId}'` };
+  if (selectedForChild.length === 1 && selectedForChild[0].versionId !== versionId) {
+    return { ok: false, reason: `active snapshot selects '${selectedForChild[0].versionId}' for '${childTaskGroupId}', expected '${versionId}'` };
+  }
+  if (task.childTaskGroupId && task.childTaskGroupId !== childTaskGroupId) {
+    return { ok: false, reason: `source task already points at childTaskGroupId '${task.childTaskGroupId}', expected '${childTaskGroupId}'` };
+  }
+
+  const backlink = canApplyDecompositionBacklink({ projectDir, childTaskGroupId, versionId, task, runId, runNodeId });
+  if (!backlink.ok) return backlink;
+
+  return {
+    ok: true,
+    childTaskGroupId,
+    versionId,
+    childTaskCount: taskIds.length,
+    snapshotAlreadySelected: selectedForChild.length === 1,
+  };
+}
+
+function maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result }) {
+  if (!isRecoverableDecompositionAdapterFailure(result)) return result;
+  const probe = probeCompletedDecompositionAfterAdapterFailure({ projectDir, project, task, runId, runNodeId });
+  if (!probe.ok) {
+    return {
+      ...result,
+      message: `${result.message || 'adapter failed'}; timeout recovery rejected: ${probe.reason}`,
+      recoveryRejected: true,
+      recoveryRejectedReason: probe.reason,
+    };
+  }
+  const adapterFailureReason = result.message || 'adapter timed out';
+  return {
+    ...result,
+    ok: true,
+    childTaskGroupId: probe.childTaskGroupId,
+    versionId: probe.versionId,
+    message: `Recovered completed decomposition after adapter failure: ${adapterFailureReason}`,
+    recoveredAfterAdapterFailure: true,
+    adapterFailureReason,
+    adapterFailureStatus: result.status || null,
+    recoveryStatus: 'recovered_after_timeout',
+    recovery: {
+      childTaskCount: probe.childTaskCount,
+      snapshotAlreadySelected: probe.snapshotAlreadySelected,
+    },
+  };
+}
+
 function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -1870,12 +3328,27 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   try {
     result = executor === 'dry-run'
       ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget });
+      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
 
   const finishedAt = isoNow();
+  if (!result.ok) {
+    result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
+    if (result.recoveredAfterAdapterFailure === true) {
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+        adapterFailureReason: result.adapterFailureReason || null,
+        adapterStatus: result.adapterFailureStatus || result.status || null,
+        recoveryStatus: result.recoveryStatus || null,
+        recovery: result.recovery || null,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
+    }
+  }
   if (!result.ok) {
     rewriteFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
@@ -1897,28 +3370,142 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     };
   }
 
+  const backlinkResult = ensureDecompositionBacklink({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    task,
+    runId,
+    runNodeId,
+  });
+  if (!backlinkResult.ok) {
+    rewriteFrontmatter(task.path, (fm) => {
+      fm.status = 'blocked';
+      fm.lastRunFailureReason = sanitizeFmScalar(backlinkResult.message);
+      return fm;
+    });
+    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'decomposition_failed', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      message: backlinkResult.message || null,
+    });
+    appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${backlinkResult.message || ''}`);
+    return {
+      taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+      message: backlinkResult.message || null,
+      budget,
+    };
+  }
+
+  const expectedPlanNormalization = normalizeExpectedPlansForChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    parentTask: task,
+  });
+  if (expectedPlanNormalization.fallbackCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'expected_plan_fallback_applied', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      expectedPlanFallbacks: expectedPlanNormalization.fallbacks,
+    });
+    appendRunLog(runDir, `${finishedAt} expected_plan_fallback_applied taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${expectedPlanNormalization.fallbackCount}`);
+  }
+
+  const blockedByNormalization = normalizeBlockedByForChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+  });
+  if (blockedByNormalization.unresolvedCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'blockedby_normalization_unresolved', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      unresolvedRefs: blockedByNormalization.unresolvedRefs,
+      summary: {
+        unresolvedCount: blockedByNormalization.unresolvedCount,
+        normalizedRefCount: blockedByNormalization.normalizedRefCount,
+        reason: 'blockedby_ref_unresolved_in_child_version',
+      },
+    });
+    appendRunLog(runDir, `${finishedAt} blockedby_normalization_unresolved taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${blockedByNormalization.unresolvedCount}`);
+  }
+
+  const committingScopeDeferral = deferCommittingScopeChildrenForChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    budget,
+    executor,
+    finishedAt,
+  });
+  if (committingScopeDeferral.deferredCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'committing_scope_deferred', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      coordinate: committingScopeDeferral.coordinate,
+      deferredChildren: committingScopeDeferral.deferredChildren,
+      summary: {
+        deferredCount: committingScopeDeferral.deferredCount,
+        guardMode: committingScopeDeferral.guardMode,
+        reason: committingScopeDeferral.reason,
+      },
+    });
+    appendRunLog(runDir, `${finishedAt} committing_scope_deferred taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${committingScopeDeferral.deferredCount}`);
+  }
+
   rewriteFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.childTaskGroupId = result.childTaskGroupId;
     fm.runReadiness = 'needs_decomposition';
-    fm.runReadinessReason = sanitizeFmScalar(`Decomposed by taskops-runner (${executor}) into ${result.childTaskGroupId}/${result.versionId} at ${finishedAt}.`);
+    fm.runReadinessReason = sanitizeFmScalar(result.recoveredAfterAdapterFailure
+      ? `Decomposed by taskops-runner (${executor}) into ${result.childTaskGroupId}/${result.versionId} at ${finishedAt} after adapter timeout recovery: ${result.adapterFailureReason || 'adapter failed'}.`
+      : `Decomposed by taskops-runner (${executor}) into ${result.childTaskGroupId}/${result.versionId} at ${finishedAt}.`);
     delete fm.lastRunFailureReason;
     return fm;
   });
-  closeTaskWithEow({ task, reason: 'decomposed_by_runner', finishedAt });
+  const taskCloseReason = result.recoveredAfterAdapterFailure ? 'decomposed_by_runner_after_adapter_timeout_recovery' : 'decomposed_by_runner';
+  const runCloseReason = result.recoveredAfterAdapterFailure ? 'decomposition_recorded_after_adapter_timeout_recovery' : 'decomposition_recorded';
+  closeTaskWithEow({ task, reason: taskCloseReason, finishedAt });
   rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
-  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'decomposition_recorded', finishedAt });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, finishedAt });
+  const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    capturedAt: finishedAt,
+  });
 
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'decomposition_completed', runId,
     taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
     message: result.message || null,
+    recoveredAfterAdapterFailure: result.recoveredAfterAdapterFailure === true,
+    adapterFailureReason: result.adapterFailureReason || null,
+    adapterStatus: result.adapterFailureStatus || null,
+    recoveryStatus: result.recoveryStatus || null,
+    inheritedBirthSnapshot,
+    expectedPlanNormalization,
+    blockedByNormalization,
+    committingScopeDeferral,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
   return {
     taskId: task.id, runNodeId, kind: 'decompose', status: 'completed', executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, message: result.message || null,
+    recoveredAfterAdapterFailure: result.recoveredAfterAdapterFailure === true,
+    adapterFailureReason: result.adapterFailureReason || null,
+    adapterStatus: result.adapterFailureStatus || null,
+    recoveryStatus: result.recoveryStatus || null,
+    inheritedBirthSnapshot,
+    expectedPlanNormalization,
+    blockedByNormalization,
+    committingScopeDeferral,
     budget,
   };
 }
@@ -1955,18 +3542,18 @@ function performDryRunExploration({ runDir, runNodeId, task }) {
   return { ok: true, artifactPath, message: `Wrote dry-run exploration artifact at ${artifactPath}` };
 }
 
-function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null }) {
+function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null, inheritedContext = null }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
-  const artifactRelPath = artifactPath.startsWith(projectDir) ? artifactPath.slice(projectDir.length).replace(/^[\\/]/, '') : artifactPath;
-  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactRelPath, budget });
+  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget, inheritedContext });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'explore' }),
     timeoutMs: stepTimeoutMs,
+    cwd: artifactsDir,
   });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
@@ -1976,6 +3563,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
 }
 
 function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
   const runNodePath = ensureRunNode({
@@ -1999,7 +3587,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   try {
     result = executor === 'dry-run'
       ? performDryRunExploration({ runDir, runNodeId, task })
-      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
+      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget, inheritedContext });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -2019,12 +3607,74 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     });
     appendRunLog(runDir, `${finishedAt} exploration_failed taskId=${task.id} reason=${result.message || ''}`);
     return {
-    taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
+      taskId: task.id, runNodeId, kind: 'explore', status: 'failed', executor,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '',
+      budget,
     };
   }
+
+  const artifactText = result.artifactPath && existsSync(result.artifactPath)
+    ? readFileSync(result.artifactPath, 'utf8')
+    : '';
+  const surpriseReport = parseSurpriseReportFromExecutorResult(result, artifactText ? [artifactText] : []);
+  if (surpriseReport.markerFound && surpriseReport.parseError) {
+    const reason = malformedSurpriseReason(surpriseReport);
+    rewriteFrontmatter(task.path, (fm) => {
+      fm.status = 'blocked';
+      fm.runReadiness = 'blocked';
+      fm.runReadinessReason = reason;
+      fm.lastRunFailureReason = reason;
+      fm.needsManualReview = true;
+      fm.malformedSurpriseReport = true;
+      return fm;
+    });
+    rewriteFrontmatter(runNodePath, (fm) => {
+      fm.status = 'blocked';
+      fm.result = {
+        artifactPath: result.artifactPath || null,
+        malformedSurpriseReport: {
+          markerFound: true,
+          parseError: surpriseReport.parseError,
+          rawLine: surpriseReport.rawLine || '',
+          needsManualReview: true,
+        },
+      };
+      return fm;
+    });
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'exploration_malformed_surprise_report', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      parseError: surpriseReport.parseError,
+    });
+    appendRunLog(runDir, `${finishedAt} exploration_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
+    return {
+      taskId: task.id,
+      runNodeId,
+      kind: 'explore',
+      status: 'failed',
+      failureKind: 'malformed_surprise_report',
+      executor,
+      message: reason,
+      budget,
+      malformedSurpriseReport: {
+        markerFound: true,
+        parseError: surpriseReport.parseError,
+        rawLine: surpriseReport.rawLine || '',
+      },
+    };
+  }
+  const surpriseHistoryEntry = surpriseReport.surpriseReported
+    ? appendSurpriseHistory({
+        task,
+        report: surpriseReport.report,
+        runId,
+        runNodeId,
+        actionKind: 'explore',
+        observedAt: finishedAt,
+        evidenceRefs: result.artifactPath ? [result.artifactPath, `run:${runId}/node:${runNodeId}`] : [`run:${runId}/node:${runNodeId}`],
+      })
+    : null;
 
   rewriteFrontmatter(task.path, (fm) => {
     fm.status = 'done';
@@ -2034,7 +3684,17 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     return fm;
   });
   closeTaskWithEow({ task, reason: 'exploration_recorded_by_runner', finishedAt });
-  rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
+  rewriteFrontmatter(runNodePath, (fm) => {
+    fm.status = 'done';
+    fm.result = {
+      artifactPath: result.artifactPath || null,
+      ...(surpriseReport.surpriseReported ? {
+        surpriseReport: surpriseReport.report,
+        surpriseHistoryEntry,
+      } : {}),
+    };
+    return fm;
+  });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'exploration_recorded', finishedAt });
 
   logEvent(eventsPath, {
@@ -2148,7 +3808,7 @@ function countOpenTasksByReadiness(parsed) {
       counts.waiting += 1;
       continue;
     }
-    const c = classifyTaskReadiness(task);
+    const c = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (counts[c.runReadiness] != null) counts[c.runReadiness] += 1;
   }
   return counts;
@@ -2604,6 +4264,7 @@ export function runTaskOps(workDir, options = {}) {
     let stopSource = null;
     let finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
     const actions = [];
+    const reportedBlockedEvidenceIssues = new Set();
 
     while (true) {
       finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
@@ -2622,6 +4283,26 @@ export function runTaskOps(workDir, options = {}) {
         stopReason = STOP_REASONS.VALIDATION_FAILED;
         logEvent(eventsPath, { timestamp: isoNow(), type: 'validation_failed', runId, errors: validationErrors });
         break;
+      }
+      const missingBlockerIssues = blockedEvidenceIssues(parsed)
+        .filter((issue) => {
+          const key = `${issue.taskGroupVersionId}:${issue.taskId}`;
+          if (reportedBlockedEvidenceIssues.has(key)) return false;
+          reportedBlockedEvidenceIssues.add(key);
+          return true;
+        });
+      if (missingBlockerIssues.length > 0) {
+        logEvent(eventsPath, {
+          timestamp: isoNow(),
+          type: 'blockedby_missing_for_blocked_task',
+          runId,
+          issues: missingBlockerIssues,
+          summary: {
+            count: missingBlockerIssues.length,
+            reason: 'blocked_task_missing_machine_readable_blocker',
+          },
+        });
+        appendRunLog(runDir, `${isoNow()} blockedby_missing_for_blocked_task count=${missingBlockerIssues.length}`);
       }
 
       const next = pickNextAction(parsed, {
@@ -2687,19 +4368,25 @@ export function runTaskOps(workDir, options = {}) {
         if (remaining <= 0) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
         if (stepTimeoutMs == null || remaining < stepTimeoutMs) stepTimeoutMs = remaining;
       }
+      const activeSnapshot = parsed.snapshots.get(parsed.project.activeSnapshotId) || null;
+      const stepBudget = budgetWithExpectedPlanCoordinate(finalBudget, {
+        parsed,
+        task: next.task,
+        activeSnapshot,
+      });
 
       let stepResult;
       if (next.kind === 'execute') {
         stepResult = executeRunnableTask({
           project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
-          budget: finalBudget,
+          budget: stepBudget,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
-          budget: finalBudget,
+          budget: stepBudget,
         });
         if (
           stepResult.status === 'completed'
@@ -2725,7 +4412,7 @@ export function runTaskOps(workDir, options = {}) {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
-          budget: finalBudget,
+          budget: stepBudget,
         });
       } else {
         throw new Error(`Unhandled action kind: ${next.kind}`);

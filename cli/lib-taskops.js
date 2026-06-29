@@ -5,6 +5,10 @@ import { spawnSync } from 'node:child_process';
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
+export const UNCERTAINTY_STATE_VALUES = ['unknown_unknown', 'known_unknown', 'known'];
+export const KNOWN_VERIFICATION_STATUS_VALUES = ['unverified'];
+export const INHERITED_KNOWN_TRUST_VALUES = ['inherited_unverified', 'contradicted_upstream', 'locally_revalidated'];
+export const INHERITED_FAILURE_PATTERN_TYPES = ['contradicted_known', 'high_surprise', 'blocking_unknown'];
 export const REVIEW_DECISION_VALUES = ['approved', 'rejected', 'needs_verification'];
 export const ACCEPTANCE_MODE_VALUES = ['informational', 'enforced', 'guarded', 'runner-managed'];
 export const ENTITY_TYPES = ['work', 'project', 'taskGroup', 'taskGroupVersion', 'task', 'versionSnapshot', 'run', 'runNode', 'runEdge', 'eow', 'partial'];
@@ -18,6 +22,15 @@ export const DEFAULT_MAX_FOLLOW_UP_DEPTH = 1;
 export const DEFAULT_PARTIAL_PROMOTION_WAVE_BUDGET = 10;
 export const DEFAULT_PARTIAL_REPEAT_THRESHOLD = 3;
 
+const TASK_UNCERTAINTY_SCALAR_FIELDS = ['uncertaintyState', 'confidenceScore'];
+const TASK_UNCERTAINTY_ARRAY_FIELDS = ['knownList', 'surpriseHistory'];
+const DECOMPOSITION_BACKLINK_FIELDS = [
+  'decomposedFromTaskId',
+  'decomposedFromTaskGroupId',
+  'decomposedFromTaskGroupVersionId',
+  'decomposedByRunId',
+  'decomposedByRunNodeId',
+];
 const POLICY_APPROVED_EOW_FIELDS = [
   'approvedByReviewNodeId',
   'approvedReviewMode',
@@ -84,6 +97,11 @@ const LOCALIZED_TEXT = {
       invalidStatus: (status) => `invalid status '${status}'`,
       invalidRunReadiness: (value) => `invalid runReadiness '${value}'`,
       invalidUnderstandingLevel: (value) => `invalid understandingLevel '${value}'`,
+      invalidUncertaintyState: (value) => `invalid uncertaintyState '${value}'`,
+      invalidConfidenceScore: (value) => `invalid confidenceScore '${value}'`,
+      invalidKnownList: (detail) => `invalid knownList: ${detail}`,
+      invalidSurpriseHistory: (detail) => `invalid surpriseHistory: ${detail}`,
+      invalidInheritedFrom: (detail) => `invalid inheritedFrom: ${detail}`,
       invalidEowGraphType: (value) => `invalid EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `invalid EoW attachedToType '${value}'`,
       missingIndexMd: 'missing index.md',
@@ -120,6 +138,16 @@ const LOCALIZED_TEXT = {
       delegateMissingField: (field) => `delegation/waiting node missing '${field}'`,
       taskGroupNotFound: (id) => `Task group not found: ${id}`,
       versionAlreadyExists: (id) => `Version already exists: ${id}`,
+      incompleteDecompositionBacklink: (missing) => `incomplete decomposition backlink; missing ${missing.join(', ')}`,
+      decompositionBacklinkTaskGroupMismatch: (expected, actual) => `decomposition backlink taskGroupId mismatch; expected '${expected}', found '${actual}'`,
+      decompositionBacklinkSourceVersionNotFound: (id) => `decomposition backlink source version '${id}' not found`,
+      decompositionBacklinkSourceTaskNotFound: (taskId, versionId) => `decomposition backlink source task '${taskId}' not found in version '${versionId}'`,
+      decompositionBacklinkParentMismatch: (taskId, expected, actual) => `decomposition backlink parent task '${taskId}' points to childTaskGroupId '${actual || ''}', expected '${expected}'`,
+      decompositionBacklinkRunNodeNotFound: (runId, nodeId) => `decomposition backlink run node '${runId}/${nodeId}' not found`,
+      decompositionBacklinkRunNodeMismatch: (runId, nodeId, taskId, versionId) => `decomposition backlink run node '${runId}/${nodeId}' does not point to source task '${taskId}' in version '${versionId}'`,
+      selectedChildParentNotFound: (id) => `selected child task group '${id}' has no selected parent task`,
+      selectedChildParentAmbiguous: (id) => `selected child task group '${id}' has multiple selected parent tasks`,
+      selectedChildParentVersionDiffers: (id, selectedVersionId, sourceVersionId) => `selected child task group '${id}' parent is selected from version '${selectedVersionId}', while decomposition source version is '${sourceVersionId}'`,
     },
   },
   ko: {
@@ -149,6 +177,11 @@ const LOCALIZED_TEXT = {
       invalidStatus: (status) => `유효하지 않은 status '${status}'`,
       invalidRunReadiness: (value) => `유효하지 않은 runReadiness '${value}'`,
       invalidUnderstandingLevel: (value) => `유효하지 않은 understandingLevel '${value}'`,
+      invalidUncertaintyState: (value) => `유효하지 않은 uncertaintyState '${value}'`,
+      invalidConfidenceScore: (value) => `유효하지 않은 confidenceScore '${value}'`,
+      invalidKnownList: (detail) => `유효하지 않은 knownList: ${detail}`,
+      invalidSurpriseHistory: (detail) => `유효하지 않은 surpriseHistory: ${detail}`,
+      invalidInheritedFrom: (detail) => `유효하지 않은 inheritedFrom: ${detail}`,
       invalidEowGraphType: (value) => `유효하지 않은 EoW graphType '${value}'`,
       invalidEowAttachedToType: (value) => `유효하지 않은 EoW attachedToType '${value}'`,
       missingIndexMd: 'index.md가 없음',
@@ -185,6 +218,16 @@ const LOCALIZED_TEXT = {
       delegateMissingField: (field) => `delegation/waiting node에 '${field}'가 없음`,
       taskGroupNotFound: (id) => `Task group '${id}'를 찾지 못함`,
       versionAlreadyExists: (id) => `Version '${id}'가 이미 존재함`,
+      incompleteDecompositionBacklink: (missing) => `decomposition backlink가 불완전함; 누락: ${missing.join(', ')}`,
+      decompositionBacklinkTaskGroupMismatch: (expected, actual) => `decomposition backlink taskGroupId 불일치; 기대 '${expected}', 실제 '${actual}'`,
+      decompositionBacklinkSourceVersionNotFound: (id) => `decomposition backlink source version '${id}'를 찾지 못함`,
+      decompositionBacklinkSourceTaskNotFound: (taskId, versionId) => `decomposition backlink source task '${taskId}'를 version '${versionId}'에서 찾지 못함`,
+      decompositionBacklinkParentMismatch: (taskId, expected, actual) => `decomposition backlink parent task '${taskId}'의 childTaskGroupId '${actual || ''}'가 기대 '${expected}'와 다름`,
+      decompositionBacklinkRunNodeNotFound: (runId, nodeId) => `decomposition backlink run node '${runId}/${nodeId}'를 찾지 못함`,
+      decompositionBacklinkRunNodeMismatch: (runId, nodeId, taskId, versionId) => `decomposition backlink run node '${runId}/${nodeId}'가 source task '${taskId}' version '${versionId}'를 가리키지 않음`,
+      selectedChildParentNotFound: (id) => `selected child task group '${id}'의 selected parent task가 없음`,
+      selectedChildParentAmbiguous: (id) => `selected child task group '${id}'의 selected parent task가 여러 개임`,
+      selectedChildParentVersionDiffers: (id, selectedVersionId, sourceVersionId) => `selected child task group '${id}' parent는 version '${selectedVersionId}'에서 선택됐지만 decomposition source version은 '${sourceVersionId}'임`,
     },
   },
 };
@@ -246,6 +289,239 @@ export function partialRepeatThresholdValue(project, override = null) {
     return value;
   }
   return positiveInteger(project?.partialRepeatThreshold, DEFAULT_PARTIAL_REPEAT_THRESHOLD);
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(Object(value), key);
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function cloneFrontmatterValue(value) {
+  if (Array.isArray(value)) return value.map((item) => cloneFrontmatterValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneFrontmatterValue(item)]));
+  }
+  return value;
+}
+
+function validateTaskUncertaintyFields(task, taskPath, errors, t) {
+  if (task.uncertaintyState != null) {
+    const state = String(task.uncertaintyState).trim();
+    if (!UNCERTAINTY_STATE_VALUES.includes(state)) {
+      errors.push(withPath(taskPath, t.invalidUncertaintyState(task.uncertaintyState)));
+    }
+  }
+
+  if (task.confidenceScore != null) {
+    const score = Number(task.confidenceScore);
+    if (!Number.isFinite(score) || score < 0 || score > 1) {
+      errors.push(withPath(taskPath, t.invalidConfidenceScore(task.confidenceScore)));
+    }
+  }
+
+  if (task.knownList != null) {
+    if (!Array.isArray(task.knownList)) {
+      errors.push(withPath(taskPath, t.invalidKnownList('knownList must be a list')));
+    } else {
+      task.knownList.forEach((item, index) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} must be an object`)));
+          return;
+        }
+        if (!nonEmptyString(item.id)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty id`)));
+        }
+        if (!nonEmptyString(item.claim)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} missing non-empty claim`)));
+        }
+        const status = String(item.verificationStatus || '').trim();
+        if (!KNOWN_VERIFICATION_STATUS_VALUES.includes(status)) {
+          errors.push(withPath(taskPath, t.invalidKnownList(`entry ${index + 1} has invalid verificationStatus '${item.verificationStatus}'`)));
+        }
+      });
+    }
+  }
+
+  if (task.surpriseHistory == null) return;
+  if (!Array.isArray(task.surpriseHistory)) {
+    errors.push(withPath(taskPath, t.invalidSurpriseHistory('surpriseHistory must be a list')));
+    return;
+  }
+
+  task.surpriseHistory.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} must be an object`)));
+      return;
+    }
+    if (!nonEmptyString(entry.id)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} missing non-empty id`)));
+    }
+    if (!nonEmptyString(entry.actionKind)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} missing non-empty actionKind`)));
+    }
+    if (!nonEmptyString(entry.observedAt)) {
+      errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} missing non-empty observedAt`)));
+    }
+    if (entry.surpriseScore != null) {
+      const score = Number(entry.surpriseScore);
+      if (!Number.isFinite(score) || score < 0 || score > 1) {
+        errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} has invalid surpriseScore '${entry.surpriseScore}'`)));
+      }
+    }
+    for (const listField of ['contradictedKnownIds', 'newUnknownIds', 'blockingNewUnknownIds', 'nonBlockingNewUnknownIds', 'newKnownIds']) {
+      if (entry[listField] != null && !Array.isArray(entry[listField])) {
+        errors.push(withPath(taskPath, t.invalidSurpriseHistory(`entry ${index + 1} field ${listField} must be a list`)));
+      }
+    }
+  });
+}
+
+function validateInheritedRefList(value, taskPath, errors, t, { field, requiredFields = [], enumField = null, enumValues = [] }) {
+  if (value == null) return;
+  if (!Array.isArray(value)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} must be a list`)));
+    return;
+  }
+  value.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} entry ${index + 1} must be an object`)));
+      return;
+    }
+    for (const required of requiredFields) {
+      if (!nonEmptyString(entry[required])) {
+        errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} entry ${index + 1} missing non-empty ${required}`)));
+      }
+    }
+    if (enumField) {
+      const value = String(entry[enumField] || '').trim();
+      if (!enumValues.includes(value)) {
+        errors.push(withPath(taskPath, t.invalidInheritedFrom(`${field} entry ${index + 1} has invalid ${enumField} '${entry[enumField]}'`)));
+      }
+    }
+  });
+}
+
+function validateTaskInheritedFromFields(task, taskPath, errors, t) {
+  if (task.inheritedFrom == null) return;
+  if (!task.inheritedFrom || typeof task.inheritedFrom !== 'object' || Array.isArray(task.inheritedFrom)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom('inheritedFrom must be an object')));
+    return;
+  }
+
+  const inherited = task.inheritedFrom;
+  if (!nonEmptyString(inherited.schemaVersion)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom('schemaVersion must be a non-empty string')));
+  }
+  if (inherited.capturedAt != null && !nonEmptyString(inherited.capturedAt)) {
+    errors.push(withPath(taskPath, t.invalidInheritedFrom('capturedAt must be a non-empty string when present')));
+  }
+
+  validateInheritedRefList(inherited.parentChain, taskPath, errors, t, {
+    field: 'parentChain',
+    requiredFields: ['taskId', 'taskGroupId', 'taskGroupVersionId', 'childTaskGroupId', 'childTaskGroupVersionId'],
+  });
+  validateInheritedRefList(inherited.inheritedKnownRefs, taskPath, errors, t, {
+    field: 'inheritedKnownRefs',
+    requiredFields: ['id', 'sourceTaskId', 'sourceTaskGroupVersionId', 'sourceKnownId', 'trust'],
+    enumField: 'trust',
+    enumValues: INHERITED_KNOWN_TRUST_VALUES,
+  });
+  validateInheritedRefList(inherited.inheritedFailurePatterns, taskPath, errors, t, {
+    field: 'inheritedFailurePatterns',
+    requiredFields: ['id', 'type', 'sourceTaskId'],
+    enumField: 'type',
+    enumValues: INHERITED_FAILURE_PATTERN_TYPES,
+  });
+  validateInheritedRefList(inherited.inheritedSurpriseRefs, taskPath, errors, t, {
+    field: 'inheritedSurpriseRefs',
+    requiredFields: ['sourceTaskId', 'surpriseHistoryId'],
+  });
+}
+
+function hasDecompositionBacklink(version) {
+  return DECOMPOSITION_BACKLINK_FIELDS.some((field) => version[field] != null && version[field] !== '');
+}
+
+function copyDecompositionBacklinkFields(source, target) {
+  for (const field of DECOMPOSITION_BACKLINK_FIELDS) {
+    if (source?.[field] !== undefined && source[field] !== null && source[field] !== '') target[field] = source[field];
+  }
+  return target;
+}
+
+function validateDecompositionBacklink({ version, versions, tasks, runNodes, activeSnapshot, errors, warnings, t, taskKey, runNodeKey }) {
+  if (!hasDecompositionBacklink(version)) return;
+
+  const missing = DECOMPOSITION_BACKLINK_FIELDS.filter((field) => version[field] == null || version[field] === '');
+  if (missing.length > 0) {
+    errors.push(withPath(`${version.path}/index.md`, t.incompleteDecompositionBacklink(missing)));
+    return;
+  }
+
+  const sourceVersion = versions.get(version.decomposedFromTaskGroupVersionId);
+  if (!sourceVersion) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkSourceVersionNotFound(version.decomposedFromTaskGroupVersionId)));
+  } else if (sourceVersion.taskGroupId !== version.decomposedFromTaskGroupId) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkTaskGroupMismatch(sourceVersion.taskGroupId, version.decomposedFromTaskGroupId)));
+  }
+
+  const sourceTask = tasks.get(taskKey(version.decomposedFromTaskGroupVersionId, version.decomposedFromTaskId));
+  if (!sourceTask) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkSourceTaskNotFound(version.decomposedFromTaskId, version.decomposedFromTaskGroupVersionId)));
+  } else if (sourceTask.childTaskGroupId !== version.taskGroupId) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkParentMismatch(version.decomposedFromTaskId, version.taskGroupId, sourceTask.childTaskGroupId)));
+  }
+
+  const sourceRunNode = runNodes.get(runNodeKey(version.decomposedByRunId, version.decomposedByRunNodeId));
+  if (!sourceRunNode) {
+    errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkRunNodeNotFound(version.decomposedByRunId, version.decomposedByRunNodeId)));
+  } else if (
+    sourceRunNode.sourceTaskId !== version.decomposedFromTaskId
+    || (sourceRunNode.sourceTaskGroupVersionId && sourceRunNode.sourceTaskGroupVersionId !== version.decomposedFromTaskGroupVersionId)
+  ) {
+    errors.push(withPath(
+      `${version.path}/index.md`,
+      t.decompositionBacklinkRunNodeMismatch(
+        version.decomposedByRunId,
+        version.decomposedByRunNodeId,
+        version.decomposedFromTaskId,
+        version.decomposedFromTaskGroupVersionId,
+      ),
+    ));
+  }
+
+  const selectedPairs = Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions : [];
+  const selectedVersionIds = new Set(selectedPairs.map((pair) => pair?.versionId).filter(Boolean));
+  if (!selectedVersionIds.has(version.id)) return;
+
+  const selectedParentMatches = [];
+  for (const pair of selectedPairs) {
+    const selectedVersion = pair?.versionId ? versions.get(pair.versionId) : null;
+    if (!selectedVersion) continue;
+    for (const task of selectedVersion.tasks || []) {
+      if (task.childTaskGroupId === version.taskGroupId) selectedParentMatches.push({ task, version: selectedVersion });
+    }
+  }
+
+  if (selectedParentMatches.length === 0) {
+    errors.push(withPath(`${version.path}/index.md`, t.selectedChildParentNotFound(version.taskGroupId)));
+  } else if (selectedParentMatches.length > 1) {
+    errors.push(withPath(`${version.path}/index.md`, t.selectedChildParentAmbiguous(version.taskGroupId)));
+  } else {
+    const selectedParent = selectedParentMatches[0];
+    if (selectedParent.task.id !== version.decomposedFromTaskId) {
+      errors.push(withPath(`${version.path}/index.md`, t.decompositionBacklinkParentMismatch(version.decomposedFromTaskId, version.taskGroupId, selectedParent.task.childTaskGroupId)));
+    }
+    if (selectedParent.version.id !== version.decomposedFromTaskGroupVersionId) {
+      warnings.push(withPath(
+        `${version.path}/index.md`,
+        t.selectedChildParentVersionDiffers(version.taskGroupId, selectedParent.version.id, version.decomposedFromTaskGroupVersionId),
+      ));
+    }
+  }
 }
 
 export function parseScalar(value) {
@@ -416,6 +692,32 @@ export function discoverProjects(inputPath) {
   return projects;
 }
 
+function normalizeBlockedByRefs(value) {
+  if (value == null || value === '') return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function hasManualBlockerMarker(task) {
+  return Boolean(
+    task.needsManualReview === true
+    || task.manualReviewReason
+    || task.awaitingPromotion === true
+    || task.awaitingPromotionPartialId
+    || task.repeatedPartialNeedsReview === true
+    || task.lastRunFailureReason
+    || task.malformedPartialRequest === true
+    || task.malformedSurpriseReport === true
+  );
+}
+
+function hasBlockedTaskEvidence(task) {
+  return normalizeBlockedByRefs(task.blockedBy).length > 0 || hasManualBlockerMarker(task);
+}
+
+function blockedTaskEvidenceWarning(task) {
+  return `blocked task '${task.id}' has status/runReadiness blocked but no blockedBy or explicit manual/external blocker marker`;
+}
+
 export function parseProject(projectDir) {
   const errors = [];
   const warnings = [];
@@ -487,6 +789,11 @@ export function parseProject(projectDir) {
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
+        validateTaskUncertaintyFields(task, taskPath, errors, t);
+        validateTaskInheritedFromFields(task, taskPath, errors, t);
+        if ((task.status === 'blocked' || task.runReadiness === 'blocked') && !hasBlockedTaskEvidence(task)) {
+          warnings.push(withPath(taskPath, blockedTaskEvidenceWarning(task)));
+        }
         if (task.acceptance != null) {
           if (!task.acceptance || typeof task.acceptance !== 'object' || Array.isArray(task.acceptance)) {
             warnings.push(withPath(taskPath, 'acceptance should be an object with expectedOutcome, requiredArtifacts, and requiredChecks'));
@@ -688,7 +995,10 @@ export function parseProject(projectDir) {
   }
   if (runs.size === 0) warnings.push(withPath(projectDir, t.missingRunIndex));
 
+  const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
+
   for (const version of versions.values()) {
+    validateDecompositionBacklink({ version, versions, tasks, runNodes, activeSnapshot, errors, warnings, t, taskKey, runNodeKey });
     for (const task of version.tasks) {
       if (task.childTaskGroupId && !taskGroups.has(task.childTaskGroupId)) errors.push(withPath(task.path, t.childTaskGroupNotFound(task.childTaskGroupId)));
     }
@@ -729,7 +1039,6 @@ export function parseProject(projectDir) {
   let terminalTaskEowCount = 0;
   let policyApprovedTerminalTaskEowCount = 0;
   let manualAttestedTerminalTaskEowCount = 0;
-  const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
   const selectedPairs = activeSnapshot?.selectedVersions || [];
   const selectedTaskGroupIds = new Set(selectedPairs.map((pair) => pair.taskGroupId));
   for (const pair of selectedPairs) {
@@ -777,7 +1086,27 @@ export function parseProject(projectDir) {
   const partialTaskCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'task' && partial.attachedToType === 'task').length;
   const partialRunCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'run' && partial.attachedToType === 'runNode').length;
   const partialCount = partialTaskCount + partialRunCount;
-  const openBlockerCount = [...tasks.values()].filter((task) => task.status === 'blocked').length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
+  const taskBlockerResolved = (ref) => {
+    if (!ref || typeof ref !== 'object') return false;
+    switch (ref.type) {
+      case 'task': {
+        const id = ref.id || ref.taskId;
+        const matches = [...tasks.values()].filter((task) => task.id === id && (!ref.taskGroupVersionId || task.taskGroupVersionId === ref.taskGroupVersionId));
+        return matches.length > 0 && matches.every((task) => ['done', 'cancelled'].includes(task.status));
+      }
+      case 'runNode': {
+        const id = ref.id || ref.runNodeId;
+        const node = runNodes.get(runNodeKey(ref.runId, id));
+        return Boolean(node && ['done', 'cancelled'].includes(node.status));
+      }
+      default:
+        return false;
+    }
+  };
+  const taskHasUnresolvedBlocker = (task) => normalizeBlockedByRefs(task.blockedBy).some((ref) => !taskBlockerResolved(ref));
+  const taskIsOpenBlocked = (task) => !['done', 'cancelled'].includes(task.status)
+    && (task.status === 'blocked' || task.runReadiness === 'blocked' || taskHasUnresolvedBlocker(task));
+  const openBlockerCount = [...tasks.values()].filter(taskIsOpenBlocked).length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
   const structuralComplete = terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0;
   const policyApprovedComplete = structuralComplete
     && terminalTaskCount === policyApprovedTerminalTaskEowCount
@@ -841,6 +1170,61 @@ function isManualAttestedEow(eow) {
 
 export function classifyTaskReadiness(task) {
   if (!task || typeof task !== 'object') throw new Error('Task is required');
+  const legacy = classifyTaskReadinessV05(task);
+  const hasUncertainty = hasUncertaintyReadinessFields(task);
+  const hasInherited = hasInheritedContext(task);
+  if (!hasUncertainty && !hasInherited) return legacy;
+
+  if (!hasUncertainty && hasInherited) {
+    const consistencyIssues = uncertaintyReadinessConsistencyIssues(task, legacy);
+    const downgrade = strongestReadinessDowngrade(legacy.runReadiness, consistencyIssues);
+    if (downgrade) {
+      return {
+        ...legacy,
+        runReadiness: downgrade.runReadiness,
+        originalRunReadiness: legacy.runReadiness,
+        source: 'inherited_context_safety_downgrade',
+        reason: downgrade.reason,
+        nextAction: nextActionForRunReadiness(downgrade.runReadiness),
+        consistencyIssues,
+        legacyComparison: readinessComparisonFromLegacy(legacy),
+        compatibilityPolicy: 'inherited context is safety-only and never runnable evidence; legacy readiness is retained unless inherited-only runnable is detected',
+      };
+    }
+    return {
+      ...legacy,
+      consistencyIssues,
+      legacyComparison: readinessComparisonFromLegacy(legacy),
+      compatibilityPolicy: 'inherited context is safety-only and never runnable evidence; legacy readiness is retained unless inherited-only runnable is detected',
+    };
+  }
+
+  const semanticReadiness = inferUncertaintyReadiness(task);
+  const consistencyIssues = uncertaintyReadinessConsistencyIssues(task, semanticReadiness);
+  const downgrade = strongestReadinessDowngrade(semanticReadiness.runReadiness, consistencyIssues);
+  if (downgrade) {
+    return {
+      ...semanticReadiness,
+      runReadiness: downgrade.runReadiness,
+      originalRunReadiness: semanticReadiness.runReadiness,
+      source: 'uncertainty_with_consistency_downgrade',
+      reason: downgrade.reason,
+      nextAction: nextActionForRunReadiness(downgrade.runReadiness),
+      consistencyIssues,
+      legacyComparison: readinessComparisonFromLegacy(legacy),
+      compatibilityPolicy: 'uncertainty readiness is primary when uncertaintyState/confidenceScore/knownList is present; legacy v0.5 readiness is retained for comparison; inherited context is safety-only and never runnable evidence',
+    };
+  }
+  return {
+    ...semanticReadiness,
+    consistencyIssues,
+    legacyComparison: readinessComparisonFromLegacy(legacy),
+    compatibilityPolicy: 'uncertainty readiness is primary when uncertaintyState/confidenceScore/knownList is present; legacy v0.5 readiness is retained for comparison; inherited context is safety-only and never runnable evidence',
+  };
+}
+
+export function classifyTaskReadinessV05(task) {
+  if (!task || typeof task !== 'object') throw new Error('Task is required');
   const semanticReadiness = inferTaskReadiness(task);
   const consistencyIssues = explicitReadinessConsistencyIssues(task, semanticReadiness);
   if (task.runReadiness && RUN_READINESS_VALUES.includes(task.runReadiness)) {
@@ -872,6 +1256,36 @@ export function classifyTaskReadiness(task) {
     ...semanticReadiness,
     consistencyIssues,
     compatibilityPolicy: 'semantic contradictions downgrade explicit runnable; legacy/manual acceptance gaps warn unless guarded or runner-managed',
+  };
+}
+
+function hasUncertaintyReadinessFields(task) {
+  return TASK_UNCERTAINTY_SCALAR_FIELDS.some((field) => hasOwn(task, field))
+    || TASK_UNCERTAINTY_ARRAY_FIELDS.some((field) => hasOwn(task, field));
+}
+
+function hasInheritedContext(task) {
+  return Boolean(task?.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom));
+}
+
+function inheritedKnownRefs(task) {
+  const refs = task?.inheritedFrom?.inheritedKnownRefs;
+  return Array.isArray(refs) ? refs : [];
+}
+
+function hasLocalKnownEvidence(task) {
+  if (Array.isArray(task?.knownList) && task.knownList.length > 0) return true;
+  const history = Array.isArray(task?.surpriseHistory) ? task.surpriseHistory : [];
+  return history.some((entry) => Array.isArray(entry?.newKnownIds) && entry.newKnownIds.length > 0);
+}
+
+function readinessComparisonFromLegacy(legacy) {
+  return {
+    runReadiness: legacy.runReadiness,
+    source: legacy.source,
+    reason: legacy.reason,
+    nextAction: legacy.nextAction,
+    consistencyIssues: legacy.consistencyIssues || [],
   };
 }
 
@@ -907,6 +1321,286 @@ function inferTaskReadiness(task) {
     reason: 'The task is not blocked or unknown, but it lacks enough single-responsibility run criteria.',
     nextAction: nextActionForRunReadiness('needs_decomposition'),
   };
+}
+
+export function inferUncertaintyReadiness(task) {
+  const state = String(task.uncertaintyState || '').trim();
+  if (task.status === 'blocked' || task.runReadiness === 'blocked') {
+    return { taskId: task.id, runReadiness: 'blocked', source: 'uncertainty', reason: 'Blocked status/readiness remains orthogonal to uncertainty.', nextAction: nextActionForRunReadiness('blocked') };
+  }
+  if (state === 'unknown_unknown') {
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_exploration',
+      source: 'uncertainty',
+      reason: 'uncertaintyState unknown_unknown requires exploration before honest execution or decomposition.',
+      nextAction: nextActionForRunReadiness('needs_exploration'),
+    };
+  }
+  if (state === 'known_unknown') {
+    if (isDecompositionReadyByUncertainty(task)) {
+      return {
+        taskId: task.id,
+        runReadiness: 'needs_decomposition',
+        source: 'uncertainty',
+        reason: 'uncertaintyState known_unknown has enough structure to decompose before execution.',
+        nextAction: nextActionForRunReadiness('needs_decomposition'),
+      };
+    }
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_exploration',
+      source: 'uncertainty',
+      reason: 'uncertaintyState known_unknown still needs exploration before decomposition is honest.',
+      nextAction: nextActionForRunReadiness('needs_exploration'),
+    };
+  }
+  if (state === 'known') {
+    if (hasRunnableTaskContract(task)) {
+      return {
+        taskId: task.id,
+        runReadiness: 'runnable',
+        source: 'uncertainty',
+        reason: 'uncertaintyState known and runnable task contract fields are present.',
+        nextAction: nextActionForRunReadiness('runnable'),
+      };
+    }
+    return {
+      taskId: task.id,
+      runReadiness: 'needs_decomposition',
+      source: 'uncertainty',
+      reason: 'uncertaintyState known, but objective/responsibility/completionCriteria are not complete enough for one run.',
+      nextAction: nextActionForRunReadiness('needs_decomposition'),
+    };
+  }
+
+  return {
+    taskId: task.id,
+    runReadiness: 'needs_exploration',
+    source: 'uncertainty',
+    reason: 'Uncertainty metadata is present but uncertaintyState is missing or invalid; explore before acting.',
+    nextAction: nextActionForRunReadiness('needs_exploration'),
+  };
+}
+
+export function informationGainConvergence(task, { window = 3, maxSurpriseScore = 0.2 } = {}) {
+  const history = Array.isArray(task?.surpriseHistory) ? task.surpriseHistory : [];
+  const normalizedWindow = Math.max(1, Math.floor(Number(window) || 3));
+  const threshold = Number.isFinite(Number(maxSurpriseScore)) ? Number(maxSurpriseScore) : 0.2;
+  if (history.length < normalizedWindow) {
+    return {
+      converged: false,
+      window: normalizedWindow,
+      maxSurpriseScore: threshold,
+      observedCount: history.length,
+      reason: `need ${normalizedWindow} surprise observations; found ${history.length}`,
+    };
+  }
+  const recent = history.slice(-normalizedWindow);
+  const highSurprise = recent.filter((entry) => Number(entry.surpriseScore) > threshold);
+  const contradictedKnownIds = recent.flatMap((entry) => Array.isArray(entry.contradictedKnownIds) ? entry.contradictedKnownIds : []);
+  const blockingNewUnknownIds = recent.flatMap((entry) => Array.isArray(entry.blockingNewUnknownIds)
+    ? entry.blockingNewUnknownIds
+    : (Array.isArray(entry.newUnknownIds) ? entry.newUnknownIds : []));
+  const converged = highSurprise.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
+  return {
+    converged,
+    window: normalizedWindow,
+    maxSurpriseScore: threshold,
+    observedCount: history.length,
+    recentScores: recent.map((entry) => Number(entry.surpriseScore || 0)),
+    contradictedKnownIds,
+    blockingNewUnknownIds,
+    reason: converged
+      ? `${normalizedWindow} consecutive low-surprise observations`
+      : 'recent surprise history still contains high surprise, contradicted known claims, or blocking unknowns',
+  };
+}
+
+function surpriseHistoryForTask(task) {
+  return Array.isArray(task?.surpriseHistory) ? task.surpriseHistory.filter((entry) => entry && typeof entry === 'object') : [];
+}
+
+function lineageObservedAt(entry) {
+  return nonEmptyString(entry?.observedAt) ? String(entry.observedAt) : '';
+}
+
+function deterministicLineageEntryKey(entry) {
+  return [
+    lineageObservedAt(entry),
+    String(Number.isFinite(Number(entry?.lineageDistance)) ? Number(entry.lineageDistance) : 999),
+    String(entry?.sourceTaskGroupVersionId || ''),
+    String(entry?.sourceTaskId || ''),
+    String(entry?.runId || ''),
+    String(entry?.runNodeId || ''),
+    String(entry?.id || ''),
+  ].join('\u0000');
+}
+
+function sortLineageSurpriseEntries(entries) {
+  return [...entries].sort((a, b) => deterministicLineageEntryKey(a).localeCompare(deterministicLineageEntryKey(b)));
+}
+
+function lineageEntriesBySource(entries) {
+  const sources = new Map();
+  for (const entry of entries) {
+    const key = `${entry.sourceTaskGroupVersionId || ''}:${entry.sourceTaskId || ''}:${entry.lineageDistance ?? ''}:${entry.hydrationSource || ''}`;
+    const current = sources.get(key) || {
+      sourceTaskId: entry.sourceTaskId || null,
+      sourceTaskGroupId: entry.sourceTaskGroupId || null,
+      sourceTaskGroupVersionId: entry.sourceTaskGroupVersionId || null,
+      lineageDistance: entry.lineageDistance ?? null,
+      hydrationSource: entry.hydrationSource || null,
+      observedCount: 0,
+      surpriseIds: [],
+    };
+    current.observedCount += 1;
+    if (entry.id) current.surpriseIds.push(entry.id);
+    sources.set(key, current);
+  }
+  return [...sources.values()].sort((a, b) => {
+    const distance = Number(a.lineageDistance ?? 999) - Number(b.lineageDistance ?? 999);
+    if (distance !== 0) return distance;
+    return `${a.sourceTaskGroupVersionId}:${a.sourceTaskId}`.localeCompare(`${b.sourceTaskGroupVersionId}:${b.sourceTaskId}`);
+  });
+}
+
+function lineageSurpriseEntry(sourceTask, surprise, { lineageDistance, hydrationSource }) {
+  const cloned = cloneFrontmatterValue(surprise);
+  return {
+    ...cloned,
+    sourceTaskId: sourceTask?.id || null,
+    sourceTaskGroupId: sourceTask?.taskGroupId || null,
+    sourceTaskGroupVersionId: sourceTask?.taskGroupVersionId || null,
+    lineageDistance,
+    hydrationSource,
+    runId: cloned.runId || null,
+    runNodeId: cloned.runNodeId || null,
+  };
+}
+
+export function lineageInformationGainConvergence(parsed, task, activeSnapshot = null, { window = 3, maxSurpriseScore = 0.2 } = {}) {
+  const normalizedWindow = Math.max(1, Math.floor(Number(window) || 3));
+  const threshold = Number.isFinite(Number(maxSurpriseScore)) ? Number(maxSurpriseScore) : 0.2;
+  const lineageWarnings = [];
+  const entries = [];
+
+  if (task && typeof task === 'object') {
+    for (const surprise of surpriseHistoryForTask(task)) {
+      entries.push(lineageSurpriseEntry(task, surprise, {
+        lineageDistance: 0,
+        hydrationSource: 'current_task',
+      }));
+    }
+  }
+
+  const chain = ancestorChainForTask(parsed, task, activeSnapshot);
+  for (const [index, chainEntry] of chain.entries()) {
+    const resolved = hydrationSourceTaskForChainEntry(parsed, chainEntry);
+    if (resolved.warning) lineageWarnings.push(resolved.warning);
+    if (!resolved.task) continue;
+    for (const surprise of surpriseHistoryForTask(resolved.task)) {
+      entries.push(lineageSurpriseEntry(resolved.task, surprise, {
+        lineageDistance: index + 1,
+        hydrationSource: resolved.source,
+      }));
+    }
+  }
+
+  const sortedEntries = sortLineageSurpriseEntries(entries);
+  const observedCount = sortedEntries.length;
+  const lineageDepth = chain.length;
+  const entriesBySource = lineageEntriesBySource(sortedEntries);
+  if (observedCount < normalizedWindow) {
+    return {
+      converged: false,
+      window: normalizedWindow,
+      maxSurpriseScore: threshold,
+      observedCount,
+      lineageDepth,
+      entries: sortedEntries,
+      entriesBySource,
+      recentScores: sortedEntries.map((entry) => Number(entry.surpriseScore || 0)),
+      contradictedKnownIds: [],
+      blockingNewUnknownIds: [],
+      lineageWarnings,
+      insufficientEvidence: {
+        required: normalizedWindow,
+        observed: observedCount,
+        reason: `need ${normalizedWindow} lineage surprise observations; found ${observedCount}`,
+      },
+      reason: `insufficient_evidence: need ${normalizedWindow} lineage surprise observations; found ${observedCount}`,
+    };
+  }
+
+  const recent = sortedEntries.slice(-normalizedWindow);
+  const highSurprise = recent.filter((entry) => Number(entry.surpriseScore) > threshold);
+  const contradictedKnownIds = recent.flatMap((entry) => Array.isArray(entry.contradictedKnownIds) ? entry.contradictedKnownIds : []);
+  const blockingNewUnknownIds = recent.flatMap((entry) => Array.isArray(entry.blockingNewUnknownIds)
+    ? entry.blockingNewUnknownIds
+    : []);
+  const converged = highSurprise.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
+  return {
+    converged,
+    window: normalizedWindow,
+    maxSurpriseScore: threshold,
+    observedCount,
+    lineageDepth,
+    entries: sortedEntries,
+    entriesBySource,
+    recentScores: recent.map((entry) => Number(entry.surpriseScore || 0)),
+    contradictedKnownIds,
+    blockingNewUnknownIds,
+    lineageWarnings,
+    reason: converged
+      ? `${normalizedWindow} consecutive low-surprise lineage observations`
+      : 'recent lineage surprise history still contains high surprise, contradicted known claims, or blocking unknowns',
+  };
+}
+
+function hasRunnableTaskContract(task) {
+  return nonEmptyString(task.objective)
+    && nonEmptyString(task.responsibility)
+    && nonEmptyString(task.completionCriteria);
+}
+
+function isDecompositionReadyByUncertainty(task) {
+  if (task.runReadiness === 'needs_decomposition') return true;
+  if (task.childTaskGroupId) return true;
+  const confidence = Number(task.decompositionConfidence);
+  return Number.isFinite(confidence) && confidence >= 0.7;
+}
+
+function uncertaintyReadinessConsistencyIssues(task, semanticReadiness) {
+  const issues = [];
+  const explicit = task.runReadiness && RUN_READINESS_VALUES.includes(task.runReadiness) ? task.runReadiness : null;
+  if (explicit && explicit !== semanticReadiness.runReadiness) {
+    issues.push({
+      code: 'explicit_readiness_differs_from_uncertainty',
+      severity: 'warning',
+      downgradeTo: null,
+      message: `explicit runReadiness '${explicit}' differs from uncertainty readiness '${semanticReadiness.runReadiness}'`,
+    });
+  }
+  if (String(task.uncertaintyState || '').trim() === 'known' && !hasRunnableTaskContract(task)) {
+    issues.push({
+      code: 'known_uncertainty_missing_runnable_contract',
+      severity: 'warning',
+      downgradeTo: null,
+      message: "uncertaintyState 'known' still lacks objective/responsibility/completionCriteria for a runnable contract",
+    });
+  }
+  if (inheritedKnownRefs(task).length > 0 && !hasLocalKnownEvidence(task)) {
+    if (semanticReadiness.runReadiness === 'runnable' || task.runReadiness === 'runnable') {
+      issues.push({
+        code: 'inherited_only_known_not_runnable',
+        severity: 'error',
+        downgradeTo: 'needs_exploration',
+        message: 'Inherited known references are revalidation targets, not local known evidence; local validation is required before runnable.',
+      });
+    }
+  }
+  return issues;
 }
 
 function explicitReadinessConsistencyIssues(task, semanticReadiness) {
@@ -1470,7 +2164,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   const versionFm = { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: versionId, taskGroupId, version: spec.version ?? versionId, summary: spec.summary, createdAt: now, status: spec.status ?? 'active' };
   if (supersedesVersionId) versionFm.supersedesVersionId = supersedesVersionId;
   if (spec.selected === true) versionFm.selected = true;
-  for (const key of ['restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
+  for (const key of [...DECOMPOSITION_BACKLINK_FIELDS, 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt']) {
     if (spec[key] !== undefined && spec[key] !== null && spec[key] !== '') versionFm[key] = spec[key];
   }
   writeFileSync(join(versionDir, 'index.md'), fmBlock(versionFm) + `# ${spec.summary}\n`, 'utf8');
@@ -1482,11 +2176,15 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       title: task.title, objective: task.objective, responsibility: task.responsibility,
       completionCriteria: task.completionCriteria, order: task.order ?? i + 1, createdAt: now, status: task.status ?? 'pending'
     };
-    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary', 'needsManualReview', 'manualReviewReason', 'repeatedPartialNeedsReview', 'repeatedPartialCount', 'partialRepeatThreshold']) {
+    for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', ...TASK_UNCERTAINTY_SCALAR_FIELDS, 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary', 'needsManualReview', 'manualReviewReason', 'repeatedPartialNeedsReview', 'repeatedPartialCount', 'partialRepeatThreshold']) {
       if (task[key] !== undefined && task[key] !== null && task[key] !== '') fm[key] = task[key];
     }
-    if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
+    if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') fm.blockedBy = cloneFrontmatterValue(task.blockedBy);
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
+    if (Array.isArray(task.knownList)) fm.knownList = cloneFrontmatterValue(task.knownList);
+    if (Array.isArray(task.surpriseHistory)) fm.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
+    if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) fm.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
+    if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) fm.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
@@ -1583,6 +2281,7 @@ function cloneTaskForPromotion(task) {
     'runReadinessReason',
     'unblockRunReadiness',
     'understandingLevel',
+    ...TASK_UNCERTAINTY_SCALAR_FIELDS,
     'decompositionConfidence',
     'executionConfidence',
     'explorationNeeded',
@@ -1613,8 +2312,12 @@ function cloneTaskForPromotion(task) {
   for (const key of preserveKeys) {
     if (task[key] !== undefined && task[key] !== null && task[key] !== '') cloned[key] = task[key];
   }
-  if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
+  if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') cloned.blockedBy = cloneFrontmatterValue(task.blockedBy);
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
+  if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
+  if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
+  if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
+  if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) cloned.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
@@ -1637,6 +2340,92 @@ function selectedVersionPairs(parsed) {
 
 function selectedVersionIds(parsed) {
   return new Set(selectedVersionPairs(parsed).map((pair) => pair.versionId).filter(Boolean));
+}
+
+export function ancestorChainForTask(parsed, task, activeSnapshot = null) {
+  if (!parsed || !task || !task.taskGroupVersionId) return [];
+  const chain = [];
+  const seenVersionIds = new Set();
+  const activePairs = Array.isArray(activeSnapshot?.selectedVersions)
+    ? activeSnapshot.selectedVersions
+    : selectedVersionPairs(parsed);
+  const selectedParentForChildGroup = (childTaskGroupId) => {
+    const matches = [];
+    for (const pair of activePairs) {
+      const version = pair?.versionId ? parsed.versions?.get(pair.versionId) : null;
+      if (!version) continue;
+      for (const candidate of version.tasks || []) {
+        if (candidate.childTaskGroupId === childTaskGroupId) matches.push({ task: candidate, version });
+      }
+    }
+    return matches.length === 1 ? matches[0] : null;
+  };
+
+  let currentVersionId = task.taskGroupVersionId;
+  while (currentVersionId && !seenVersionIds.has(currentVersionId)) {
+    seenVersionIds.add(currentVersionId);
+    const version = parsed.versions?.get(currentVersionId);
+    if (!version || !hasDecompositionBacklink(version)) break;
+
+    const sourceVersion = parsed.versions?.get(version.decomposedFromTaskGroupVersionId) || null;
+    const sourceTask = parsed.tasks?.get(taskKey(version.decomposedFromTaskGroupVersionId, version.decomposedFromTaskId)) || null;
+    const sourceRunNode = parsed.runNodes?.get(runNodeKey(version.decomposedByRunId, version.decomposedByRunNodeId)) || null;
+    const activeParent = selectedParentForChildGroup(version.taskGroupId);
+
+    chain.push({
+      taskId: version.decomposedFromTaskId,
+      taskGroupId: version.decomposedFromTaskGroupId,
+      taskGroupVersionId: version.decomposedFromTaskGroupVersionId,
+      childTaskGroupId: version.taskGroupId,
+      childTaskGroupVersionId: version.id,
+      decomposedByRunId: version.decomposedByRunId,
+      decomposedByRunNodeId: version.decomposedByRunNodeId,
+      task: sourceTask,
+      version: sourceVersion,
+      runNode: sourceRunNode,
+      activeParent: activeParent
+        ? {
+            taskId: activeParent.task.id,
+            taskGroupId: activeParent.task.taskGroupId,
+            taskGroupVersionId: activeParent.version.id,
+          }
+        : null,
+    });
+
+    currentVersionId = version.decomposedFromTaskGroupVersionId;
+  }
+  return chain;
+}
+
+export function sourceTaskForChainEntry(entry) {
+  return entry?.task && typeof entry.task === 'object' ? entry.task : null;
+}
+
+export function hydrationSourceTaskForChainEntry(parsed, entry) {
+  const birthSource = sourceTaskForChainEntry(entry);
+  const active = entry?.activeParent;
+  if (!active?.taskId || !active?.taskGroupVersionId) {
+    return { task: birthSource, source: 'birth_backlink' };
+  }
+  const activeTask = parsed?.tasks?.get(`${active.taskGroupVersionId}:${active.taskId}`) || null;
+  if (!activeTask) {
+    return {
+      task: birthSource,
+      source: 'birth_backlink',
+      warning: `active selected parent ${active.taskGroupVersionId}:${active.taskId} was not found; using birth backlink source`,
+    };
+  }
+  if (activeTask.id !== entry.taskId || activeTask.childTaskGroupId !== entry.childTaskGroupId) {
+    return {
+      task: birthSource,
+      source: 'birth_backlink',
+      warning: `active selected parent ${activeTask.taskGroupVersionId}:${activeTask.id} does not match backlink parent ${entry.taskGroupVersionId}:${entry.taskId}; using birth backlink source`,
+    };
+  }
+  return {
+    task: activeTask,
+    source: activeTask.taskGroupVersionId === entry.taskGroupVersionId ? 'birth_backlink' : 'active_selected_parent',
+  };
 }
 
 function partialSkip(partial, reason, detail = null, extra = {}) {
@@ -1926,6 +2715,7 @@ function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedP
     eows: preservedEowsForPromotion(sourceVersion, newVersionId),
     logSeedLine: `Partial-driven follow-up promotion supersedes version ${sourceVersion.id}.`,
   };
+  copyDecompositionBacklinkFields(sourceVersion, specPreview);
 
   return {
     taskGroupId: taskGroup.id,
@@ -2363,15 +3153,19 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
   const targetOrder = targetTask.order ?? 0;
   const orderedTasks = [...sourceVersion.tasks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-  const preserveKeys = ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId'];
+  const preserveKeys = ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', ...TASK_UNCERTAINTY_SCALAR_FIELDS, 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId'];
 
   const specTasks = orderedTasks.map((task) => {
     const cloned = { id: task.id, title: task.title, objective: task.objective, responsibility: task.responsibility, completionCriteria: task.completionCriteria, order: task.order };
     for (const key of preserveKeys) {
       if (task[key] !== undefined && task[key] !== null) cloned[key] = task[key];
     }
-    if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
+    if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') cloned.blockedBy = cloneFrontmatterValue(task.blockedBy);
     if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
+    if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
+    if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
+    if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
+    if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) cloned.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
     const order = task.order ?? 0;
     if (task.id === fromTaskId) {
       cloned.status = 'pending';
@@ -2423,6 +3217,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     restartedAt: now,
     logSeedLine: `Restart from task '${fromTaskId}' supersedes version ${sourceVersion.id}.`,
   };
+  copyDecompositionBacklinkFields(sourceVersion, spec);
 
   const newVersionDir = writeVersionFromSpec(projectDir, taskGroup.id, spec, { supersedesVersionId: sourceVersion.id });
 
