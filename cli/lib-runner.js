@@ -905,12 +905,22 @@ function buildExecutionResult({ task, runId, runNodeId, executorResult }) {
     executorResult?.message || `Executor completed task ${task.id}.`,
     { maxLen: 1000, fallback: `Executor completed task ${task.id}.` },
   );
+  const artifactRefs = [];
+  const evidenceRefs = [`run:${runId}/node:${runNodeId}`];
+  for (const ref of [executorResult?.artifactPath, executorResult?.workspacePath]) {
+    if (!ref || artifactRefs.includes(ref)) continue;
+    artifactRefs.push(ref);
+  }
+  if (executorResult?.workspacePath && !evidenceRefs.includes(executorResult.workspacePath)) {
+    evidenceRefs.push(executorResult.workspacePath);
+  }
   return {
     executorSummary: summary,
+    ...(executorResult?.workspacePath ? { executionWorkspacePath: executorResult.workspacePath } : {}),
     observed: {
       outcomeSummary: summary,
-      artifactRefs: executorResult?.artifactPath ? [executorResult.artifactPath] : [],
-      evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+      artifactRefs,
+      evidenceRefs,
       checkResults: [],
     },
   };
@@ -1530,11 +1540,14 @@ function surpriseReportPromptLines({ artifactRequired = false } = {}) {
   ];
 }
 
-export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null }) {
+export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null }) {
+  const projectDirForPrompt = projectDir ? resolve(projectDir) : null;
+  const artifactWorkspaceForPrompt = artifactWorkspacePath ? resolve(artifactWorkspacePath) : null;
   return promptWithBudget([
     'You are a TaskOps worker agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
+    ...(projectDirForPrompt ? [`TaskOps work directory: ${projectDirForPrompt}`] : []),
     '',
     `Task: ${task.id} — ${task.title}`,
     `Task objective: ${task.objective || ''}`,
@@ -1545,6 +1558,11 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     '',
     'Execute this single TaskOps task. Do not recursively invoke `taskops run`.',
     'Do not invoke TaskOps graph/queue control commands such as `taskops run`, `taskops runner`, `taskops queue claim`, `taskops queue release`, `taskops restart`, or `taskops close`; the parent TaskOps runner owns graph mutation, queue leases, and EoW closure.',
+    ...(artifactWorkspaceForPrompt ? [
+      `Task artifact workspace: ${artifactWorkspaceForPrompt}`,
+      'Write any files, code, test fixtures, or other task artifacts under the task artifact workspace only, unless the task explicitly names a different absolute target path.',
+      'The runner invokes you with the task artifact workspace as cwd. Relative paths for new files must stay inside that workspace.',
+    ] : []),
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
@@ -1647,24 +1665,26 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null }) {
+function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
       message: `dry-run executor synthetically completed task ${task.id}`,
       executor: 'dry-run',
+      ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}),
     };
   }
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
-    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext });
+    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath });
     const result = invokeRuntimeAdapter(adapter, {
       prompt,
       agentId,
       sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'execute' }),
       timeoutMs: stepTimeoutMs,
+      ...(artifactWorkspacePath ? { cwd: artifactWorkspacePath } : {}),
     });
-    return { ...result, executor, message: result.message || `${adapter} completed task ${task.id}` };
+    return { ...result, executor, message: result.message || `${adapter} completed task ${task.id}`, ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}) };
   }
   return { ok: false, message: `Unknown executor '${executor}'`, executor };
 }
@@ -1723,6 +1743,7 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: delegate.sourceTaskId || delegate.id, action: 'loopback' }),
     timeoutMs: stepTimeoutMs,
+    cwd: artifactsDir,
   });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
@@ -2165,6 +2186,8 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
+  const artifactWorkspacePath = join(runDir, 'artifacts', runNodeId, 'workspace');
+  ensureDir(artifactWorkspacePath);
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
     type: 'implementation',
@@ -2189,9 +2212,9 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
+    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath });
   } catch (err) {
-    result = { ok: false, message: err instanceof Error ? err.message : String(err), executor };
+    result = { ok: false, message: err instanceof Error ? err.message : String(err), executor, workspacePath: artifactWorkspacePath };
   }
 
   const finishedAt = isoNow();
@@ -2262,6 +2285,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         executor,
         message: result.message || null,
         budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
         partialCompletion,
       };
     }
@@ -2304,6 +2328,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         executor,
         message: reason,
         budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
         malformedPartialRequest: {
           markerFound: true,
           parseError: partialRequest.parseError,
@@ -2351,6 +2376,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         executor,
         message: reason,
         budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
         malformedSurpriseReport: {
           markerFound: true,
           parseError: surpriseReport.parseError,
@@ -2396,7 +2422,18 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         decision: review.reviewReport.decision,
       });
       appendRunLog(runDir, `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`);
-      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'failed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget };
+      return {
+        taskId: task.id,
+        runNodeId,
+        reviewNodeId: review.reviewNodeId,
+        kind: 'execute',
+        status: 'failed',
+        executor,
+        message: result.message || null,
+        reviewDecision: review.reviewReport.decision,
+        budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+      };
     }
     const approvedReview = review.approvedReview;
     const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
@@ -2411,7 +2448,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       message: result.message || null,
     });
     appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
-    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget };
+    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
   }
 
   rewriteFrontmatter(task.path, (fm) => {
@@ -2431,6 +2468,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     message: result.message || null, adapterStatus: result.status || null,
     stdout: result.stdout || '', stderr: result.stderr || '',
     budget,
+    executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
   };
 }
 
@@ -2568,6 +2606,7 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
     timeoutMs: stepTimeoutMs,
+    cwd: projectDir,
   });
   if (!result.ok) return { ...result, ok: false, message: result.message };
   if (!existsSync(versionIndex)) {
@@ -3282,6 +3321,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'explore' }),
     timeoutMs: stepTimeoutMs,
+    cwd: artifactsDir,
   });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
