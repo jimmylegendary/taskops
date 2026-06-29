@@ -692,6 +692,32 @@ export function discoverProjects(inputPath) {
   return projects;
 }
 
+function normalizeBlockedByRefs(value) {
+  if (value == null || value === '') return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function hasManualBlockerMarker(task) {
+  return Boolean(
+    task.needsManualReview === true
+    || task.manualReviewReason
+    || task.awaitingPromotion === true
+    || task.awaitingPromotionPartialId
+    || task.repeatedPartialNeedsReview === true
+    || task.lastRunFailureReason
+    || task.malformedPartialRequest === true
+    || task.malformedSurpriseReport === true
+  );
+}
+
+function hasBlockedTaskEvidence(task) {
+  return normalizeBlockedByRefs(task.blockedBy).length > 0 || hasManualBlockerMarker(task);
+}
+
+function blockedTaskEvidenceWarning(task) {
+  return `blocked task '${task.id}' has status/runReadiness blocked but no blockedBy or explicit manual/external blocker marker`;
+}
+
 export function parseProject(projectDir) {
   const errors = [];
   const warnings = [];
@@ -765,6 +791,9 @@ export function parseProject(projectDir) {
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
         validateTaskUncertaintyFields(task, taskPath, errors, t);
         validateTaskInheritedFromFields(task, taskPath, errors, t);
+        if ((task.status === 'blocked' || task.runReadiness === 'blocked') && !hasBlockedTaskEvidence(task)) {
+          warnings.push(withPath(taskPath, blockedTaskEvidenceWarning(task)));
+        }
         if (task.acceptance != null) {
           if (!task.acceptance || typeof task.acceptance !== 'object' || Array.isArray(task.acceptance)) {
             warnings.push(withPath(taskPath, 'acceptance should be an object with expectedOutcome, requiredArtifacts, and requiredChecks'));
@@ -1057,7 +1086,27 @@ export function parseProject(projectDir) {
   const partialTaskCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'task' && partial.attachedToType === 'task').length;
   const partialRunCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'run' && partial.attachedToType === 'runNode').length;
   const partialCount = partialTaskCount + partialRunCount;
-  const openBlockerCount = [...tasks.values()].filter((task) => task.status === 'blocked').length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
+  const taskBlockerResolved = (ref) => {
+    if (!ref || typeof ref !== 'object') return false;
+    switch (ref.type) {
+      case 'task': {
+        const id = ref.id || ref.taskId;
+        const matches = [...tasks.values()].filter((task) => task.id === id && (!ref.taskGroupVersionId || task.taskGroupVersionId === ref.taskGroupVersionId));
+        return matches.length > 0 && matches.every((task) => ['done', 'cancelled'].includes(task.status));
+      }
+      case 'runNode': {
+        const id = ref.id || ref.runNodeId;
+        const node = runNodes.get(runNodeKey(ref.runId, id));
+        return Boolean(node && ['done', 'cancelled'].includes(node.status));
+      }
+      default:
+        return false;
+    }
+  };
+  const taskHasUnresolvedBlocker = (task) => normalizeBlockedByRefs(task.blockedBy).some((ref) => !taskBlockerResolved(ref));
+  const taskIsOpenBlocked = (task) => !['done', 'cancelled'].includes(task.status)
+    && (task.status === 'blocked' || task.runReadiness === 'blocked' || taskHasUnresolvedBlocker(task));
+  const openBlockerCount = [...tasks.values()].filter(taskIsOpenBlocked).length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
   const structuralComplete = terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0;
   const policyApprovedComplete = structuralComplete
     && terminalTaskCount === policyApprovedTerminalTaskEowCount
@@ -2130,7 +2179,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     for (const key of ['role', 'purpose', 'runReadiness', 'runReadinessReason', 'unblockRunReadiness', 'understandingLevel', ...TASK_UNCERTAINTY_SCALAR_FIELDS, 'decompositionConfidence', 'executionConfidence', 'explorationNeeded', 'nextLearningGoal', 'childTaskGroupId', 'preservedUpstream', 'preservedFromVersionId', 'preservedFromTaskId', 'restartedFromVersionId', 'restartedFromTaskId', 'restartInstruction', 'restartReason', 'restartedAt', 'followUpFromPartialId', 'followUpForTaskId', 'followUpForTaskGroupVersionId', 'followUpDepth', 'sourceRunId', 'sourceRunNodeId', 'followUpCompletedSummary', 'followUpIncompleteSummary', 'needsManualReview', 'manualReviewReason', 'repeatedPartialNeedsReview', 'repeatedPartialCount', 'partialRepeatThreshold']) {
       if (task[key] !== undefined && task[key] !== null && task[key] !== '') fm[key] = task[key];
     }
-    if (Array.isArray(task.blockedBy)) fm.blockedBy = task.blockedBy;
+    if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') fm.blockedBy = cloneFrontmatterValue(task.blockedBy);
     if (Array.isArray(task.unknowns)) fm.unknowns = task.unknowns;
     if (Array.isArray(task.knownList)) fm.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) fm.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
@@ -2263,7 +2312,7 @@ function cloneTaskForPromotion(task) {
   for (const key of preserveKeys) {
     if (task[key] !== undefined && task[key] !== null && task[key] !== '') cloned[key] = task[key];
   }
-  if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
+  if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') cloned.blockedBy = cloneFrontmatterValue(task.blockedBy);
   if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
   if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
   if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
@@ -3111,7 +3160,7 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     for (const key of preserveKeys) {
       if (task[key] !== undefined && task[key] !== null) cloned[key] = task[key];
     }
-    if (Array.isArray(task.blockedBy)) cloned.blockedBy = [...task.blockedBy];
+    if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') cloned.blockedBy = cloneFrontmatterValue(task.blockedBy);
     if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
     if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);

@@ -1167,6 +1167,84 @@ function normalizeBlockedBy(task) {
   return Array.isArray(task.blockedBy) ? task.blockedBy : [task.blockedBy];
 }
 
+function hasManualBlockerMarker(task) {
+  return Boolean(
+    task?.needsManualReview === true
+    || task?.manualReviewReason
+    || task?.awaitingPromotion === true
+    || task?.awaitingPromotionPartialId
+    || task?.repeatedPartialNeedsReview === true
+    || task?.lastRunFailureReason
+    || task?.malformedPartialRequest === true
+    || task?.malformedSurpriseReport === true
+  );
+}
+
+function blockedTaskMissingEvidence(task) {
+  const isBlocked = task?.status === 'blocked' || task?.runReadiness === 'blocked';
+  return Boolean(isBlocked && normalizeBlockedBy(task).length === 0 && !hasManualBlockerMarker(task));
+}
+
+function blockedEvidenceIssueForTask(task) {
+  return {
+    taskId: task.id,
+    taskGroupVersionId: task.taskGroupVersionId,
+    path: task.path,
+    status: task.status || null,
+    runReadiness: task.runReadiness || null,
+    runReadinessReason: task.runReadinessReason || null,
+    reason: 'blocked_task_missing_machine_readable_blocker',
+    message: `Task ${task.taskGroupVersionId}:${task.id} is blocked but has no blockedBy or explicit manual/external blocker marker.`,
+  };
+}
+
+function blockedEvidenceIssues(parsed) {
+  return [...parsed.tasks.values()]
+    .filter((task) => !['done', 'cancelled'].includes(task.status))
+    .filter(blockedTaskMissingEvidence)
+    .map(blockedEvidenceIssueForTask);
+}
+
+function blockerEvaluationForTask(parsed, task) {
+  const blockers = normalizeBlockedBy(task);
+  if (blockers.length === 0) {
+    return {
+      hasBlockers: false,
+      allResolved: true,
+      unresolved: false,
+      blockers: [],
+    };
+  }
+  const results = blockers.map((ref) => ({ ref, key: blockerKey(ref), ...resolveBlocker(parsed, ref) }));
+  const allResolved = results.every((result) => result.resolved);
+  return {
+    hasBlockers: true,
+    allResolved,
+    unresolved: !allResolved,
+    blockers: results,
+  };
+}
+
+function applyBlockerGate(parsed, task, classification) {
+  const blockerEvaluation = blockerEvaluationForTask(parsed, task);
+  if (!blockerEvaluation.hasBlockers || blockerEvaluation.allResolved) {
+    return { ...classification, blockerEvaluation };
+  }
+  const unresolved = blockerEvaluation.blockers
+    .filter((result) => !result.resolved)
+    .map((result) => result.key)
+    .join(', ');
+  return {
+    ...classification,
+    runReadiness: 'blocked',
+    originalRunReadiness: classification.runReadiness,
+    source: 'blocked_by_gate',
+    reason: `Task has unresolved blockedBy reference(s): ${unresolved || 'unknown blocker'}.`,
+    nextAction: 'resolve_blocker',
+    blockerEvaluation,
+  };
+}
+
 export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTarget = false, runId = null } = {}) {
   const workRoot = resolve(workDir);
   const projects = discoverProjects(workRoot);
@@ -1189,8 +1267,8 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
   const now = isoNow();
 
   for (const task of parsed.tasks.values()) {
+    if (['done', 'cancelled'].includes(task.status)) continue;
     const isBlocked = task.status === 'blocked' || task.runReadiness === 'blocked';
-    if (!isBlocked) continue;
     if (task.awaitingPromotion === true || task.awaitingPromotionPartialId) {
       const item = {
         taskId: task.id,
@@ -1206,7 +1284,35 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
       continue;
     }
     const blockers = normalizeBlockedBy(task);
-    if (blockers.length === 0) continue;
+    if (!isBlocked && blockers.length === 0) continue;
+    if (blockers.length === 0) {
+      if (hasManualBlockerMarker(task)) {
+        const item = {
+          taskId: task.id,
+          taskGroupVersionId: task.taskGroupVersionId,
+          path: task.path,
+          allResolved: false,
+          manualBlockerMarker: true,
+          blockers: [],
+          detail: 'blocked task uses an explicit manual/external blocker marker',
+        };
+        checked.push(item);
+        stillBlocked.push(item);
+        continue;
+      }
+      const item = {
+        taskId: task.id,
+        taskGroupVersionId: task.taskGroupVersionId,
+        path: task.path,
+        allResolved: false,
+        missingBlockerEvidence: true,
+        blockers: [],
+        detail: 'blocked task has no blockedBy or explicit manual/external blocker marker',
+      };
+      checked.push(item);
+      stillBlocked.push(item);
+      continue;
+    }
     const results = blockers.map((ref) => ({ ref, key: blockerKey(ref), ...resolveBlocker(parsed, ref) }));
     const allResolved = results.every((result) => result.resolved);
     const item = { taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, path: task.path, allResolved, blockers: results };
@@ -1215,6 +1321,7 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
       stillBlocked.push(item);
       continue;
     }
+    if (!isBlocked) continue;
     unblocked.push(item);
     if (dryRun) continue;
     rewriteFrontmatter(task.path, (fm) => {
@@ -1303,7 +1410,7 @@ export function pickNextAction(parsed, target = {}) {
         source: { type: 'task', id: task.id },
       };
     }
-    const classification = classifyTaskReadiness(task);
+    const classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (classification.runReadiness === 'blocked') {
       return {
         kind: 'stop',
@@ -1342,7 +1449,7 @@ export function pickNextAction(parsed, target = {}) {
       default:
         break;
     }
-    const classification = classifyTaskReadiness(task);
+    const classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (classification.runReadiness === 'blocked') continue;
     onlyBlockedSeen = false;
     const action = ACTION_BY_READINESS[classification.runReadiness];
@@ -1518,11 +1625,22 @@ function childTaskExpectedPlanPromptLines() {
   ];
 }
 
-function childTaskBlockedByPromptLines(versionId) {
+function childTaskBlockedByPromptLines(versionId, blockerCatalog = []) {
+  const catalogLines = Array.isArray(blockerCatalog) && blockerCatalog.length
+    ? [
+      'Available blocker refs from the active snapshot:',
+      ...blockerCatalog.map((item) => `- { type: 'task', id: '${item.id}', taskGroupVersionId: '${item.taskGroupVersionId}' } status=${item.status || 'unknown'} readiness=${item.runReadiness || 'unknown'} terminal=${item.terminal === true ? 'yes' : 'no'} decomposed=${item.decomposed === true ? 'yes' : 'no'}`),
+      'If a child depends on implementation output from another active branch, reference the exact terminal descendant task from this catalog. A decomposed parent is not implementation-complete evidence by itself.',
+    ]
+    : [
+      'If a child depends on another active branch, use the exact task id and taskGroupVersionId from the active snapshot when available. Do not replace machine-readable blockedBy with prose.',
+      'A decomposed parent is not implementation-complete evidence by itself; implementation dependencies should point at the terminal descendant that produces the evidence.',
+    ];
   return [
     'When a child task is blocked by another task, use blockedBy as a list of structured refs, not strings:',
     `- sibling task blocker: { type: 'task', id: '<task-id>', taskGroupVersionId: '${versionId}' }`,
     "- run-node blocker, only when truly needed: { type: 'runNode', runId: '<run-id>', runNodeId: '<run-node-id>' }",
+    ...catalogLines,
   ];
 }
 
@@ -1569,7 +1687,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
   ], budget, { actionKind: 'execute', allowPartialRequest: true });
 }
 
-export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null }) {
+export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null, blockerCatalog = [] }) {
   if (!projectDir) throw new Error('Missing projectDir for decomposition prompt');
   const workDirForPrompt = resolve(projectDir);
   return promptWithBudget([
@@ -1591,7 +1709,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     'Each new child task must include taskOpsVersion, entityType=task, id, taskGroupId, taskGroupVersionId, title, objective, responsibility, completionCriteria, order, createdAt, status, plus an explicit runReadiness.',
     ...childTaskUncertaintySchemaPromptLines(),
     ...childTaskExpectedPlanPromptLines(),
-    ...childTaskBlockedByPromptLines(versionId),
+    ...childTaskBlockedByPromptLines(versionId, blockerCatalog),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
   ], budget, { actionKind: 'decompose' });
@@ -2584,6 +2702,8 @@ function performDryRunDecomposition({ projectDir, task }) {
     order: 1, createdAt: now, status: 'pending',
     runReadiness: 'blocked',
     runReadinessReason: 'Synthetic dry-run placeholder. A human must supply real inputs before this becomes runnable.',
+    needsManualReview: true,
+    manualReviewReason: 'Synthetic dry-run placeholder requires human-supplied real inputs.',
     understandingLevel: 'unknown',
   };
   writeTextFileAtomic(
@@ -2593,13 +2713,53 @@ function performDryRunDecomposition({ projectDir, task }) {
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
 
+function activeBlockerCatalogForPrompt(projectDir, sourceTask) {
+  let parsed;
+  try {
+    parsed = parseProject(projectDir);
+  } catch {
+    return [];
+  }
+  const activeSnapshot = parsed.project.activeSnapshotId ? parsed.snapshots.get(parsed.project.activeSnapshotId) : null;
+  const selectedVersions = Array.isArray(activeSnapshot?.selectedVersions) ? activeSnapshot.selectedVersions : [];
+  const selectedTaskGroupIds = new Set(selectedVersions.map((pair) => pair?.taskGroupId).filter(Boolean));
+  const items = [];
+  for (const pair of selectedVersions) {
+    if (!pair?.versionId) continue;
+    const version = parsed.versions.get(pair.versionId);
+    if (!version) continue;
+    for (const candidate of version.tasks) {
+      if (candidate.id === sourceTask.id && candidate.taskGroupVersionId === sourceTask.taskGroupVersionId) continue;
+      const classification = applyBlockerGate(parsed, candidate, classifyTaskReadiness(candidate));
+      items.push({
+        id: candidate.id,
+        taskGroupVersionId: candidate.taskGroupVersionId,
+        status: candidate.status || null,
+        runReadiness: classification.runReadiness || candidate.runReadiness || null,
+        terminal: !(candidate.childTaskGroupId && selectedTaskGroupIds.has(candidate.childTaskGroupId)),
+        decomposed: Boolean(candidate.childTaskGroupId && selectedTaskGroupIds.has(candidate.childTaskGroupId)),
+      });
+    }
+  }
+  return items.slice(0, 30);
+}
+
 function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null }) {
   const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
   const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
-  const prompt = buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget, inheritedContext });
+  const prompt = buildAgentDecompositionPrompt({
+    project,
+    projectDir,
+    task,
+    childTaskGroupId,
+    versionId,
+    budget,
+    inheritedContext,
+    blockerCatalog: activeBlockerCatalogForPrompt(projectDir, task),
+  });
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   const result = invokeRuntimeAdapter(adapter, {
     prompt,
@@ -2753,7 +2913,7 @@ function unresolvedBlockedByMarker({ rawRef, reason, versionId, index }) {
   };
 }
 
-function normalizeChildBlockedByRef(ref, { taskIds, versionId, index }) {
+function normalizeChildBlockedByRef(ref, { taskIds, allTaskKeys, allTasksById, runNodeKeys, versionId, index }) {
   if (typeof ref === 'string') {
     const id = ref.trim();
     if (id && taskIds.has(id)) {
@@ -2790,8 +2950,18 @@ function normalizeChildBlockedByRef(ref, { taskIds, versionId, index }) {
 
   if (ref.type === 'task') {
     const id = compactString(ref.id || ref.taskId);
-    if (!id) return { ref, changed: false };
-    if ((!ref.taskGroupVersionId || ref.taskGroupVersionId === versionId) && taskIds.has(id)) {
+    if (!id) {
+      const reason = `blockedBy task ref at index ${index + 1} is missing id`;
+      return {
+        ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref), reason, versionId, index }),
+        changed: true,
+        unresolved: true,
+        originalRef: ref,
+        reason,
+      };
+    }
+    const targetVersionId = compactString(ref.taskGroupVersionId);
+    if ((!targetVersionId || targetVersionId === versionId) && taskIds.has(id)) {
       const canonical = { type: 'task', id, taskGroupVersionId: versionId };
       if (
         ref.id === canonical.id
@@ -2809,15 +2979,67 @@ function normalizeChildBlockedByRef(ref, { taskIds, versionId, index }) {
         reason: ref.taskGroupVersionId ? 'canonical_task_ref' : 'defaulted_child_task_group_version',
       };
     }
+    if (targetVersionId && allTaskKeys.has(`${targetVersionId}:${id}`)) {
+      const canonical = { type: 'task', id, taskGroupVersionId: targetVersionId };
+      if (ref.id === canonical.id && ref.taskGroupVersionId === canonical.taskGroupVersionId && ref.type === canonical.type && ref.taskId == null) {
+        return { ref, changed: false };
+      }
+      return {
+        ref: canonical,
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: 'canonical_cross_branch_task_ref',
+      };
+    }
+    if (!targetVersionId) {
+      const matches = allTasksById.get(id) || [];
+      if (matches.length === 1) {
+        const canonical = { type: 'task', id, taskGroupVersionId: matches[0].taskGroupVersionId };
+        return {
+          ref: canonical,
+          changed: true,
+          normalized: true,
+          originalRef: ref,
+          reason: 'defaulted_unique_task_group_version',
+        };
+      }
+    }
+    const reason = targetVersionId
+      ? `blockedBy task ref '${targetVersionId}:${id}' does not match any task`
+      : `blockedBy task ref '${id}' is ambiguous or not found; include taskGroupVersionId`;
+    return {
+      ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref), reason, versionId, index }),
+      changed: true,
+      unresolved: true,
+      originalRef: ref,
+      reason,
+    };
   }
 
-  if (ref.type === 'runNode' && ref.id && !ref.runNodeId) {
+  if (ref.type === 'runNode') {
+    const runId = compactString(ref.runId);
+    const runNodeId = compactString(ref.runNodeId || ref.id);
+    if (runId && runNodeId && runNodeKeys.has(`${runId}:${runNodeId}`)) {
+      const canonical = { type: 'runNode', runId, runNodeId };
+      if (ref.type === canonical.type && ref.runId === canonical.runId && ref.runNodeId === canonical.runNodeId && ref.id == null) {
+        return { ref, changed: false };
+      }
+      return {
+        ref: canonical,
+        changed: true,
+        normalized: true,
+        originalRef: ref,
+        reason: 'canonical_run_node_ref',
+      };
+    }
+    const reason = `blockedBy runNode ref at index ${index + 1} does not match any run node`;
     return {
-      ref: { ...ref, runNodeId: ref.id },
+      ref: unresolvedBlockedByMarker({ rawRef: JSON.stringify(ref), reason, versionId, index }),
       changed: true,
-      normalized: true,
+      unresolved: true,
       originalRef: ref,
-      reason: 'canonical_run_node_ref',
+      reason,
     };
   }
 
@@ -2829,6 +3051,14 @@ function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versi
   const taskPaths = listChildTaskPaths(versionDir);
   const childTasks = taskPaths.map((taskPath) => ({ taskPath, task: parseMarkdownFile(taskPath) }));
   const taskIds = new Set(childTasks.map(({ task }) => task.id).filter(Boolean));
+  const parsed = parseProject(projectDir);
+  const allTaskKeys = new Set([...parsed.tasks.values()].map((task) => `${task.taskGroupVersionId}:${task.id}`));
+  const allTasksById = new Map();
+  for (const task of parsed.tasks.values()) {
+    if (!allTasksById.has(task.id)) allTasksById.set(task.id, []);
+    allTasksById.get(task.id).push(task);
+  }
+  const runNodeKeys = new Set(parsed.runNodes.keys());
   const summary = {
     taskCount: childTasks.length,
     checkedTaskCount: 0,
@@ -2844,7 +3074,7 @@ function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versi
     const originalRefs = Array.isArray(childTask.blockedBy) ? childTask.blockedBy : [childTask.blockedBy];
     let changed = false;
     const nextRefs = originalRefs.map((ref, index) => {
-      const normalized = normalizeChildBlockedByRef(ref, { taskIds, versionId, index });
+      const normalized = normalizeChildBlockedByRef(ref, { taskIds, allTaskKeys, allTasksById, runNodeKeys, versionId, index });
       if (!normalized.changed) return normalized.ref;
       changed = true;
       if (normalized.normalized) {
@@ -2931,6 +3161,8 @@ function deferCommittingScopeChildrenForChildVersion({ projectDir, childTaskGrou
       fm.status = 'blocked';
       fm.runReadiness = 'blocked';
       fm.runReadinessReason = reason;
+      fm.needsManualReview = true;
+      fm.manualReviewReason = reason;
       return fm;
     });
   }
@@ -3576,7 +3808,7 @@ function countOpenTasksByReadiness(parsed) {
       counts.waiting += 1;
       continue;
     }
-    const c = classifyTaskReadiness(task);
+    const c = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (counts[c.runReadiness] != null) counts[c.runReadiness] += 1;
   }
   return counts;
@@ -4032,6 +4264,7 @@ export function runTaskOps(workDir, options = {}) {
     let stopSource = null;
     let finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
     const actions = [];
+    const reportedBlockedEvidenceIssues = new Set();
 
     while (true) {
       finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
@@ -4050,6 +4283,26 @@ export function runTaskOps(workDir, options = {}) {
         stopReason = STOP_REASONS.VALIDATION_FAILED;
         logEvent(eventsPath, { timestamp: isoNow(), type: 'validation_failed', runId, errors: validationErrors });
         break;
+      }
+      const missingBlockerIssues = blockedEvidenceIssues(parsed)
+        .filter((issue) => {
+          const key = `${issue.taskGroupVersionId}:${issue.taskId}`;
+          if (reportedBlockedEvidenceIssues.has(key)) return false;
+          reportedBlockedEvidenceIssues.add(key);
+          return true;
+        });
+      if (missingBlockerIssues.length > 0) {
+        logEvent(eventsPath, {
+          timestamp: isoNow(),
+          type: 'blockedby_missing_for_blocked_task',
+          runId,
+          issues: missingBlockerIssues,
+          summary: {
+            count: missingBlockerIssues.length,
+            reason: 'blocked_task_missing_machine_readable_blocker',
+          },
+        });
+        appendRunLog(runDir, `${isoNow()} blockedby_missing_for_blocked_task count=${missingBlockerIssues.length}`);
       }
 
       const next = pickNextAction(parsed, {
