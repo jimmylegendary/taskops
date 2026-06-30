@@ -7,7 +7,12 @@ import {
   discoverProjects,
   parseProject,
 } from './lib-taskops.js';
-import { writeLeaseHeartbeatRow, writeProgressReportRow } from './lib-queue-writer.js';
+import {
+  queueItemStaleMarkerSql,
+  queueItemUpsertSql,
+  writeLeaseHeartbeatRow,
+  writeProgressReportRow,
+} from './lib-queue-writer.js';
 
 export const QUEUE_DB_RELATIVE_PATH = join('.taskops', 'queue.sqlite');
 
@@ -315,40 +320,8 @@ export function syncQueueProjection(workDir) {
   const now = isoNow();
   const rows = selectedTasks(parsed).map((task) => queueRowFromTask(projectDir, parsed, task, now));
 
-  const upsert = db.prepare(`
-    INSERT INTO queue_items (
-      id, work_root, task_id, run_id, readiness, status, priority, blocked_reason,
-      md_fingerprint, created_at, updated_at
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    )
-    ON CONFLICT(id) DO UPDATE SET
-      work_root = excluded.work_root,
-      task_id = excluded.task_id,
-      run_id = excluded.run_id,
-      readiness = excluded.readiness,
-      status = excluded.status,
-      priority = excluded.priority,
-      blocked_reason = excluded.blocked_reason,
-      md_fingerprint = excluded.md_fingerprint,
-      updated_at = excluded.updated_at
-  `);
-  const markMissing = rows.length > 0
-    ? db.prepare(`
-        UPDATE queue_items
-        SET status = 'stale_projection',
-            readiness = 'blocked',
-            blocked_reason = 'No longer present in the selected TaskOps projection.',
-            updated_at = ?
-        WHERE id NOT IN (${rows.map(() => '?').join(',')})
-      `)
-    : db.prepare(`
-        UPDATE queue_items
-        SET status = 'stale_projection',
-            readiness = 'blocked',
-            blocked_reason = 'No longer present in the selected TaskOps projection.',
-            updated_at = ?
-      `);
+  const upsert = db.prepare(queueItemUpsertSql());
+  const markMissing = db.prepare(queueItemStaleMarkerSql(rows.length));
 
   db.exec('BEGIN IMMEDIATE');
   try {
