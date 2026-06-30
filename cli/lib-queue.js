@@ -7,7 +7,7 @@ import {
   discoverProjects,
   parseProject,
 } from './lib-taskops.js';
-import { writeProgressReportRow } from './lib-queue-writer.js';
+import { writeLeaseHeartbeatRow, writeProgressReportRow } from './lib-queue-writer.js';
 
 export const QUEUE_DB_RELATIVE_PATH = join('.taskops', 'queue.sqlite');
 
@@ -593,11 +593,12 @@ export function heartbeatLease(workDir, leaseId, { ttlSeconds = 300 } = {}) {
     const current = readLease(db, leaseId);
     if (!current) throw new Error(`Lease not found: ${leaseId}`);
     if (current.status !== 'active') throw new Error(`Lease is not active: ${leaseId} (${current.status})`);
-    db.prepare(`
-      UPDATE leases
-      SET heartbeat_at = ?, expires_at = ?
-      WHERE id = ?
-    `).run(now, isoPlusSeconds(now, ttl), leaseId);
+    writeLeaseHeartbeatRow({
+      db,
+      leaseId,
+      heartbeatAt: now,
+      expiresAt: isoPlusSeconds(now, ttl),
+    }, queueWriterIo);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

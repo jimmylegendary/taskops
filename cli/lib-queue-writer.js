@@ -29,3 +29,13 @@ export function writeProgressReportRow({ db, row }, io) {
   ]);
   return row;
 }
+
+export function writeLeaseHeartbeatRow({ db, leaseId, heartbeatAt, expiresAt }, io) {
+  if (!io || typeof io !== 'object') throw new Error('Missing queue writer I/O adapter');
+  const runPreparedStatement = requireFn(io, 'runPreparedStatement');
+  runPreparedStatement(db, `
+      UPDATE leases
+      SET heartbeat_at = ?, expires_at = ?
+      WHERE id = ?
+    `, [heartbeatAt, expiresAt, leaseId]);
+}
