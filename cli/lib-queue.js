@@ -7,8 +7,15 @@ import {
   discoverProjects,
   parseProject,
 } from './lib-taskops.js';
+import { writeProgressReportRow } from './lib-queue-writer.js';
 
 export const QUEUE_DB_RELATIVE_PATH = join('.taskops', 'queue.sqlite');
+
+const queueWriterIo = {
+  runPreparedStatement(db, sql, params) {
+    db.prepare(sql).run(...params);
+  },
+};
 
 function isoNow() {
   return new Date().toISOString();
@@ -738,26 +745,7 @@ export function insertProgressReport(workDir, report) {
     delivered_at: report.deliveredAt || (report.status === 'failed' ? null : now),
     error_summary: report.errorSummary || null,
   };
-  db.prepare(`
-    INSERT INTO progress_reports (
-      id, work_root, work_id, queue_item_id, task_id, wave_id,
-      master_session_key, report_sink, status, message, created_at, delivered_at, error_summary
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id,
-    row.work_root,
-    row.work_id,
-    row.queue_item_id,
-    row.task_id,
-    row.wave_id,
-    row.master_session_key,
-    row.report_sink,
-    row.status,
-    row.message,
-    row.created_at,
-    row.delivered_at,
-    row.error_summary,
-  );
+  writeProgressReportRow({ db, row }, queueWriterIo);
   db.close();
   return { projectDir, workId: parsed.project.id, dbPath, report: row };
 }
