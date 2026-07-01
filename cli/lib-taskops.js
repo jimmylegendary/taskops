@@ -146,6 +146,8 @@ const LOCALIZED_TEXT = {
       decompositionBacklinkParentMismatch: (taskId, expected, actual) => `decomposition backlink parent task '${taskId}' points to childTaskGroupId '${actual || ''}', expected '${expected}'`,
       decompositionBacklinkRunNodeNotFound: (runId, nodeId) => `decomposition backlink run node '${runId}/${nodeId}' not found`,
       decompositionBacklinkRunNodeMismatch: (runId, nodeId, taskId, versionId) => `decomposition backlink run node '${runId}/${nodeId}' does not point to source task '${taskId}' in version '${versionId}'`,
+      eowResolverTaskGroupNotFound: (eowId, taskGroupId) => `EoW '${eowId}' resolvedByTaskGroupId '${taskGroupId}' not found`,
+      eowResolverBacklinkMismatch: (eowId, taskGroupId, expected, actual) => `EoW '${eowId}' resolvedByTaskGroupId '${taskGroupId}' should trace to run node '${expected}', found decomposition backlink '${actual}'`,
       selectedChildParentNotFound: (id) => `selected child task group '${id}' has no selected parent task`,
       selectedChildParentAmbiguous: (id) => `selected child task group '${id}' has multiple selected parent tasks`,
       selectedChildParentVersionDiffers: (id, selectedVersionId, sourceVersionId) => `selected child task group '${id}' parent is selected from version '${selectedVersionId}', while decomposition source version is '${sourceVersionId}'`,
@@ -226,6 +228,8 @@ const LOCALIZED_TEXT = {
       decompositionBacklinkParentMismatch: (taskId, expected, actual) => `decomposition backlink parent task '${taskId}'의 childTaskGroupId '${actual || ''}'가 기대 '${expected}'와 다름`,
       decompositionBacklinkRunNodeNotFound: (runId, nodeId) => `decomposition backlink run node '${runId}/${nodeId}'를 찾지 못함`,
       decompositionBacklinkRunNodeMismatch: (runId, nodeId, taskId, versionId) => `decomposition backlink run node '${runId}/${nodeId}'가 source task '${taskId}' version '${versionId}'를 가리키지 않음`,
+      eowResolverTaskGroupNotFound: (eowId, taskGroupId) => `EoW '${eowId}'의 resolvedByTaskGroupId '${taskGroupId}'를 찾지 못함`,
+      eowResolverBacklinkMismatch: (eowId, taskGroupId, expected, actual) => `EoW '${eowId}'의 resolvedByTaskGroupId '${taskGroupId}'는 run node '${expected}'로 trace되어야 하지만 decomposition backlink는 '${actual}'임`,
       selectedChildParentNotFound: (id) => `selected child task group '${id}'의 selected parent task가 없음`,
       selectedChildParentAmbiguous: (id) => `selected child task group '${id}'의 selected parent task가 여러 개임`,
       selectedChildParentVersionDiffers: (id, selectedVersionId, sourceVersionId) => `selected child task group '${id}' parent는 version '${selectedVersionId}'에서 선택됐지만 decomposition source version은 '${sourceVersionId}'임`,
@@ -523,6 +527,51 @@ function validateDecompositionBacklink({ version, versions, tasks, runNodes, act
       ));
     }
   }
+}
+
+function eowResolverRunNodeRefs({ eow, tasks, taskKey }) {
+  if (eow.graphType === 'run' && eow.attachedToType === 'runNode' && eow.runId && eow.attachedToId) {
+    return [{ runId: eow.runId, runNodeId: eow.attachedToId }];
+  }
+  if (eow.graphType === 'task' && eow.attachedToType === 'task') {
+    const task = tasks.get(taskKey(eow.taskGroupVersionId, eow.attachedToId));
+    const refs = Array.isArray(task?.runRefs) ? task.runRefs : [];
+    return refs
+      .filter((ref) => ref && ref.runId && ref.runNodeId)
+      .map((ref) => ({ runId: ref.runId, runNodeId: ref.runNodeId }));
+  }
+  return [];
+}
+
+function runNodeRefLabel(ref) {
+  if (!ref || !ref.runId || !ref.runNodeId) return '';
+  return `${ref.runId}/${ref.runNodeId}`;
+}
+
+function validateEowResolverBacklink({ eow, taskGroups, tasks, errors, warnings, t, taskKey }) {
+  const resolvedByTaskGroupId = String(eow?.resolvedByTaskGroupId || '').trim();
+  if (!resolvedByTaskGroupId) return;
+
+  const taskGroup = taskGroups.get(resolvedByTaskGroupId);
+  if (!taskGroup) {
+    errors.push(withPath(eow.path, t.eowResolverTaskGroupNotFound(eow.id, resolvedByTaskGroupId)));
+    return;
+  }
+
+  const decomposedVersions = (taskGroup.versions || []).filter(hasDecompositionBacklink);
+  if (decomposedVersions.length === 0) return;
+
+  const expectedRefs = eowResolverRunNodeRefs({ eow, tasks, taskKey });
+  const matches = decomposedVersions.some((version) => (
+    expectedRefs.some((ref) => ref.runId === version.decomposedByRunId && ref.runNodeId === version.decomposedByRunNodeId)
+  ));
+  if (matches) return;
+
+  const expected = expectedRefs.map(runNodeRefLabel).filter(Boolean).join(', ') || '<none>';
+  const actual = decomposedVersions
+    .map((version) => `${version.id}:${version.decomposedByRunId || ''}/${version.decomposedByRunNodeId || ''}`)
+    .join(', ');
+  warnings.push(withPath(eow.path, t.eowResolverBacklinkMismatch(eow.id, resolvedByTaskGroupId, expected, actual)));
 }
 
 export function parseScalar(value) {
@@ -1003,6 +1052,10 @@ export function parseProject(projectDir) {
     for (const task of version.tasks) {
       if (task.childTaskGroupId && !taskGroups.has(task.childTaskGroupId)) errors.push(withPath(task.path, t.childTaskGroupNotFound(task.childTaskGroupId)));
     }
+  }
+
+  for (const eow of eowNodes.values()) {
+    validateEowResolverBacklink({ eow, taskGroups, tasks, errors, warnings, t, taskKey });
   }
 
   for (const task of tasks.values()) {
