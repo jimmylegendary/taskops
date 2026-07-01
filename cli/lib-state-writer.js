@@ -111,7 +111,7 @@ function applyApprovedReviewToEow(fm, approvedReview) {
   fm.reviewedResultHash = approvedReview.reviewedResultHash;
 }
 
-export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null }, io) {
+export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }, io) {
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
@@ -132,6 +132,7 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
       createdAt: finishedAt,
       status: 'done',
     };
+    if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') eowFm.resolvedByTaskGroupId = resolvedByTaskGroupId;
     applyApprovedReviewToEow(eowFm, approvedReview);
     writeTextFile(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
   }
@@ -153,7 +154,7 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
   }
 }
 
-export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview = null }, io) {
+export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }, io) {
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
@@ -177,6 +178,7 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
       createdAt: finishedAt,
       status: 'done',
     };
+    if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') eowFm.resolvedByTaskGroupId = resolvedByTaskGroupId;
     applyApprovedReviewToEow(eowFm, approvedReview);
     writeTextFile(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
   }
