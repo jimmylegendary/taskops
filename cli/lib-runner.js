@@ -26,6 +26,7 @@ import {
 } from './lib-state-writer.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
+export const MUTATION_LOCK_DIR = '.taskops-canonical-mutation.lock';
 export const DEFAULT_RUN_ID = 'run-main';
 export const DEFAULT_AGENT_ID = 'main';
 export const DEFAULT_MAX_LOOPBACKS = 3;
@@ -282,6 +283,98 @@ function sleepMs(ms) {
   const buffer = new SharedArrayBuffer(4);
   const view = new Int32Array(buffer);
   Atomics.wait(view, 0, 0, Math.floor(ms));
+}
+
+const MUTATION_LOCK_GRACE_MS = 60_000;
+const DEFAULT_MUTATION_LOCK_TTL_MS = 10 * 60_000;
+const MUTATION_LOCK_POLL_MS = 25;
+
+function isProcessAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'EPERM') return true;
+    return false;
+  }
+}
+
+function readMutationLockMeta(lockDir) {
+  try {
+    return JSON.parse(readFileSync(join(lockDir, 'meta.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function mutationLockTtlMs(stepTimeoutMs) {
+  const n = Number(stepTimeoutMs);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n) + MUTATION_LOCK_GRACE_MS;
+  return DEFAULT_MUTATION_LOCK_TTL_MS;
+}
+
+function reapStaleMutationLock(lockDir, nowMs) {
+  const meta = readMutationLockMeta(lockDir);
+  if (!meta) return false;
+  const expiresAtMs = Date.parse(String(meta.expiresAt || ''));
+  const expired = Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs;
+  const deadOwner = meta.pid != null && !isProcessAlive(meta.pid);
+  if (!expired && !deadOwner) return false;
+  try {
+    rmSync(lockDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireMutationLock({ projectDir, runId, runNodeId, task, action, executor, stepTimeoutMs }) {
+  const lockDir = join(projectDir, MUTATION_LOCK_DIR);
+  const ttlMs = mutationLockTtlMs(stepTimeoutMs);
+  const deadlineMs = Date.now() + ttlMs;
+  while (true) {
+    const nowMs = Date.now();
+    try {
+      mkdirSync(lockDir, { recursive: false });
+      const acquiredAt = new Date(nowMs).toISOString();
+      const expiresAt = new Date(nowMs + ttlMs).toISOString();
+      const meta = {
+        pid: process.pid,
+        acquiredAt,
+        expiresAt,
+        ttlMs,
+        runId: runId || null,
+        runNodeId: runNodeId || null,
+        taskId: task?.id || null,
+        taskGroupVersionId: task?.taskGroupVersionId || null,
+        action: action || 'unknown',
+        executor: executor || null,
+      };
+      try {
+        writeFileSync(join(lockDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+      } catch (error) {
+        try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+        throw error;
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+      };
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+      if (reapStaleMutationLock(lockDir, nowMs)) continue;
+      if (nowMs >= deadlineMs) {
+        const meta = readMutationLockMeta(lockDir);
+        const holder = meta ? ` holder=${JSON.stringify(meta)}` : '';
+        throw new Error(`TaskOps canonical mutation lock already held at ${lockDir}; timed out waiting to acquire.${holder}`);
+      }
+      sleepMs(Math.min(MUTATION_LOCK_POLL_MS, Math.max(1, deadlineMs - nowMs)));
+    }
+  }
 }
 
 function writeTextFileAtomic(filePath, text) {
@@ -3498,83 +3591,96 @@ function executeDecompositionTask({ projectDir, parsed, project, task, runDir, r
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
-  const runNodePath = ensureRunNode({
-    runDir, runId, runNodeId,
-    type: 'decomposition',
-    title: `Decompose: ${task.title}`,
-    sourceTaskId: task.id,
-    sourceTaskGroupVersionId: task.taskGroupVersionId,
-    status: 'active',
-    kindLabel: 'decompose',
-  });
-  attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
-
-  logEvent(eventsPath, {
-    timestamp: startedAt, type: 'decomposition_started', runId,
-    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-  });
-  appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
-
-  let result;
-  try {
-    result = executor === 'dry-run'
-      ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
-  } catch (err) {
-    result = { ok: false, message: err instanceof Error ? err.message : String(err) };
-  }
-
-  const finishedAt = isoNow();
-  if (!result.ok) {
-    result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
-    if (result.recoveredAfterAdapterFailure === true) {
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
-        adapterFailureReason: result.adapterFailureReason || null,
-        adapterStatus: result.adapterFailureStatus || result.status || null,
-        recoveryStatus: result.recoveryStatus || null,
-        recovery: result.recovery || null,
-      });
-      appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
-    }
-  }
-  if (!result.ok) {
-    updateMarkdownFrontmatter(task.path, (fm) => {
-      fm.status = 'blocked';
-      fm.lastRunFailureReason = sanitizeFmScalar(result.message);
-      return fm;
-    });
-    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
-    logEvent(eventsPath, {
-      timestamp: finishedAt, type: 'decomposition_failed', runId,
-      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-      message: result.message || null,
-    });
-    appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
-    return {
-    taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
-    };
-  }
-
-  return closeDecomposeSuccess({
+  const releaseMutationLock = acquireMutationLock({
     projectDir,
-    parsed,
-    task,
-    runDir,
     runId,
-    eventsPath,
-    executor,
-    budget,
     runNodeId,
-    runNodePath,
-    result,
-    finishedAt,
+    task,
+    action: 'decompose',
+    executor,
+    stepTimeoutMs,
   });
+  try {
+    const runNodePath = ensureRunNode({
+      runDir, runId, runNodeId,
+      type: 'decomposition',
+      title: `Decompose: ${task.title}`,
+      sourceTaskId: task.id,
+      sourceTaskGroupVersionId: task.taskGroupVersionId,
+      status: 'active',
+      kindLabel: 'decompose',
+    });
+    attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
+
+    logEvent(eventsPath, {
+      timestamp: startedAt, type: 'decomposition_started', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    });
+    appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
+
+    let result;
+    try {
+      result = executor === 'dry-run'
+        ? performDryRunDecomposition({ projectDir, task })
+        : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
+    } catch (err) {
+      result = { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+
+    const finishedAt = isoNow();
+    if (!result.ok) {
+      result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
+      if (result.recoveredAfterAdapterFailure === true) {
+        logEvent(eventsPath, {
+          timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
+          taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+          childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+          adapterFailureReason: result.adapterFailureReason || null,
+          adapterStatus: result.adapterFailureStatus || result.status || null,
+          recoveryStatus: result.recoveryStatus || null,
+          recovery: result.recovery || null,
+        });
+        appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
+      }
+    }
+    if (!result.ok) {
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        fm.status = 'blocked';
+        fm.lastRunFailureReason = sanitizeFmScalar(result.message);
+        return fm;
+      });
+      updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_failed', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        message: result.message || null,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
+      return {
+        taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+        message: result.message || null, adapterStatus: result.status || null,
+        stdout: result.stdout || '', stderr: result.stderr || '',
+        budget,
+      };
+    }
+
+    return closeDecomposeSuccess({
+      projectDir,
+      parsed,
+      task,
+      runDir,
+      runId,
+      eventsPath,
+      executor,
+      budget,
+      runNodeId,
+      runNodePath,
+      result,
+      finishedAt,
+    });
+  } finally {
+    releaseMutationLock();
+  }
 }
 
 function performDryRunExploration({ runDir, runNodeId, task }) {
