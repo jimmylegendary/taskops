@@ -102,3 +102,37 @@ export function writeLeaseInsertRow({ db, lease }, io) {
     lease.attempt,
   ]);
 }
+
+export function writeRunnerAttemptRow({ db, row }, io) {
+  if (!io || typeof io !== 'object') throw new Error('Missing queue writer I/O adapter');
+  const runPreparedStatement = requireFn(io, 'runPreparedStatement');
+  runPreparedStatement(db, `
+    INSERT INTO runner_attempts (
+      id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint,
+      status, started_at, finished_at, run_id, stop_reason, error_summary
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    row.id,
+    row.queue_item_id,
+    row.lease_id,
+    row.runner_id,
+    row.runtime_adapter,
+    row.md_fingerprint,
+    row.status,
+    row.started_at,
+    row.finished_at,
+    row.run_id,
+    row.stop_reason,
+    row.error_summary,
+  ]);
+}
+
+export function updateRunnerAttemptRow({ db, attemptId, row }, io) {
+  if (!io || typeof io !== 'object') throw new Error('Missing queue writer I/O adapter');
+  const runPreparedStatement = requireFn(io, 'runPreparedStatement');
+  runPreparedStatement(db, `
+    UPDATE runner_attempts
+    SET status = ?, finished_at = ?, run_id = ?, stop_reason = ?, error_summary = ?
+    WHERE id = ?
+  `, [row.status, row.finished_at, row.run_id, row.stop_reason, row.error_summary, attemptId]);
+}

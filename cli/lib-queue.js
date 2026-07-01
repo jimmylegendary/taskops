@@ -13,6 +13,8 @@ import {
   writeLeaseHeartbeatRow,
   writeLeaseInsertRow,
   writeProgressReportRow,
+  writeRunnerAttemptRow,
+  updateRunnerAttemptRow,
 } from './lib-queue-writer.js';
 
 export const QUEUE_DB_RELATIVE_PATH = join('.taskops', 'queue.sqlite');
@@ -617,25 +619,7 @@ export function insertRunnerAttempt(workDir, attempt) {
     stop_reason: attempt.stopReason || null,
     error_summary: attempt.errorSummary || null,
   };
-  db.prepare(`
-    INSERT INTO runner_attempts (
-      id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint,
-      status, started_at, finished_at, run_id, stop_reason, error_summary
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id,
-    row.queue_item_id,
-    row.lease_id,
-    row.runner_id,
-    row.runtime_adapter,
-    row.md_fingerprint,
-    row.status,
-    row.started_at,
-    row.finished_at,
-    row.run_id,
-    row.stop_reason,
-    row.error_summary,
-  );
+  writeRunnerAttemptRow({ db, row }, queueWriterIo);
   db.close();
   return { projectDir, workId: parsed.project.id, dbPath, attempt: row };
 }
@@ -660,11 +644,7 @@ export function updateRunnerAttempt(workDir, attemptId, patch = {}) {
     stop_reason: patch.stopReason === undefined ? current.stop_reason : patch.stopReason,
     error_summary: patch.errorSummary === undefined ? current.error_summary : patch.errorSummary,
   };
-  db.prepare(`
-    UPDATE runner_attempts
-    SET status = ?, finished_at = ?, run_id = ?, stop_reason = ?, error_summary = ?
-    WHERE id = ?
-  `).run(row.status, row.finished_at, row.run_id, row.stop_reason, row.error_summary, attemptId);
+  updateRunnerAttemptRow({ db, attemptId, row }, queueWriterIo);
   const updated = db.prepare(`
     SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint, status,
            started_at, finished_at, run_id, stop_reason, error_summary
