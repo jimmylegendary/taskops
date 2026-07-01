@@ -8,6 +8,11 @@ import {
   parseProject,
 } from './lib-taskops.js';
 import {
+  DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
+  isMutationLockActive,
+  waitForMutationLockClear,
+} from './lib-mutation-lock.js';
+import {
   queueItemStaleMarkerSql,
   queueItemUpsertSql,
   writeLeaseHeartbeatRow,
@@ -133,16 +138,42 @@ function isTransientRunGraphError(error) {
   );
 }
 
+function mutationLockReaderTimeoutError(projectDir) {
+  return new Error(`TaskOps canonical mutation lock still active under ${projectDir}; timed out waiting to sync queue`);
+}
+
 function parseSingleProject(workDir) {
   const workRoot = resolve(workDir);
   const projects = discoverProjects(workRoot);
   if (projects.length !== 1) throw new Error(`Expected exactly 1 TaskOps work under ${workDir}, found ${projects.length}`);
   const projectDir = projects[0];
-  let parsed = parseProject(projectDir);
-  for (let attempt = 0; parsed.errors.length > 0 && attempt < 5; attempt += 1) {
-    if (!parsed.errors.every(isTransientRunGraphError)) break;
-    sleepMs(25 * (attempt + 1));
+  let parsed = null;
+  let transientAttempt = 0;
+  const mutationLockDeadlineMs = Date.now() + DEFAULT_MUTATION_LOCK_READER_WAIT_MS;
+  for (;;) {
+    const beforeParse = waitForMutationLockClear(projectDir, { deadlineMs: mutationLockDeadlineMs });
+    if (!beforeParse.cleared && isMutationLockActive(projectDir)) {
+      throw mutationLockReaderTimeoutError(projectDir);
+    }
     parsed = parseProject(projectDir);
+    if (isMutationLockActive(projectDir)) {
+      const afterParse = waitForMutationLockClear(projectDir, { deadlineMs: mutationLockDeadlineMs });
+      if (!afterParse.cleared && isMutationLockActive(projectDir)) {
+        throw mutationLockReaderTimeoutError(projectDir);
+      }
+      continue;
+    }
+    if (parsed.errors.length === 0) break;
+    if (isMutationLockActive(projectDir)) {
+      const afterErrors = waitForMutationLockClear(projectDir, { deadlineMs: mutationLockDeadlineMs });
+      if (!afterErrors.cleared && isMutationLockActive(projectDir)) {
+        throw mutationLockReaderTimeoutError(projectDir);
+      }
+      continue;
+    }
+    if (transientAttempt >= 5 || !parsed.errors.every(isTransientRunGraphError)) break;
+    sleepMs(25 * (transientAttempt + 1));
+    transientAttempt += 1;
   }
   if (parsed.errors.length > 0) throw new Error(`TaskOps work has validation errors; cannot sync queue:\n- ${parsed.errors.join('\n- ')}`);
   return { projectDir, parsed };

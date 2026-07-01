@@ -15,6 +15,14 @@ import {
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
 import {
+  MUTATION_LOCK_DIR,
+  DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
+  isMutationLockActive,
+  isProcessAlive,
+  readMutationLockMeta,
+  waitForMutationLockClear,
+} from './lib-mutation-lock.js';
+import {
   appendRunEvent as appendRunEventViaStateWriter,
   appendRunLogEntry as appendRunLogViaStateWriter,
   attachTaskRunRef as attachTaskRunRefViaStateWriter,
@@ -26,7 +34,7 @@ import {
 } from './lib-state-writer.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
-export const MUTATION_LOCK_DIR = '.taskops-canonical-mutation.lock';
+export { MUTATION_LOCK_DIR } from './lib-mutation-lock.js';
 export const DEFAULT_RUN_ID = 'run-main';
 export const DEFAULT_AGENT_ID = 'main';
 export const DEFAULT_MAX_LOOPBACKS = 3;
@@ -288,26 +296,6 @@ function sleepMs(ms) {
 const MUTATION_LOCK_GRACE_MS = 60_000;
 const DEFAULT_MUTATION_LOCK_TTL_MS = 10 * 60_000;
 const MUTATION_LOCK_POLL_MS = 25;
-
-function isProcessAlive(pid) {
-  const n = Number(pid);
-  if (!Number.isInteger(n) || n <= 0) return false;
-  try {
-    process.kill(n, 0);
-    return true;
-  } catch (error) {
-    if (error && error.code === 'EPERM') return true;
-    return false;
-  }
-}
-
-function readMutationLockMeta(lockDir) {
-  try {
-    return JSON.parse(readFileSync(join(lockDir, 'meta.json'), 'utf8'));
-  } catch {
-    return null;
-  }
-}
 
 function mutationLockTtlMs(stepTimeoutMs) {
   const n = Number(stepTimeoutMs);
@@ -1134,13 +1122,47 @@ function isTransientConcurrentParseError(error) {
   );
 }
 
+function mutationLockReaderTimeoutError(projectDir) {
+  return new Error(`TaskOps canonical mutation lock still active under ${projectDir}; timed out waiting to parse project`);
+}
+
 function parseProjectForRunner(projectDir, { allowConcurrentTarget = false } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
+  let transientAttempt = 0;
+  const mutationLockDeadlineMs = Date.now() + DEFAULT_MUTATION_LOCK_READER_WAIT_MS;
+  const ignorePid = process.pid;
+  for (;;) {
+    const beforeParse = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+    if (!beforeParse.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+      throw mutationLockReaderTimeoutError(projectDir);
+    }
     try {
-      return parseProject(projectDir);
+      const parsed = parseProject(projectDir);
+      if (isMutationLockActive(projectDir, { ignorePid })) {
+        const afterParse = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+        if (!afterParse.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+          throw mutationLockReaderTimeoutError(projectDir);
+        }
+        continue;
+      }
+      if (parsed.errors.length > 0 && isMutationLockActive(projectDir, { ignorePid })) {
+        const afterErrors = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+        if (!afterErrors.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+          throw mutationLockReaderTimeoutError(projectDir);
+        }
+        continue;
+      }
+      return parsed;
     } catch (error) {
-      if (!allowConcurrentTarget || attempt >= 5 || !isTransientConcurrentParseError(error)) throw error;
-      sleepMs(25 * (attempt + 1));
+      if (isMutationLockActive(projectDir, { ignorePid })) {
+        const afterError = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+        if (!afterError.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+          throw mutationLockReaderTimeoutError(projectDir);
+        }
+        continue;
+      }
+      if (!allowConcurrentTarget || transientAttempt >= 5 || !isTransientConcurrentParseError(error)) throw error;
+      sleepMs(25 * (transientAttempt + 1));
+      transientAttempt += 1;
     }
   }
 }
