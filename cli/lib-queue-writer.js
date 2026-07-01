@@ -83,3 +83,22 @@ export function writeLeaseHeartbeatRow({ db, leaseId, heartbeatAt, expiresAt }, 
       WHERE id = ?
     `, [heartbeatAt, expiresAt, leaseId]);
 }
+
+export function writeLeaseInsertRow({ db, lease }, io) {
+  if (!io || typeof io !== 'object') throw new Error('Missing queue writer I/O adapter');
+  const runPreparedStatement = requireFn(io, 'runPreparedStatement');
+  runPreparedStatement(db, `
+        INSERT INTO leases (
+          id, queue_item_id, runner_id, status, leased_at, heartbeat_at, expires_at, attempt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+    lease.id,
+    lease.queue_item_id,
+    lease.runner_id,
+    lease.status,
+    lease.leased_at,
+    lease.heartbeat_at,
+    lease.expires_at,
+    lease.attempt,
+  ]);
+}

@@ -11,6 +11,7 @@ import {
   queueItemStaleMarkerSql,
   queueItemUpsertSql,
   writeLeaseHeartbeatRow,
+  writeLeaseInsertRow,
   writeProgressReportRow,
 } from './lib-queue-writer.js';
 
@@ -435,20 +436,7 @@ export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds 
         expires_at: isoPlusSeconds(now, ttl),
         attempt: Number(priorAttempt) + 1,
       };
-      db.prepare(`
-        INSERT INTO leases (
-          id, queue_item_id, runner_id, status, leased_at, heartbeat_at, expires_at, attempt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        lease.id,
-        lease.queue_item_id,
-        lease.runner_id,
-        lease.status,
-        lease.leased_at,
-        lease.heartbeat_at,
-        lease.expires_at,
-        lease.attempt,
-      );
+      writeLeaseInsertRow({ db, lease }, queueWriterIo);
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -522,20 +510,7 @@ export function claimQueueItems(workDir, { runnerId = 'local-runner', ttlSeconds
         expires_at: isoPlusSeconds(now, ttl),
         attempt: Number(priorAttempt) + 1,
       };
-      db.prepare(`
-        INSERT INTO leases (
-          id, queue_item_id, runner_id, status, leased_at, heartbeat_at, expires_at, attempt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        lease.id,
-        lease.queue_item_id,
-        lease.runner_id,
-        lease.status,
-        lease.leased_at,
-        lease.heartbeat_at,
-        lease.expires_at,
-        lease.attempt,
-      );
+      writeLeaseInsertRow({ db, lease }, queueWriterIo);
       claims.push({ item, lease });
     }
     db.exec('COMMIT');
