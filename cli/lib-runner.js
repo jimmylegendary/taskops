@@ -14,8 +14,27 @@ import {
   readBody,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
+import {
+  MUTATION_LOCK_DIR,
+  DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
+  isMutationLockActive,
+  isProcessAlive,
+  readMutationLockMeta,
+  waitForMutationLockClear,
+} from './lib-mutation-lock.js';
+import {
+  appendRunEvent as appendRunEventViaStateWriter,
+  appendRunLogEntry as appendRunLogViaStateWriter,
+  attachTaskRunRef as attachTaskRunRefViaStateWriter,
+  closeRunNodeWithEowFiles as closeRunNodeWithEowViaStateWriter,
+  closeTaskWithEowFile as closeTaskWithEowViaStateWriter,
+  ensureRunNodeFile as ensureRunNodeViaStateWriter,
+  updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter,
+  writeRunEdgeFile as writeRunEdgeViaStateWriter,
+} from './lib-state-writer.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
+export { MUTATION_LOCK_DIR } from './lib-mutation-lock.js';
 export const DEFAULT_RUN_ID = 'run-main';
 export const DEFAULT_AGENT_ID = 'main';
 export const DEFAULT_MAX_LOOPBACKS = 3;
@@ -274,6 +293,78 @@ function sleepMs(ms) {
   Atomics.wait(view, 0, 0, Math.floor(ms));
 }
 
+const MUTATION_LOCK_GRACE_MS = 60_000;
+const DEFAULT_MUTATION_LOCK_TTL_MS = 10 * 60_000;
+const MUTATION_LOCK_POLL_MS = 25;
+
+function mutationLockTtlMs(stepTimeoutMs) {
+  const n = Number(stepTimeoutMs);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n) + MUTATION_LOCK_GRACE_MS;
+  return DEFAULT_MUTATION_LOCK_TTL_MS;
+}
+
+function reapStaleMutationLock(lockDir, nowMs) {
+  const meta = readMutationLockMeta(lockDir);
+  if (!meta) return false;
+  const expiresAtMs = Date.parse(String(meta.expiresAt || ''));
+  const expired = Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs;
+  const deadOwner = meta.pid != null && !isProcessAlive(meta.pid);
+  if (!expired && !deadOwner) return false;
+  try {
+    rmSync(lockDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireMutationLock({ projectDir, runId, runNodeId, task, action, executor, stepTimeoutMs }) {
+  const lockDir = join(projectDir, MUTATION_LOCK_DIR);
+  const ttlMs = mutationLockTtlMs(stepTimeoutMs);
+  const deadlineMs = Date.now() + ttlMs;
+  while (true) {
+    const nowMs = Date.now();
+    try {
+      mkdirSync(lockDir, { recursive: false });
+      const acquiredAt = new Date(nowMs).toISOString();
+      const expiresAt = new Date(nowMs + ttlMs).toISOString();
+      const meta = {
+        pid: process.pid,
+        acquiredAt,
+        expiresAt,
+        ttlMs,
+        runId: runId || null,
+        runNodeId: runNodeId || null,
+        taskId: task?.id || null,
+        taskGroupVersionId: task?.taskGroupVersionId || null,
+        action: action || 'unknown',
+        executor: executor || null,
+      };
+      try {
+        writeFileSync(join(lockDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+      } catch (error) {
+        try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+        throw error;
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+      };
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+      if (reapStaleMutationLock(lockDir, nowMs)) continue;
+      if (nowMs >= deadlineMs) {
+        const meta = readMutationLockMeta(lockDir);
+        const holder = meta ? ` holder=${JSON.stringify(meta)}` : '';
+        throw new Error(`TaskOps canonical mutation lock already held at ${lockDir}; timed out waiting to acquire.${holder}`);
+      }
+      sleepMs(Math.min(MUTATION_LOCK_POLL_MS, Math.max(1, deadlineMs - nowMs)));
+    }
+  }
+}
+
 function writeTextFileAtomic(filePath, text) {
   const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   writeFileSync(tmpPath, text, 'utf8');
@@ -293,12 +384,28 @@ export function sanitizeFmScalar(value, { maxLen = FM_SCALAR_MAX_LEN, fallback =
   return collapsed;
 }
 
-function rewriteFrontmatter(filePath, updater) {
-  const fm = parseMarkdownFile(filePath);
-  const body = readBody(filePath);
-  const next = updater({ ...fm }) ?? fm;
-  const text = fmBlock(next) + (body ? body + '\n' : '');
-  writeTextFileAtomic(filePath, text);
+function updateMarkdownFrontmatter(filePath, updater) {
+  return updateMarkdownFrontmatterViaStateWriter(filePath, updater, {
+    parseMarkdownFile,
+    readBody,
+    fmBlock,
+    writeTextFile: writeTextFileAtomic,
+  });
+}
+
+function stateWriterIo() {
+  return {
+    appendTextFile: (filePath, text) => appendFileSync(filePath, text, 'utf8'),
+    ensureDir,
+    exists: existsSync,
+    fmBlock,
+    now: isoNow,
+    parseMarkdownFile,
+    readBody,
+    sanitizeFmScalar,
+    updateMarkdownFrontmatter,
+    writeTextFile: writeTextFileAtomic,
+  };
 }
 
 function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, observedAt, evidenceRefs = [] }) {
@@ -306,7 +413,7 @@ function appendSurpriseHistory({ task, report, runId, runNodeId, actionKind, obs
   const normalizedReport = normalizeSurpriseReportPayload(report || {});
   const entry = computeSurpriseHistoryEntry({ task, report: normalizedReport, runId, runNodeId, actionKind, observedAt, evidenceRefs });
   const deltas = normalizedReport.newKnownDeltas;
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     const surpriseHistory = Array.isArray(fm.surpriseHistory) ? [...fm.surpriseHistory] : [];
     surpriseHistory.push(entry);
     fm.surpriseHistory = surpriseHistory;
@@ -542,7 +649,7 @@ export function applyInheritedBirthSnapshotToChildVersion({ projectDir, childTas
     const inherited = hydrateInheritedContext(parsed, childTask, activeSnapshot, { capturedAt });
     if (!inherited || inherited.parentChain.length === 0) continue;
     const staticInherited = inheritedContextWithoutRuntimeFlags(inherited);
-    rewriteFrontmatter(childTask.path, (fm) => {
+    updateMarkdownFrontmatter(childTask.path, (fm) => {
       const filtered = filterLocalKnownCopiesOfInherited(fm.knownList, staticInherited);
       if (filtered.removed.length > 0) {
         fm.knownList = filtered.knownList;
@@ -564,13 +671,11 @@ function malformedSurpriseReason(parsed) {
 }
 
 function logEvent(eventsPath, event) {
-  appendFileSync(eventsPath, JSON.stringify(event) + '\n', 'utf8');
+  return appendRunEventViaStateWriter(eventsPath, event, stateWriterIo());
 }
 
 function appendRunLog(runDir, line) {
-  const logPath = join(runDir, 'run-log.md');
-  if (!existsSync(logPath)) writeFileSync(logPath, '# Run log\n\n', 'utf8');
-  appendFileSync(logPath, `- ${line}\n`, 'utf8');
+  return appendRunLogViaStateWriter(runDir, line, stateWriterIo());
 }
 
 function stableForHash(value) {
@@ -1017,13 +1122,47 @@ function isTransientConcurrentParseError(error) {
   );
 }
 
+function mutationLockReaderTimeoutError(projectDir) {
+  return new Error(`TaskOps canonical mutation lock still active under ${projectDir}; timed out waiting to parse project`);
+}
+
 function parseProjectForRunner(projectDir, { allowConcurrentTarget = false } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
+  let transientAttempt = 0;
+  const mutationLockDeadlineMs = Date.now() + DEFAULT_MUTATION_LOCK_READER_WAIT_MS;
+  const ignorePid = process.pid;
+  for (;;) {
+    const beforeParse = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+    if (!beforeParse.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+      throw mutationLockReaderTimeoutError(projectDir);
+    }
     try {
-      return parseProject(projectDir);
+      const parsed = parseProject(projectDir);
+      if (isMutationLockActive(projectDir, { ignorePid })) {
+        const afterParse = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+        if (!afterParse.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+          throw mutationLockReaderTimeoutError(projectDir);
+        }
+        continue;
+      }
+      if (parsed.errors.length > 0 && isMutationLockActive(projectDir, { ignorePid })) {
+        const afterErrors = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+        if (!afterErrors.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+          throw mutationLockReaderTimeoutError(projectDir);
+        }
+        continue;
+      }
+      return parsed;
     } catch (error) {
-      if (!allowConcurrentTarget || attempt >= 5 || !isTransientConcurrentParseError(error)) throw error;
-      sleepMs(25 * (attempt + 1));
+      if (isMutationLockActive(projectDir, { ignorePid })) {
+        const afterError = waitForMutationLockClear(projectDir, { ignorePid, deadlineMs: mutationLockDeadlineMs });
+        if (!afterError.cleared && isMutationLockActive(projectDir, { ignorePid })) {
+          throw mutationLockReaderTimeoutError(projectDir);
+        }
+        continue;
+      }
+      if (!allowConcurrentTarget || transientAttempt >= 5 || !isTransientConcurrentParseError(error)) throw error;
+      sleepMs(25 * (transientAttempt + 1));
+      transientAttempt += 1;
     }
   }
 }
@@ -1324,7 +1463,7 @@ export function recheckBlockedTasks(workDir, { dryRun = false, allowConcurrentTa
     if (!isBlocked) continue;
     unblocked.push(item);
     if (dryRun) continue;
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       if (fm.status === 'blocked') fm.status = 'pending';
       if (fm.runReadiness === 'blocked') {
         if (fm.unblockRunReadiness) fm.runReadiness = fm.unblockRunReadiness;
@@ -1871,22 +2010,7 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
 }
 
 function writeRunEdge({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeType, createdAt, note }) {
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
-  if (existsSync(edgePath)) return edgePath;
-  const fm = {
-    taskOpsVersion: 'v1',
-    entityType: 'runEdge',
-    id: edgeId,
-    runId,
-    fromRunNodeId,
-    toRunNodeId,
-    edgeType,
-    createdAt,
-    status: 'done',
-  };
-  if (note) fm.note = sanitizeFmScalar(note);
-  writeTextFileAtomic(edgePath, fmBlock(fm) + `# Run edge: ${fromRunNodeId} -${edgeType}-> ${toRunNodeId}\n`);
-  return edgePath;
+  return writeRunEdgeViaStateWriter({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeType, createdAt, note }, stateWriterIo());
 }
 
 function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, loopbackIndex, actorName, budget = null }) {
@@ -1904,7 +2028,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     status: 'active',
     kindLabel: 'loopback',
   });
-  rewriteFrontmatter(loopbackPath, (fm) => {
+  updateMarkdownFrontmatter(loopbackPath, (fm) => {
     fm.loopbackOfRunNodeId = delegate.id;
     fm.loopbackPolicy = 'self';
     fm.loopbackIndex = loopbackIndex;
@@ -1947,7 +2071,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
 
   const finishedAt = isoNow();
   if (!result.ok) {
-    rewriteFrontmatter(loopbackPath, (fm) => {
+    updateMarkdownFrontmatter(loopbackPath, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(result.message);
       return fm;
@@ -1972,12 +2096,12 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     };
   }
 
-  rewriteFrontmatter(loopbackPath, (fm) => { fm.status = 'done'; return fm; });
+  updateMarkdownFrontmatter(loopbackPath, (fm) => { fm.status = 'done'; return fm; });
   closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: loopbackNodeId, reason: 'loopback_recorded', finishedAt });
 
   const delegatePath = delegate.path;
   if (delegatePath && existsSync(delegatePath)) {
-    rewriteFrontmatter(delegatePath, (fm) => {
+    updateMarkdownFrontmatter(delegatePath, (fm) => {
       fm.status = 'done';
       fm.resolvedBy = 'loopback';
       fm.resolvedAt = finishedAt;
@@ -2014,29 +2138,9 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
 }
 
 function ensureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status = 'active', kindLabel }) {
-  const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
-  if (!existsSync(runNodePath)) {
-    const nodeFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'runNode',
-      id: runNodeId,
-      runId,
-      type,
-      title,
-      status,
-      createdAt: isoNow(),
-    };
-    if (sourceTaskId != null && sourceTaskId !== '') nodeFm.sourceTaskId = sourceTaskId;
-    if (sourceTaskGroupVersionId != null && sourceTaskGroupVersionId !== '') nodeFm.sourceTaskGroupVersionId = sourceTaskGroupVersionId;
-    const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
-    writeTextFileAtomic(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`);
-  } else {
-    rewriteFrontmatter(runNodePath, (fm) => {
-      fm.status = status;
-      return fm;
-    });
-  }
-  return runNodePath;
+  return ensureRunNodeViaStateWriter({
+    runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status, kindLabel,
+  }, stateWriterIo());
 }
 
 function runNodeIdForTask(runDir, task) {
@@ -2054,91 +2158,15 @@ function runNodeIdForTask(runDir, task) {
 }
 
 function attachRunRef(taskPath, runId, runNodeId, role) {
-  rewriteFrontmatter(taskPath, (fm) => {
-    if (fm.status === 'pending') fm.status = 'active';
-    const refs = Array.isArray(fm.runRefs) ? [...fm.runRefs] : [];
-    if (!refs.some((r) => r && r.runId === runId && r.runNodeId === runNodeId)) {
-      refs.push({ runId, runNodeId, role });
-    }
-    fm.runRefs = refs;
-    return fm;
-  });
+  return attachTaskRunRefViaStateWriter(taskPath, runId, runNodeId, role, stateWriterIo());
 }
 
 function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null }) {
-  const eowRunNodeId = `eow-${runNodeId}`;
-  const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
-  if (!existsSync(eowRunPath)) {
-    const eowFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: eowRunNodeId,
-      runId,
-      graphType: 'run',
-      attachedToType: 'runNode',
-      attachedToId: runNodeId,
-      reason,
-      declaredBy: 'taskops-runner',
-      declaredAt: finishedAt,
-      createdAt: finishedAt,
-      status: 'done',
-    };
-    if (approvedReview) {
-      eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
-      eowFm.approvedReviewMode = approvedReview.reviewMode;
-      eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
-      eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
-      eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
-    }
-    writeTextFileAtomic(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
-  }
-  const edgeId = `edge-${runNodeId}-to-eow`;
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
-  if (!existsSync(edgePath)) {
-    const edgeFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'runEdge',
-      id: edgeId,
-      runId,
-      fromRunNodeId: runNodeId,
-      toRunNodeId: eowRunNodeId,
-      edgeType: 'closes_with',
-      createdAt: finishedAt,
-      status: 'done',
-    };
-    writeTextFileAtomic(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNodeId} closes with EoW\n`);
-  }
+  return closeRunNodeWithEowViaStateWriter({ runDir, runId, runNodeId, reason, finishedAt, approvedReview }, stateWriterIo());
 }
 
 function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
-  const versionDir = dirname(dirname(task.path));
-  const eowTaskId = `eow-${task.id}`;
-  const eowTaskDir = join(versionDir, 'eow');
-  ensureDir(eowTaskDir);
-  const eowTaskPath = join(eowTaskDir, `${eowTaskId}.md`);
-  if (!existsSync(eowTaskPath)) {
-    const eowFm = {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: eowTaskId,
-      graphType: 'task',
-      attachedToType: 'task',
-      attachedToId: task.id,
-      reason,
-      declaredBy: 'taskops-runner',
-      declaredAt: finishedAt,
-      createdAt: finishedAt,
-      status: 'done',
-    };
-    if (approvedReview) {
-      eowFm.approvedByReviewNodeId = approvedReview.reviewNodeId;
-      eowFm.approvedReviewMode = approvedReview.reviewMode;
-      eowFm.approvedReviewReportHash = approvedReview.reviewReportHash;
-      eowFm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
-      eowFm.reviewedResultHash = approvedReview.reviewedResultHash;
-    }
-    writeTextFileAtomic(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
-  }
+  return closeTaskWithEowViaStateWriter({ task, reason, finishedAt, approvedReview }, stateWriterIo());
 }
 
 function partialIdTimestamp(iso) {
@@ -2257,7 +2285,7 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
   });
   const report = buildReviewReport({ projectDir, task, runNode });
   const reviewReportHash = sha256Of(report);
-  rewriteFrontmatter(reviewNodePath, (fm) => {
+  updateMarkdownFrontmatter(reviewNodePath, (fm) => {
     fm.status = 'done';
     fm.reviewsRunNodeId = runNode.id;
     fm.reviewedRunId = runNode.runId;
@@ -2297,6 +2325,195 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
       reviewedResultHash: report.reviewedResultHash,
     } : null,
   };
+}
+
+function closeExecutePartial({
+  task,
+  runDir,
+  runId,
+  eventsPath,
+  executor,
+  runNodeId,
+  runNodePath,
+  finishedAt,
+  result,
+  executionResult,
+  partialRequest,
+  budget,
+  artifactWorkspacePath,
+}) {
+  const partial = writeTaskPartialMarker({
+    task,
+    declaredAt: finishedAt,
+    options: {
+      completedSummary: partialRequest.completedSummary,
+      incompleteSummary: partialRequest.incompleteSummary,
+      followUpNeeded: partialRequest.followUpNeeded !== false,
+      budget: budget || { enabled: false },
+      declaredBy: 'taskops-runner',
+      sourceRunId: runId,
+      sourceRunNodeId: runNodeId,
+    },
+  });
+  const partialCompletion = {
+    partialId: partial.partialId,
+    partialPath: partial.partialPath,
+    taskId: task.id,
+    taskGroupVersionId: task.taskGroupVersionId,
+    completedSummary: partial.partial.completedSummary,
+    incompleteSummary: partial.partial.incompleteSummary,
+    followUpNeeded: partial.partial.followUpNeeded,
+    awaitingPromotion: true,
+    sourceRunId: runId,
+    sourceRunNodeId: runNodeId,
+  };
+  updateMarkdownFrontmatter(task.path, (fm) => {
+    if (fm.status === 'active') fm.status = 'pending';
+    fm.runReadiness = 'blocked';
+    fm.runReadinessReason = sanitizeFmScalar(`Awaiting partial-driven follow-up promotion (partial: ${partial.partialId})`);
+    fm.awaitingPromotion = true;
+    fm.awaitingPromotionPartialId = partial.partialId;
+    delete fm.lastRunFailureReason;
+    return fm;
+  });
+  updateMarkdownFrontmatter(runNodePath, (fm) => {
+    fm.status = 'done';
+    fm.result = {
+      ...executionResult,
+      partialRequest: {
+        partialRequested: true,
+        completedSummary: partial.partial.completedSummary,
+        incompleteSummary: partial.partial.incompleteSummary,
+        followUpNeeded: partial.partial.followUpNeeded,
+      },
+      partialCompletion,
+    };
+    return fm;
+  });
+  logEvent(eventsPath, {
+    timestamp: finishedAt, type: 'task_partial_requested', runId,
+    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    partialId: partial.partialId,
+  });
+  appendRunLog(runDir, `${finishedAt} task_partial_requested taskId=${task.id} runNodeId=${runNodeId} partialId=${partial.partialId}`);
+  return {
+    taskId: task.id,
+    runNodeId,
+    kind: 'execute',
+    status: 'partial',
+    executor,
+    message: result.message || null,
+    budget,
+    executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+    partialCompletion,
+  };
+}
+
+function closeExecuteFailure({
+  task,
+  runDir,
+  eventsPath,
+  runNodePath,
+  taskUpdater,
+  runNodeUpdater = null,
+  event,
+  logLine,
+  actionResult,
+}) {
+  updateMarkdownFrontmatter(task.path, taskUpdater);
+  if (runNodeUpdater) updateMarkdownFrontmatter(runNodePath, runNodeUpdater);
+  logEvent(eventsPath, event);
+  appendRunLog(runDir, logLine);
+  return actionResult;
+}
+
+function closeExecuteSuccess({
+  projectDir,
+  task,
+  runDir,
+  runId,
+  eventsPath,
+  executor,
+  runNodeId,
+  runNodePath,
+  finishedAt,
+  result,
+  executionResult,
+  surpriseReport,
+  budget,
+  artifactWorkspacePath,
+}) {
+  const surpriseHistoryEntry = surpriseReport.surpriseReported
+    ? appendSurpriseHistory({
+        task,
+        report: surpriseReport.report,
+        runId,
+        runNodeId,
+        actionKind: 'execute',
+        observedAt: finishedAt,
+        evidenceRefs: [`run:${runId}/node:${runNodeId}`],
+      })
+    : null;
+  updateMarkdownFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
+  updateMarkdownFrontmatter(runNodePath, (fm) => {
+    fm.status = 'done';
+    fm.result = {
+      ...executionResult,
+      ...(surpriseReport.surpriseReported ? {
+        surpriseReport: surpriseReport.report,
+        surpriseHistoryEntry,
+      } : {}),
+    };
+    return fm;
+  });
+  const reviewedRunNode = parseMarkdownFile(runNodePath);
+  const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
+  const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
+  if (review.reviewReport.decision !== 'approved' && isGuarded) {
+    return closeExecuteFailure({
+      task,
+      runDir,
+      eventsPath,
+      runNodePath,
+      taskUpdater: (fm) => {
+        fm.status = 'blocked';
+        fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
+        return fm;
+      },
+      event: {
+        timestamp: finishedAt, type: 'task_review_failed', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
+        decision: review.reviewReport.decision,
+      },
+      logLine: `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`,
+      actionResult: {
+        taskId: task.id,
+        runNodeId,
+        reviewNodeId: review.reviewNodeId,
+        kind: 'execute',
+        status: 'failed',
+        executor,
+        message: result.message || null,
+        reviewDecision: review.reviewReport.decision,
+        budget,
+        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+      },
+    });
+  }
+  const approvedReview = review.approvedReview;
+  const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
+  closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
+
+  logEvent(eventsPath, {
+    timestamp: finishedAt, type: 'task_completed', runId,
+    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    reviewNodeId: review.reviewNodeId,
+    reviewDecision: review.reviewReport.decision,
+    message: result.message || null,
+  });
+  appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
+  return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
 function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
@@ -2341,253 +2558,172 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     const executionResult = buildExecutionResult({ task, runId, runNodeId, executorResult: result });
     const partialRequest = parsePartialRequestFromExecutorResult(result);
     if (partialRequest.partialRequested) {
-      const partial = writeTaskPartialMarker({
+      return closeExecutePartial({
         task,
-        declaredAt: finishedAt,
-        options: {
-          completedSummary: partialRequest.completedSummary,
-          incompleteSummary: partialRequest.incompleteSummary,
-          followUpNeeded: partialRequest.followUpNeeded !== false,
-          budget: budget || { enabled: false },
-          declaredBy: 'taskops-runner',
-          sourceRunId: runId,
-          sourceRunNodeId: runNodeId,
-        },
-      });
-      const partialCompletion = {
-        partialId: partial.partialId,
-        partialPath: partial.partialPath,
-        taskId: task.id,
-        taskGroupVersionId: task.taskGroupVersionId,
-        completedSummary: partial.partial.completedSummary,
-        incompleteSummary: partial.partial.incompleteSummary,
-        followUpNeeded: partial.partial.followUpNeeded,
-        awaitingPromotion: true,
-        sourceRunId: runId,
-        sourceRunNodeId: runNodeId,
-      };
-      rewriteFrontmatter(task.path, (fm) => {
-        if (fm.status === 'active') fm.status = 'pending';
-        fm.runReadiness = 'blocked';
-        fm.runReadinessReason = sanitizeFmScalar(`Awaiting partial-driven follow-up promotion (partial: ${partial.partialId})`);
-        fm.awaitingPromotion = true;
-        fm.awaitingPromotionPartialId = partial.partialId;
-        delete fm.lastRunFailureReason;
-        return fm;
-      });
-      rewriteFrontmatter(runNodePath, (fm) => {
-        fm.status = 'done';
-        fm.result = {
-          ...executionResult,
-          partialRequest: {
-            partialRequested: true,
-            completedSummary: partial.partial.completedSummary,
-            incompleteSummary: partial.partial.incompleteSummary,
-            followUpNeeded: partial.partial.followUpNeeded,
-          },
-          partialCompletion,
-        };
-        return fm;
-      });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_partial_requested', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        partialId: partial.partialId,
-      });
-      appendRunLog(runDir, `${finishedAt} task_partial_requested taskId=${task.id} runNodeId=${runNodeId} partialId=${partial.partialId}`);
-      return {
-        taskId: task.id,
         runNodeId,
-        kind: 'execute',
-        status: 'partial',
+        runNodePath,
+        runDir,
+        runId,
+        eventsPath,
         executor,
-        message: result.message || null,
+        finishedAt,
+        result,
+        executionResult,
+        partialRequest,
         budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-        partialCompletion,
-      };
+        artifactWorkspacePath,
+      });
     }
     if (partialRequest.markerFound && partialRequest.parseError) {
       const reason = sanitizeFmScalar(`malformed TASKOPS_PARTIAL_REQUEST marker: ${partialRequest.parseError}`);
-      rewriteFrontmatter(task.path, (fm) => {
-        fm.status = 'blocked';
-        fm.runReadiness = 'blocked';
-        fm.runReadinessReason = reason;
-        fm.lastRunFailureReason = reason;
-        fm.needsManualReview = true;
-        fm.malformedPartialRequest = true;
-        return fm;
-      });
-      rewriteFrontmatter(runNodePath, (fm) => {
-        fm.status = 'blocked';
-        fm.result = {
-          ...executionResult,
+      return closeExecuteFailure({
+        task,
+        runDir,
+        eventsPath,
+        runNodePath,
+        taskUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.runReadiness = 'blocked';
+          fm.runReadinessReason = reason;
+          fm.lastRunFailureReason = reason;
+          fm.needsManualReview = true;
+          fm.malformedPartialRequest = true;
+          return fm;
+        },
+        runNodeUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.result = {
+            ...executionResult,
+            malformedPartialRequest: {
+              markerFound: true,
+              parseError: partialRequest.parseError,
+              rawLine: partialRequest.rawLine || '',
+              needsManualReview: true,
+            },
+          };
+          return fm;
+        },
+        event: {
+          timestamp: finishedAt, type: 'task_malformed_partial_request', runId,
+          taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+          parseError: partialRequest.parseError,
+        },
+        logLine: `${finishedAt} task_malformed_partial_request taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`,
+        actionResult: {
+          taskId: task.id,
+          runNodeId,
+          kind: 'execute',
+          status: 'failed',
+          failureKind: 'malformed_partial_request',
+          executor,
+          message: reason,
+          budget,
+          executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
           malformedPartialRequest: {
             markerFound: true,
             parseError: partialRequest.parseError,
             rawLine: partialRequest.rawLine || '',
-            needsManualReview: true,
           },
-        };
-        return fm;
-      });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_malformed_partial_request', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        parseError: partialRequest.parseError,
-      });
-      appendRunLog(runDir, `${finishedAt} task_malformed_partial_request taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
-      return {
-        taskId: task.id,
-        runNodeId,
-        kind: 'execute',
-        status: 'failed',
-        failureKind: 'malformed_partial_request',
-        executor,
-        message: reason,
-        budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-        malformedPartialRequest: {
-          markerFound: true,
-          parseError: partialRequest.parseError,
-          rawLine: partialRequest.rawLine || '',
         },
-      };
+      });
     }
     const surpriseReport = parseSurpriseReportFromExecutorResult(result);
     if (surpriseReport.markerFound && surpriseReport.parseError) {
       const reason = malformedSurpriseReason(surpriseReport);
-      rewriteFrontmatter(task.path, (fm) => {
-        fm.status = 'blocked';
-        fm.runReadiness = 'blocked';
-        fm.runReadinessReason = reason;
-        fm.lastRunFailureReason = reason;
-        fm.needsManualReview = true;
-        fm.malformedSurpriseReport = true;
-        return fm;
-      });
-      rewriteFrontmatter(runNodePath, (fm) => {
-        fm.status = 'blocked';
-        fm.result = {
-          ...executionResult,
+      return closeExecuteFailure({
+        task,
+        runDir,
+        eventsPath,
+        runNodePath,
+        taskUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.runReadiness = 'blocked';
+          fm.runReadinessReason = reason;
+          fm.lastRunFailureReason = reason;
+          fm.needsManualReview = true;
+          fm.malformedSurpriseReport = true;
+          return fm;
+        },
+        runNodeUpdater: (fm) => {
+          fm.status = 'blocked';
+          fm.result = {
+            ...executionResult,
+            malformedSurpriseReport: {
+              markerFound: true,
+              parseError: surpriseReport.parseError,
+              rawLine: surpriseReport.rawLine || '',
+              needsManualReview: true,
+            },
+          };
+          return fm;
+        },
+        event: {
+          timestamp: finishedAt, type: 'task_malformed_surprise_report', runId,
+          taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+          parseError: surpriseReport.parseError,
+        },
+        logLine: `${finishedAt} task_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`,
+        actionResult: {
+          taskId: task.id,
+          runNodeId,
+          kind: 'execute',
+          status: 'failed',
+          failureKind: 'malformed_surprise_report',
+          executor,
+          message: reason,
+          budget,
+          executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
           malformedSurpriseReport: {
             markerFound: true,
             parseError: surpriseReport.parseError,
             rawLine: surpriseReport.rawLine || '',
-            needsManualReview: true,
           },
-        };
-        return fm;
-      });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_malformed_surprise_report', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        parseError: surpriseReport.parseError,
-      });
-      appendRunLog(runDir, `${finishedAt} task_malformed_surprise_report taskId=${task.id} runNodeId=${runNodeId} reason=${reason}`);
-      return {
-        taskId: task.id,
-        runNodeId,
-        kind: 'execute',
-        status: 'failed',
-        failureKind: 'malformed_surprise_report',
-        executor,
-        message: reason,
-        budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-        malformedSurpriseReport: {
-          markerFound: true,
-          parseError: surpriseReport.parseError,
-          rawLine: surpriseReport.rawLine || '',
         },
-      };
-    }
-    const surpriseHistoryEntry = surpriseReport.surpriseReported
-      ? appendSurpriseHistory({
-          task,
-          report: surpriseReport.report,
-          runId,
-          runNodeId,
-          actionKind: 'execute',
-          observedAt: finishedAt,
-          evidenceRefs: [`run:${runId}/node:${runNodeId}`],
-        })
-      : null;
-    rewriteFrontmatter(task.path, (fm) => { fm.status = 'done'; return fm; });
-    rewriteFrontmatter(runNodePath, (fm) => {
-      fm.status = 'done';
-      fm.result = {
-        ...executionResult,
-        ...(surpriseReport.surpriseReported ? {
-          surpriseReport: surpriseReport.report,
-          surpriseHistoryEntry,
-        } : {}),
-      };
-      return fm;
-    });
-    const reviewedRunNode = parseMarkdownFile(runNodePath);
-    const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
-    const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
-    if (review.reviewReport.decision !== 'approved' && isGuarded) {
-      rewriteFrontmatter(task.path, (fm) => {
-        fm.status = 'blocked';
-        fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
-        return fm;
       });
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'task_review_failed', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
-        decision: review.reviewReport.decision,
-      });
-      appendRunLog(runDir, `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`);
-      return {
-        taskId: task.id,
-        runNodeId,
-        reviewNodeId: review.reviewNodeId,
-        kind: 'execute',
-        status: 'failed',
-        executor,
-        message: result.message || null,
-        reviewDecision: review.reviewReport.decision,
-        budget,
-        executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-      };
     }
-    const approvedReview = review.approvedReview;
-    const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
-    closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
-    closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
-
-    logEvent(eventsPath, {
-      timestamp: finishedAt, type: 'task_completed', runId,
-      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-      reviewNodeId: review.reviewNodeId,
-      reviewDecision: review.reviewReport.decision,
-      message: result.message || null,
+    return closeExecuteSuccess({
+      projectDir,
+      task,
+      runDir,
+      runId,
+      eventsPath,
+      executor,
+      runNodeId,
+      runNodePath,
+      finishedAt,
+      result,
+      executionResult,
+      surpriseReport,
+      budget,
+      artifactWorkspacePath,
     });
-    appendRunLog(runDir, `${finishedAt} task_completed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} reviewDecision=${review.reviewReport.decision}`);
-    return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
   }
 
-  rewriteFrontmatter(task.path, (fm) => {
-    fm.status = 'blocked';
-    fm.lastRunFailureReason = sanitizeFmScalar(result.message);
-    return fm;
+  return closeExecuteFailure({
+    task,
+    runDir,
+    eventsPath,
+    runNodePath,
+    taskUpdater: (fm) => {
+      fm.status = 'blocked';
+      fm.lastRunFailureReason = sanitizeFmScalar(result.message);
+      return fm;
+    },
+    runNodeUpdater: (fm) => { fm.status = 'blocked'; return fm; },
+    event: {
+      timestamp: finishedAt, type: 'task_failed', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      message: result.message || null,
+    },
+    logLine: `${finishedAt} task_failed taskId=${task.id} reason=${result.message || ''}`,
+    actionResult: {
+      taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor,
+      message: result.message || null, adapterStatus: result.status || null,
+      stdout: result.stdout || '', stderr: result.stderr || '',
+      budget,
+      executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+    },
   });
-  rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
-  logEvent(eventsPath, {
-    timestamp: finishedAt, type: 'task_failed', runId,
-    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-    message: result.message || null,
-  });
-  appendRunLog(runDir, `${finishedAt} task_failed taskId=${task.id} reason=${result.message || ''}`);
-  return {
-    taskId: task.id, runNodeId, kind: 'execute', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
-    executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
-  };
 }
 
 export function extendActiveSnapshot(parsed, addition) {
@@ -2600,7 +2736,7 @@ export function extendActiveSnapshot(parsed, addition) {
   if (existing.some((pair) => pair && pair.taskGroupId === addition.taskGroupId && pair.versionId === addition.versionId)) {
     return false;
   }
-  rewriteFrontmatter(snapshot.path, (fm) => {
+  updateMarkdownFrontmatter(snapshot.path, (fm) => {
     const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
     if (list.some((pair) => pair && pair.taskGroupId === addition.taskGroupId && pair.versionId === addition.versionId)) {
       return fm;
@@ -2648,7 +2784,7 @@ function ensureDecompositionBacklink({ projectDir, childTaskGroupId, versionId, 
   }
 
   for (const filePath of paths) {
-    rewriteFrontmatter(filePath, (fm) => {
+    updateMarkdownFrontmatter(filePath, (fm) => {
       for (const [key, value] of Object.entries(desired)) fm[key] = value;
       return fm;
     });
@@ -2886,7 +3022,7 @@ function normalizeExpectedPlansForChildVersion({ projectDir, childTaskGroupId, v
       continue;
     }
     const fallback = fallbackExpectedPlanForChild(parentTask, normalized.reason);
-    rewriteFrontmatter(taskPath, (fm) => {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
       fm.expectedPlan = fallback;
       return fm;
     });
@@ -3100,7 +3236,7 @@ function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versi
       return normalized.ref;
     });
     if (!changed) continue;
-    rewriteFrontmatter(taskPath, (fm) => {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
       fm.blockedBy = nextRefs;
       return fm;
     });
@@ -3157,7 +3293,7 @@ function deferCommittingScopeChildrenForChildVersion({ projectDir, childTaskGrou
       reason,
       expectedPlan: childTask.expectedPlan || null,
     });
-    rewriteFrontmatter(taskPath, (fm) => {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
       fm.status = 'blocked';
       fm.runReadiness = 'blocked';
       fm.runReadinessReason = reason;
@@ -3303,73 +3439,20 @@ function maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, 
   };
 }
 
-function executeDecompositionTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
-  const inheritedContext = inheritedContextForTask(projectDir, task);
-  const startedAt = isoNow();
-  const runNodeId = runNodeIdForTask(runDir, task);
-  const runNodePath = ensureRunNode({
-    runDir, runId, runNodeId,
-    type: 'decomposition',
-    title: `Decompose: ${task.title}`,
-    sourceTaskId: task.id,
-    sourceTaskGroupVersionId: task.taskGroupVersionId,
-    status: 'active',
-    kindLabel: 'decompose',
-  });
-  attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
-
-  logEvent(eventsPath, {
-    timestamp: startedAt, type: 'decomposition_started', runId,
-    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-  });
-  appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
-
-  let result;
-  try {
-    result = executor === 'dry-run'
-      ? performDryRunDecomposition({ projectDir, task })
-      : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
-  } catch (err) {
-    result = { ok: false, message: err instanceof Error ? err.message : String(err) };
-  }
-
-  const finishedAt = isoNow();
-  if (!result.ok) {
-    result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
-    if (result.recoveredAfterAdapterFailure === true) {
-      logEvent(eventsPath, {
-        timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
-        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
-        adapterFailureReason: result.adapterFailureReason || null,
-        adapterStatus: result.adapterFailureStatus || result.status || null,
-        recoveryStatus: result.recoveryStatus || null,
-        recovery: result.recovery || null,
-      });
-      appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
-    }
-  }
-  if (!result.ok) {
-    rewriteFrontmatter(task.path, (fm) => {
-      fm.status = 'blocked';
-      fm.lastRunFailureReason = sanitizeFmScalar(result.message);
-      return fm;
-    });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
-    logEvent(eventsPath, {
-      timestamp: finishedAt, type: 'decomposition_failed', runId,
-      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
-      message: result.message || null,
-    });
-    appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
-    return {
-    taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
-    message: result.message || null, adapterStatus: result.status || null,
-    stdout: result.stdout || '', stderr: result.stderr || '',
-    budget,
-    };
-  }
-
+function closeDecomposeSuccess({
+  projectDir,
+  parsed,
+  task,
+  runDir,
+  runId,
+  eventsPath,
+  executor,
+  budget,
+  runNodeId,
+  runNodePath,
+  result,
+  finishedAt,
+}) {
   const backlinkResult = ensureDecompositionBacklink({
     projectDir,
     childTaskGroupId: result.childTaskGroupId,
@@ -3379,12 +3462,12 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     runNodeId,
   });
   if (!backlinkResult.ok) {
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(backlinkResult.message);
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'decomposition_failed', runId,
       taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
@@ -3458,7 +3541,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     appendRunLog(runDir, `${finishedAt} committing_scope_deferred taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${committingScopeDeferral.deferredCount}`);
   }
 
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.childTaskGroupId = result.childTaskGroupId;
     fm.runReadiness = 'needs_decomposition';
@@ -3471,7 +3554,7 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
   const taskCloseReason = result.recoveredAfterAdapterFailure ? 'decomposed_by_runner_after_adapter_timeout_recovery' : 'decomposed_by_runner';
   const runCloseReason = result.recoveredAfterAdapterFailure ? 'decomposition_recorded_after_adapter_timeout_recovery' : 'decomposition_recorded';
   closeTaskWithEow({ task, reason: taskCloseReason, finishedAt });
-  rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
+  updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, finishedAt });
   const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
     projectDir,
@@ -3495,6 +3578,22 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     committingScopeDeferral,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
+
+  const extended = extendActiveSnapshot(parsed, {
+    taskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+  });
+  if (extended) {
+    logEvent(eventsPath, {
+      timestamp: isoNow(), type: 'snapshot_extended', runId,
+      snapshotId: parsed.project.activeSnapshotId,
+      taskGroupId: result.childTaskGroupId,
+      versionId: result.versionId,
+      source: { taskId: task.id, runNodeId },
+    });
+    appendRunLog(runDir, `${isoNow()} snapshot_extended snapshotId=${parsed.project.activeSnapshotId} taskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
+  }
+
   return {
     taskId: task.id, runNodeId, kind: 'decompose', status: 'completed', executor,
     childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, message: result.message || null,
@@ -3508,6 +3607,102 @@ function executeDecompositionTask({ projectDir, project, task, runDir, runId, ev
     committingScopeDeferral,
     budget,
   };
+}
+
+function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const inheritedContext = inheritedContextForTask(projectDir, task);
+  const startedAt = isoNow();
+  const runNodeId = runNodeIdForTask(runDir, task);
+  const releaseMutationLock = acquireMutationLock({
+    projectDir,
+    runId,
+    runNodeId,
+    task,
+    action: 'decompose',
+    executor,
+    stepTimeoutMs,
+  });
+  try {
+    const runNodePath = ensureRunNode({
+      runDir, runId, runNodeId,
+      type: 'decomposition',
+      title: `Decompose: ${task.title}`,
+      sourceTaskId: task.id,
+      sourceTaskGroupVersionId: task.taskGroupVersionId,
+      status: 'active',
+      kindLabel: 'decompose',
+    });
+    attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
+
+    logEvent(eventsPath, {
+      timestamp: startedAt, type: 'decomposition_started', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    });
+    appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
+
+    let result;
+    try {
+      result = executor === 'dry-run'
+        ? performDryRunDecomposition({ projectDir, task })
+        : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
+    } catch (err) {
+      result = { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+
+    const finishedAt = isoNow();
+    if (!result.ok) {
+      result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
+      if (result.recoveredAfterAdapterFailure === true) {
+        logEvent(eventsPath, {
+          timestamp: finishedAt, type: 'decomposition_recovered_after_adapter_failure', runId,
+          taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+          childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+          adapterFailureReason: result.adapterFailureReason || null,
+          adapterStatus: result.adapterFailureStatus || result.status || null,
+          recoveryStatus: result.recoveryStatus || null,
+          recovery: result.recovery || null,
+        });
+        appendRunLog(runDir, `${finishedAt} decomposition_recovered_after_adapter_failure taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} reason=${result.adapterFailureReason || ''}`);
+      }
+    }
+    if (!result.ok) {
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        fm.status = 'blocked';
+        fm.lastRunFailureReason = sanitizeFmScalar(result.message);
+        return fm;
+      });
+      updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_failed', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        message: result.message || null,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} reason=${result.message || ''}`);
+      return {
+        taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+        message: result.message || null, adapterStatus: result.status || null,
+        stdout: result.stdout || '', stderr: result.stderr || '',
+        budget,
+      };
+    }
+
+    return closeDecomposeSuccess({
+      projectDir,
+      parsed,
+      task,
+      runDir,
+      runId,
+      eventsPath,
+      executor,
+      budget,
+      runNodeId,
+      runNodePath,
+      result,
+      finishedAt,
+    });
+  } finally {
+    releaseMutationLock();
+  }
 }
 
 function performDryRunExploration({ runDir, runNodeId, task }) {
@@ -3594,12 +3789,12 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
 
   const finishedAt = isoNow();
   if (!result.ok) {
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(result.message);
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
     logEvent(eventsPath, {
       timestamp: finishedAt, type: 'exploration_failed', runId,
       taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
@@ -3620,7 +3815,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   const surpriseReport = parseSurpriseReportFromExecutorResult(result, artifactText ? [artifactText] : []);
   if (surpriseReport.markerFound && surpriseReport.parseError) {
     const reason = malformedSurpriseReason(surpriseReport);
-    rewriteFrontmatter(task.path, (fm) => {
+    updateMarkdownFrontmatter(task.path, (fm) => {
       fm.status = 'blocked';
       fm.runReadiness = 'blocked';
       fm.runReadinessReason = reason;
@@ -3629,7 +3824,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
       fm.malformedSurpriseReport = true;
       return fm;
     });
-    rewriteFrontmatter(runNodePath, (fm) => {
+    updateMarkdownFrontmatter(runNodePath, (fm) => {
       fm.status = 'blocked';
       fm.result = {
         artifactPath: result.artifactPath || null,
@@ -3676,7 +3871,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
       })
     : null;
 
-  rewriteFrontmatter(task.path, (fm) => {
+  updateMarkdownFrontmatter(task.path, (fm) => {
     fm.status = 'done';
     fm.runReadiness = 'needs_decomposition';
     fm.runReadinessReason = sanitizeFmScalar(`Exploration recorded by taskops-runner (${executor}) at ${finishedAt}; ready for decomposition with informed inputs.`);
@@ -3684,7 +3879,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     return fm;
   });
   closeTaskWithEow({ task, reason: 'exploration_recorded_by_runner', finishedAt });
-  rewriteFrontmatter(runNodePath, (fm) => {
+  updateMarkdownFrontmatter(runNodePath, (fm) => {
     fm.status = 'done';
     fm.result = {
       artifactPath: result.artifactPath || null,
@@ -3907,7 +4102,7 @@ function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedRev
     const taskMatch = task && eow.graphType === 'task' && eow.attachedToId === task.id && eow.taskGroupVersionId === task.taskGroupVersionId;
     const runMatch = eow.graphType === 'run' && eow.runId === runNode.runId && eow.attachedToId === runNode.id;
     if (!taskMatch && !runMatch) continue;
-    rewriteFrontmatter(eow.path, (fm) => {
+    updateMarkdownFrontmatter(eow.path, (fm) => {
       fm.approvedByReviewNodeId = approvedReview.reviewNodeId;
       fm.approvedReviewMode = approvedReview.reviewMode;
       fm.approvedReviewReportHash = approvedReview.reviewReportHash;
@@ -4030,7 +4225,7 @@ export function closeTarget(workDir, targetId, {
 
     const statusFlipped = task.status !== 'done' && declaredReason === 'manual_verified';
     if (statusFlipped) {
-      rewriteFrontmatter(task.path, (fm) => {
+      updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'done';
         fm.runReadinessReason = sanitizeFmScalar(`Closed by taskops close --reason manual_verified at ${declaredAt}.`);
         return fm;
@@ -4384,30 +4579,10 @@ export function runTaskOps(workDir, options = {}) {
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
-          projectDir, project: parsed.project, task: next.task,
+          projectDir, parsed, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
           budget: stepBudget,
         });
-        if (
-          stepResult.status === 'completed'
-          && stepResult.childTaskGroupId
-          && stepResult.versionId
-        ) {
-          const extended = extendActiveSnapshot(parsed, {
-            taskGroupId: stepResult.childTaskGroupId,
-            versionId: stepResult.versionId,
-          });
-          if (extended) {
-            logEvent(eventsPath, {
-              timestamp: isoNow(), type: 'snapshot_extended', runId,
-              snapshotId: parsed.project.activeSnapshotId,
-              taskGroupId: stepResult.childTaskGroupId,
-              versionId: stepResult.versionId,
-              source: { taskId: stepResult.taskId, runNodeId: stepResult.runNodeId },
-            });
-            appendRunLog(runDir, `${isoNow()} snapshot_extended snapshotId=${parsed.project.activeSnapshotId} taskGroupId=${stepResult.childTaskGroupId} versionId=${stepResult.versionId}`);
-          }
-        }
       } else if (next.kind === 'explore') {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,

@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSync, watch } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
 
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
@@ -2214,12 +2215,13 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   return versionDir;
 }
 
-function rewriteFrontmatterInPlace(filePath, updater) {
-  const fm = parseMarkdownFile(filePath);
-  const body = readBody(filePath);
-  const next = updater({ ...fm }) ?? fm;
-  const text = fmBlock(next) + (body ? body + '\n' : '');
-  writeFileSync(filePath, text, 'utf8');
+function updateMarkdownFrontmatter(filePath, updater) {
+  return updateMarkdownFrontmatterViaStateWriter(filePath, updater, {
+    parseMarkdownFile,
+    readBody,
+    fmBlock,
+    writeTextFile: (targetPath, text) => writeFileSync(targetPath, text, 'utf8'),
+  });
 }
 
 function deriveRestartVersionId(taskGroup, sourceVersionId) {
@@ -2953,7 +2955,7 @@ function applyRepeatedPartialReviewPatches(parsed, patches) {
   for (const patch of patches || []) {
     const task = parsed.tasks.get(taskKey(patch.taskGroupVersionId, patch.taskId));
     if (!task?.path) continue;
-    rewriteFrontmatterInPlace(task.path, (fm) => applyRepeatedPartialReviewToTask(fm, [patch]));
+    updateMarkdownFrontmatter(task.path, (fm) => applyRepeatedPartialReviewToTask(fm, [patch]));
     applied.push({
       taskId: patch.taskId,
       taskGroupVersionId: patch.taskGroupVersionId,
@@ -2964,6 +2966,95 @@ function applyRepeatedPartialReviewPatches(parsed, patches) {
     });
   }
   return applied;
+}
+
+function applyPartialPromotion({ plan, parsed, activeSnapshot, now }) {
+  const appliedVersionPlans = [];
+  const repeatedReviewApplied = applyRepeatedPartialReviewPatches(parsed, plan.repeatedReviewPatches);
+
+  for (const versionPlan of plan.versionPlans) {
+    const sourceVersion = parsed.versions.get(versionPlan.fromVersionId);
+    if (!sourceVersion) throw new Error(`Cannot promote partials: source version '${versionPlan.fromVersionId}' not found`);
+    const taskGroup = parsed.taskGroups.get(versionPlan.taskGroupId);
+    if (!taskGroup) throw new Error(`Cannot promote partials: task group '${versionPlan.taskGroupId}' not found`);
+
+    const newVersionDir = writeVersionFromSpec(plan.projectDir, versionPlan.taskGroupId, versionPlan.specPreview, {
+      supersedesVersionId: versionPlan.fromVersionId,
+    });
+
+    updateMarkdownFrontmatter(join(sourceVersion.path, 'index.md'), (fm) => {
+      fm.selected = false;
+      fm.supersededByVersionId = versionPlan.toVersionId;
+      fm.supersededAt = now;
+      fm.supersededReason = 'partial_follow_up_promotion';
+      return fm;
+    });
+
+    updateMarkdownFrontmatter(join(taskGroup.path, 'index.md'), (fm) => {
+      fm.activeVersionId = versionPlan.toVersionId;
+      return fm;
+    });
+
+    updateMarkdownFrontmatter(activeSnapshot.path, (fm) => {
+      const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
+      fm.selectedVersions = list.map((p) => {
+        if (!p || typeof p !== 'object') return p;
+        if (p.taskGroupId === versionPlan.taskGroupId && p.versionId === versionPlan.fromVersionId) {
+          return { taskGroupId: p.taskGroupId, versionId: versionPlan.toVersionId };
+        }
+        return p;
+      });
+      return fm;
+    });
+
+    const decompositionLogPath = join(newVersionDir, 'decomposition-log.md');
+    const promotedIds = versionPlan.promotions.map((promotion) => promotion.partialId).join(', ');
+    appendTextFile(
+      decompositionLogPath,
+      `- ${now} partial-driven follow-up promotion from=${versionPlan.fromVersionId} to=${versionPlan.toVersionId} partials=${promotedIds}\n`,
+    );
+
+    const closedSourceRunNodes = [];
+    for (const promotion of versionPlan.promotions) {
+      const partial = parsed.partialNodes.get(promotion.partialId);
+      if (!partial) throw new Error(`Cannot promote partials: partial '${promotion.partialId}' disappeared before apply`);
+      updateMarkdownFrontmatter(partial.path, (fm) => {
+        fm.supersededBy = promotion.supersededBy;
+        fm.supersededAt = now;
+        fm.supersededReason = 'partial_follow_up_promotion';
+        fm.followUpTaskId = promotion.followUpTaskId;
+        fm.followUpTaskGroupVersionId = versionPlan.toVersionId;
+        return fm;
+      });
+      const closedSourceRunNode = closePromotedPartialSourceRunNode(plan.projectDir, partial, now);
+      if (closedSourceRunNode) {
+        closedSourceRunNodes.push({
+          partialId: promotion.partialId,
+          ...closedSourceRunNode,
+        });
+      }
+    }
+
+    appliedVersionPlans.push({
+      taskGroupId: versionPlan.taskGroupId,
+      fromVersionId: versionPlan.fromVersionId,
+      toVersionId: versionPlan.toVersionId,
+      newVersionDir,
+      promotionCount: versionPlan.promotions.length,
+      promotedPartialIds: versionPlan.promotions.map((promotion) => promotion.partialId),
+      closedSourceRunNodes,
+    });
+  }
+
+  const logLine = `- ${now} promote partials work=${plan.workId} promotions=${plan.promotionCount} skipped=${plan.skippedCount} versions=${appliedVersionPlans.map((p) => `${p.fromVersionId}->${p.toVersionId}`).join(',')}\n`;
+  appendWorkLog(plan.projectDir, logLine);
+  updateMarkdownFrontmatter(join(plan.projectDir, 'index.md'), (fm) => {
+    fm.partialPromotionWaveBudget = plan.waveBudget.budget;
+    fm.partialPromotionWaveCount = plan.waveBudget.nextCount;
+    return fm;
+  });
+
+  return { appliedVersionPlans, repeatedReviewApplied };
 }
 
 export function promotePartialCompletions(workDir, { partialId = null, maxFollowUpDepth = DEFAULT_MAX_FOLLOW_UP_DEPTH, partialRepeatThreshold = null, dryRun = true } = {}) {
@@ -3017,90 +3108,7 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
   if (!activeSnapshot) throw new Error('Cannot promote partials: project has no active snapshot');
 
   const now = isoNow();
-  const appliedVersionPlans = [];
-  const repeatedReviewApplied = applyRepeatedPartialReviewPatches(parsed, plan.repeatedReviewPatches);
-
-  for (const versionPlan of plan.versionPlans) {
-    const sourceVersion = parsed.versions.get(versionPlan.fromVersionId);
-    if (!sourceVersion) throw new Error(`Cannot promote partials: source version '${versionPlan.fromVersionId}' not found`);
-    const taskGroup = parsed.taskGroups.get(versionPlan.taskGroupId);
-    if (!taskGroup) throw new Error(`Cannot promote partials: task group '${versionPlan.taskGroupId}' not found`);
-
-    const newVersionDir = writeVersionFromSpec(plan.projectDir, versionPlan.taskGroupId, versionPlan.specPreview, {
-      supersedesVersionId: versionPlan.fromVersionId,
-    });
-
-    rewriteFrontmatterInPlace(join(sourceVersion.path, 'index.md'), (fm) => {
-      fm.selected = false;
-      fm.supersededByVersionId = versionPlan.toVersionId;
-      fm.supersededAt = now;
-      fm.supersededReason = 'partial_follow_up_promotion';
-      return fm;
-    });
-
-    rewriteFrontmatterInPlace(join(taskGroup.path, 'index.md'), (fm) => {
-      fm.activeVersionId = versionPlan.toVersionId;
-      return fm;
-    });
-
-    rewriteFrontmatterInPlace(activeSnapshot.path, (fm) => {
-      const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
-      fm.selectedVersions = list.map((p) => {
-        if (!p || typeof p !== 'object') return p;
-        if (p.taskGroupId === versionPlan.taskGroupId && p.versionId === versionPlan.fromVersionId) {
-          return { taskGroupId: p.taskGroupId, versionId: versionPlan.toVersionId };
-        }
-        return p;
-      });
-      return fm;
-    });
-
-    const decompositionLogPath = join(newVersionDir, 'decomposition-log.md');
-    const promotedIds = versionPlan.promotions.map((promotion) => promotion.partialId).join(', ');
-    appendTextFile(
-      decompositionLogPath,
-      `- ${now} partial-driven follow-up promotion from=${versionPlan.fromVersionId} to=${versionPlan.toVersionId} partials=${promotedIds}\n`,
-    );
-
-    const closedSourceRunNodes = [];
-    for (const promotion of versionPlan.promotions) {
-      const partial = parsed.partialNodes.get(promotion.partialId);
-      if (!partial) throw new Error(`Cannot promote partials: partial '${promotion.partialId}' disappeared before apply`);
-      rewriteFrontmatterInPlace(partial.path, (fm) => {
-        fm.supersededBy = promotion.supersededBy;
-        fm.supersededAt = now;
-        fm.supersededReason = 'partial_follow_up_promotion';
-        fm.followUpTaskId = promotion.followUpTaskId;
-        fm.followUpTaskGroupVersionId = versionPlan.toVersionId;
-        return fm;
-      });
-      const closedSourceRunNode = closePromotedPartialSourceRunNode(plan.projectDir, partial, now);
-      if (closedSourceRunNode) {
-        closedSourceRunNodes.push({
-          partialId: promotion.partialId,
-          ...closedSourceRunNode,
-        });
-      }
-    }
-
-    appliedVersionPlans.push({
-      taskGroupId: versionPlan.taskGroupId,
-      fromVersionId: versionPlan.fromVersionId,
-      toVersionId: versionPlan.toVersionId,
-      newVersionDir,
-      promotionCount: versionPlan.promotions.length,
-      promotedPartialIds: versionPlan.promotions.map((promotion) => promotion.partialId),
-      closedSourceRunNodes,
-    });
-  }
-
-  const logLine = `- ${now} promote partials work=${plan.workId} promotions=${plan.promotionCount} skipped=${plan.skippedCount} versions=${appliedVersionPlans.map((p) => `${p.fromVersionId}->${p.toVersionId}`).join(',')}\n`;
-  appendWorkLog(plan.projectDir, logLine);
-  rewriteFrontmatterInPlace(join(plan.projectDir, 'index.md'), (fm) => {
-    fm.partialPromotionWaveBudget = plan.waveBudget.budget;
-    fm.partialPromotionWaveCount = plan.waveBudget.nextCount;
-    return fm;
-  });
+  const { appliedVersionPlans, repeatedReviewApplied } = applyPartialPromotion({ plan, parsed, activeSnapshot, now });
 
   return {
     ...plan,
@@ -3110,6 +3118,53 @@ export function promotePartialCompletions(workDir, { partialId = null, maxFollow
     appliedVersionPlans,
     repeatedReviewApplied,
   };
+}
+
+function applyRestart({
+  projectDir,
+  taskGroup,
+  sourceVersion,
+  activeSnapshot,
+  targetPair,
+  spec,
+  fromTaskId,
+  reason,
+  now,
+}) {
+  const newVersionId = spec.versionId;
+  const newVersionDir = writeVersionFromSpec(projectDir, taskGroup.id, spec, { supersedesVersionId: sourceVersion.id });
+
+  updateMarkdownFrontmatter(join(sourceVersion.path, 'index.md'), (fm) => {
+    fm.selected = false;
+    fm.supersededByVersionId = newVersionId;
+    fm.supersededAt = now;
+    fm.supersededReason = reason || 'restart';
+    return fm;
+  });
+
+  updateMarkdownFrontmatter(join(taskGroup.path, 'index.md'), (fm) => {
+    if (fm.activeVersionId === sourceVersion.id) fm.activeVersionId = newVersionId;
+    return fm;
+  });
+
+  updateMarkdownFrontmatter(activeSnapshot.path, (fm) => {
+    const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
+    fm.selectedVersions = list.map((p) => {
+      if (!p || typeof p !== 'object') return p;
+      if (p.taskGroupId === targetPair.taskGroupId && p.versionId === sourceVersion.id) {
+        return { taskGroupId: p.taskGroupId, versionId: newVersionId };
+      }
+      return p;
+    });
+    return fm;
+  });
+
+  const workLogPath = join(projectDir, 'work-log.md');
+  const logLine = `- ${now} restart from task=${fromTaskId} taskGroup=${taskGroup.id} from=${sourceVersion.id} to=${newVersionId}${reason ? ` reason="${reason}"` : ''}\n`;
+  if (existsSync(workLogPath)) writeFileSync(workLogPath, readFileSync(workLogPath, 'utf8') + logLine, 'utf8');
+  else writeFileSync(workLogPath, `# Work log\n\n${logLine}`, 'utf8');
+
+  return { newVersionDir };
 }
 
 export function restartFromTask(workDir, { fromTaskId, instruction = null, instructionFile = null, reason = null } = {}) {
@@ -3219,37 +3274,17 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
   };
   copyDecompositionBacklinkFields(sourceVersion, spec);
 
-  const newVersionDir = writeVersionFromSpec(projectDir, taskGroup.id, spec, { supersedesVersionId: sourceVersion.id });
-
-  rewriteFrontmatterInPlace(join(sourceVersion.path, 'index.md'), (fm) => {
-    fm.selected = false;
-    fm.supersededByVersionId = newVersionId;
-    fm.supersededAt = now;
-    fm.supersededReason = reason || 'restart';
-    return fm;
+  const { newVersionDir } = applyRestart({
+    projectDir,
+    taskGroup,
+    sourceVersion,
+    activeSnapshot,
+    targetPair,
+    spec,
+    fromTaskId,
+    reason,
+    now,
   });
-
-  rewriteFrontmatterInPlace(join(taskGroup.path, 'index.md'), (fm) => {
-    if (fm.activeVersionId === sourceVersion.id) fm.activeVersionId = newVersionId;
-    return fm;
-  });
-
-  rewriteFrontmatterInPlace(activeSnapshot.path, (fm) => {
-    const list = Array.isArray(fm.selectedVersions) ? [...fm.selectedVersions] : [];
-    fm.selectedVersions = list.map((p) => {
-      if (!p || typeof p !== 'object') return p;
-      if (p.taskGroupId === targetPair.taskGroupId && p.versionId === sourceVersion.id) {
-        return { taskGroupId: p.taskGroupId, versionId: newVersionId };
-      }
-      return p;
-    });
-    return fm;
-  });
-
-  const workLogPath = join(projectDir, 'work-log.md');
-  const logLine = `- ${now} restart from task=${fromTaskId} taskGroup=${taskGroup.id} from=${sourceVersion.id} to=${newVersionId}${reason ? ` reason="${reason}"` : ''}\n`;
-  if (existsSync(workLogPath)) writeFileSync(workLogPath, readFileSync(workLogPath, 'utf8') + logLine, 'utf8');
-  else writeFileSync(workLogPath, `# Work log\n\n${logLine}`, 'utf8');
 
   return {
     workId: parsed.project.id,

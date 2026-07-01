@@ -7,8 +7,28 @@ import {
   discoverProjects,
   parseProject,
 } from './lib-taskops.js';
+import {
+  DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
+  isMutationLockActive,
+  waitForMutationLockClear,
+} from './lib-mutation-lock.js';
+import {
+  queueItemStaleMarkerSql,
+  queueItemUpsertSql,
+  writeLeaseHeartbeatRow,
+  writeLeaseInsertRow,
+  writeProgressReportRow,
+  writeRunnerAttemptRow,
+  updateRunnerAttemptRow,
+} from './lib-queue-writer.js';
 
 export const QUEUE_DB_RELATIVE_PATH = join('.taskops', 'queue.sqlite');
+
+const queueWriterIo = {
+  runPreparedStatement(db, sql, params) {
+    db.prepare(sql).run(...params);
+  },
+};
 
 function isoNow() {
   return new Date().toISOString();
@@ -118,16 +138,42 @@ function isTransientRunGraphError(error) {
   );
 }
 
+function mutationLockReaderTimeoutError(projectDir) {
+  return new Error(`TaskOps canonical mutation lock still active under ${projectDir}; timed out waiting to sync queue`);
+}
+
 function parseSingleProject(workDir) {
   const workRoot = resolve(workDir);
   const projects = discoverProjects(workRoot);
   if (projects.length !== 1) throw new Error(`Expected exactly 1 TaskOps work under ${workDir}, found ${projects.length}`);
   const projectDir = projects[0];
-  let parsed = parseProject(projectDir);
-  for (let attempt = 0; parsed.errors.length > 0 && attempt < 5; attempt += 1) {
-    if (!parsed.errors.every(isTransientRunGraphError)) break;
-    sleepMs(25 * (attempt + 1));
+  let parsed = null;
+  let transientAttempt = 0;
+  const mutationLockDeadlineMs = Date.now() + DEFAULT_MUTATION_LOCK_READER_WAIT_MS;
+  for (;;) {
+    const beforeParse = waitForMutationLockClear(projectDir, { deadlineMs: mutationLockDeadlineMs });
+    if (!beforeParse.cleared && isMutationLockActive(projectDir)) {
+      throw mutationLockReaderTimeoutError(projectDir);
+    }
     parsed = parseProject(projectDir);
+    if (isMutationLockActive(projectDir)) {
+      const afterParse = waitForMutationLockClear(projectDir, { deadlineMs: mutationLockDeadlineMs });
+      if (!afterParse.cleared && isMutationLockActive(projectDir)) {
+        throw mutationLockReaderTimeoutError(projectDir);
+      }
+      continue;
+    }
+    if (parsed.errors.length === 0) break;
+    if (isMutationLockActive(projectDir)) {
+      const afterErrors = waitForMutationLockClear(projectDir, { deadlineMs: mutationLockDeadlineMs });
+      if (!afterErrors.cleared && isMutationLockActive(projectDir)) {
+        throw mutationLockReaderTimeoutError(projectDir);
+      }
+      continue;
+    }
+    if (transientAttempt >= 5 || !parsed.errors.every(isTransientRunGraphError)) break;
+    sleepMs(25 * (transientAttempt + 1));
+    transientAttempt += 1;
   }
   if (parsed.errors.length > 0) throw new Error(`TaskOps work has validation errors; cannot sync queue:\n- ${parsed.errors.join('\n- ')}`);
   return { projectDir, parsed };
@@ -308,40 +354,8 @@ export function syncQueueProjection(workDir) {
   const now = isoNow();
   const rows = selectedTasks(parsed).map((task) => queueRowFromTask(projectDir, parsed, task, now));
 
-  const upsert = db.prepare(`
-    INSERT INTO queue_items (
-      id, work_root, task_id, run_id, readiness, status, priority, blocked_reason,
-      md_fingerprint, created_at, updated_at
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    )
-    ON CONFLICT(id) DO UPDATE SET
-      work_root = excluded.work_root,
-      task_id = excluded.task_id,
-      run_id = excluded.run_id,
-      readiness = excluded.readiness,
-      status = excluded.status,
-      priority = excluded.priority,
-      blocked_reason = excluded.blocked_reason,
-      md_fingerprint = excluded.md_fingerprint,
-      updated_at = excluded.updated_at
-  `);
-  const markMissing = rows.length > 0
-    ? db.prepare(`
-        UPDATE queue_items
-        SET status = 'stale_projection',
-            readiness = 'blocked',
-            blocked_reason = 'No longer present in the selected TaskOps projection.',
-            updated_at = ?
-        WHERE id NOT IN (${rows.map(() => '?').join(',')})
-      `)
-    : db.prepare(`
-        UPDATE queue_items
-        SET status = 'stale_projection',
-            readiness = 'blocked',
-            blocked_reason = 'No longer present in the selected TaskOps projection.',
-            updated_at = ?
-      `);
+  const upsert = db.prepare(queueItemUpsertSql());
+  const markMissing = db.prepare(queueItemStaleMarkerSql(rows.length));
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -455,20 +469,7 @@ export function claimQueueItem(workDir, { runnerId = 'local-runner', ttlSeconds 
         expires_at: isoPlusSeconds(now, ttl),
         attempt: Number(priorAttempt) + 1,
       };
-      db.prepare(`
-        INSERT INTO leases (
-          id, queue_item_id, runner_id, status, leased_at, heartbeat_at, expires_at, attempt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        lease.id,
-        lease.queue_item_id,
-        lease.runner_id,
-        lease.status,
-        lease.leased_at,
-        lease.heartbeat_at,
-        lease.expires_at,
-        lease.attempt,
-      );
+      writeLeaseInsertRow({ db, lease }, queueWriterIo);
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -542,20 +543,7 @@ export function claimQueueItems(workDir, { runnerId = 'local-runner', ttlSeconds
         expires_at: isoPlusSeconds(now, ttl),
         attempt: Number(priorAttempt) + 1,
       };
-      db.prepare(`
-        INSERT INTO leases (
-          id, queue_item_id, runner_id, status, leased_at, heartbeat_at, expires_at, attempt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        lease.id,
-        lease.queue_item_id,
-        lease.runner_id,
-        lease.status,
-        lease.leased_at,
-        lease.heartbeat_at,
-        lease.expires_at,
-        lease.attempt,
-      );
+      writeLeaseInsertRow({ db, lease }, queueWriterIo);
       claims.push({ item, lease });
     }
     db.exec('COMMIT');
@@ -586,11 +574,12 @@ export function heartbeatLease(workDir, leaseId, { ttlSeconds = 300 } = {}) {
     const current = readLease(db, leaseId);
     if (!current) throw new Error(`Lease not found: ${leaseId}`);
     if (current.status !== 'active') throw new Error(`Lease is not active: ${leaseId} (${current.status})`);
-    db.prepare(`
-      UPDATE leases
-      SET heartbeat_at = ?, expires_at = ?
-      WHERE id = ?
-    `).run(now, isoPlusSeconds(now, ttl), leaseId);
+    writeLeaseHeartbeatRow({
+      db,
+      leaseId,
+      heartbeatAt: now,
+      expiresAt: isoPlusSeconds(now, ttl),
+    }, queueWriterIo);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -661,25 +650,7 @@ export function insertRunnerAttempt(workDir, attempt) {
     stop_reason: attempt.stopReason || null,
     error_summary: attempt.errorSummary || null,
   };
-  db.prepare(`
-    INSERT INTO runner_attempts (
-      id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint,
-      status, started_at, finished_at, run_id, stop_reason, error_summary
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id,
-    row.queue_item_id,
-    row.lease_id,
-    row.runner_id,
-    row.runtime_adapter,
-    row.md_fingerprint,
-    row.status,
-    row.started_at,
-    row.finished_at,
-    row.run_id,
-    row.stop_reason,
-    row.error_summary,
-  );
+  writeRunnerAttemptRow({ db, row }, queueWriterIo);
   db.close();
   return { projectDir, workId: parsed.project.id, dbPath, attempt: row };
 }
@@ -704,11 +675,7 @@ export function updateRunnerAttempt(workDir, attemptId, patch = {}) {
     stop_reason: patch.stopReason === undefined ? current.stop_reason : patch.stopReason,
     error_summary: patch.errorSummary === undefined ? current.error_summary : patch.errorSummary,
   };
-  db.prepare(`
-    UPDATE runner_attempts
-    SET status = ?, finished_at = ?, run_id = ?, stop_reason = ?, error_summary = ?
-    WHERE id = ?
-  `).run(row.status, row.finished_at, row.run_id, row.stop_reason, row.error_summary, attemptId);
+  updateRunnerAttemptRow({ db, attemptId, row }, queueWriterIo);
   const updated = db.prepare(`
     SELECT id, queue_item_id, lease_id, runner_id, runtime_adapter, md_fingerprint, status,
            started_at, finished_at, run_id, stop_reason, error_summary
@@ -738,26 +705,7 @@ export function insertProgressReport(workDir, report) {
     delivered_at: report.deliveredAt || (report.status === 'failed' ? null : now),
     error_summary: report.errorSummary || null,
   };
-  db.prepare(`
-    INSERT INTO progress_reports (
-      id, work_root, work_id, queue_item_id, task_id, wave_id,
-      master_session_key, report_sink, status, message, created_at, delivered_at, error_summary
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id,
-    row.work_root,
-    row.work_id,
-    row.queue_item_id,
-    row.task_id,
-    row.wave_id,
-    row.master_session_key,
-    row.report_sink,
-    row.status,
-    row.message,
-    row.created_at,
-    row.delivered_at,
-    row.error_summary,
-  );
+  writeProgressReportRow({ db, row }, queueWriterIo);
   db.close();
   return { projectDir, workId: parsed.project.id, dbPath, report: row };
 }
