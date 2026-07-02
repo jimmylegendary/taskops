@@ -38,7 +38,7 @@ Usage:
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
   taskops promote-partials <work-dir> [--dry-run|--apply] [--partial-id <id>] [--max-follow-up-depth <n>] [--repeat-threshold <n>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
-  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--self-guide-file <path>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
   taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
   taskops queue sync <work-dir> [--json]
   taskops queue list <work-dir> [--json]
@@ -480,6 +480,10 @@ try {
       else console.log(`daemon=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
       process.exit(daemonExitCode(result));
     }
+    const selfGuideFile = flags['self-guide-file'] && flags['self-guide-file'] !== true
+      ? String(flags['self-guide-file'])
+      : null;
+    const selfResolutionGuide = selfGuideFile != null ? readFileSync(resolve(selfGuideFile), 'utf8') : null;
     const result = runTaskOps(workDir, {
       runId: flags['run-id'] && flags['run-id'] !== true ? String(flags['run-id']) : null,
       agent: flags.agent && flags.agent !== true ? String(flags.agent) : null,
@@ -489,6 +493,7 @@ try {
       until: flags.until && flags.until !== true ? String(flags.until) : null,
       timeout: flags.timeout != null && flags.timeout !== true ? flags.timeout : null,
       delegate: flags.delegate,
+      selfResolutionGuide,
       loopback,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,

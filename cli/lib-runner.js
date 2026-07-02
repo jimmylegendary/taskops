@@ -1966,7 +1966,7 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null, delegationMode = false }) {
+function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null, delegationMode = false, selfResolutionGuide = null }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
@@ -1977,7 +1977,7 @@ function invokeExecutor({ project, projectDir = null, task, executor, agentId, s
   }
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
-    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, delegationMode });
+    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, delegationMode, selfResolutionGuide });
     const result = invokeRuntimeAdapter(adapter, {
       prompt,
       agentId,
@@ -2560,7 +2560,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
@@ -2591,7 +2591,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode });
+    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode, selfResolutionGuide });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err), executor, workspacePath: artifactWorkspacePath };
   }
@@ -4444,6 +4444,7 @@ export function runTaskOps(workDir, options = {}) {
   const maxStepsExplicit = options.maxStepsExplicit === true || options.maxStepsExplicit === 'true';
   const budgetEnabled = maxStepsExplicit && maxSteps != null;
   const delegationMode = options.delegate === true || options.delegate === 'true';
+  const selfResolutionGuide = options.selfResolutionGuide != null ? String(options.selfResolutionGuide) : null;
   const targetTaskId = options.targetTaskId || null;
   const targetTaskGroupVersionId = options.targetTaskGroupVersionId || null;
   const allowConcurrentTarget = options.allowConcurrentTarget === true && Boolean(targetTaskId);
@@ -4622,6 +4623,7 @@ export function runTaskOps(workDir, options = {}) {
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
           budget: stepBudget,
           delegationMode,
+          selfResolutionGuide,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
