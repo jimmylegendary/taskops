@@ -3290,6 +3290,24 @@ function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versi
   return summary;
 }
 
+export function stampChildrenSelfResolver({ projectDir, childTaskGroupId, versionId }) {
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const taskPaths = listChildTaskPaths(versionDir);
+  const summary = {
+    taskCount: taskPaths.length,
+    stampedCount: 0,
+  };
+  for (const taskPath of taskPaths) {
+    updateMarkdownFrontmatter(taskPath, (fm) => {
+      // Delegation mode is literal for this slice: overwrite any explicit child resolverKind.
+      fm.resolverKind = 'self';
+      return fm;
+    });
+    summary.stampedCount += 1;
+  }
+  return summary;
+}
+
 function committingScopeDeferralReason({ executor, finishedAt }) {
   return sanitizeFmScalar(`Committing scope deferred by taskops-runner (${executor}) at ${finishedAt}: worker authored runReadiness=needs_decomposition during committing phase; review or restart explicitly before expanding this child scope.`);
 }
@@ -3497,6 +3515,7 @@ function closeDecomposeSuccess({
   runNodePath,
   result,
   finishedAt,
+  delegationMode = false,
 }) {
   const backlinkResult = ensureDecompositionBacklink({
     projectDir,
@@ -3562,6 +3581,14 @@ function closeDecomposeSuccess({
     appendRunLog(runDir, `${finishedAt} blockedby_normalization_unresolved taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${blockedByNormalization.unresolvedCount}`);
   }
 
+  const selfResolverStamp = delegationMode === true
+    ? stampChildrenSelfResolver({
+        projectDir,
+        childTaskGroupId: result.childTaskGroupId,
+        versionId: result.versionId,
+      })
+    : null;
+
   const committingScopeDeferral = deferCommittingScopeChildrenForChildVersion({
     projectDir,
     childTaskGroupId: result.childTaskGroupId,
@@ -3620,6 +3647,7 @@ function closeDecomposeSuccess({
     inheritedBirthSnapshot,
     expectedPlanNormalization,
     blockedByNormalization,
+    ...(selfResolverStamp ? { selfResolverStamp } : {}),
     committingScopeDeferral,
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
@@ -3649,12 +3677,13 @@ function closeDecomposeSuccess({
     inheritedBirthSnapshot,
     expectedPlanNormalization,
     blockedByNormalization,
+    ...(selfResolverStamp ? { selfResolverStamp } : {}),
     committingScopeDeferral,
     budget,
   };
 }
 
-function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false }) {
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const runNodeId = runNodeIdForTask(runDir, task);
@@ -3744,6 +3773,7 @@ function executeDecompositionTask({ projectDir, parsed, project, task, runDir, r
       runNodePath,
       result,
       finishedAt,
+      delegationMode,
     });
   } finally {
     releaseMutationLock();
@@ -4631,6 +4661,7 @@ export function runTaskOps(workDir, options = {}) {
           projectDir, parsed, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
           budget: stepBudget,
+          delegationMode,
         });
       } else if (next.kind === 'explore') {
         stepResult = executeExplorationTask({
