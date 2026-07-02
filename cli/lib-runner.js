@@ -2210,8 +2210,8 @@ function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, app
   return closeRunNodeWithEowViaStateWriter({ runDir, runId, runNodeId, reason, finishedAt, approvedReview }, stateWriterIo());
 }
 
-function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null }) {
-  return closeTaskWithEowViaStateWriter({ task, reason, finishedAt, approvedReview }, stateWriterIo());
+function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }) {
+  return closeTaskWithEowViaStateWriter({ task, reason, finishedAt, approvedReview, resolvedByTaskGroupId }, stateWriterIo());
 }
 
 function partialIdTimestamp(iso) {
@@ -3625,7 +3625,7 @@ function closeDecomposeSuccess({
   });
   const taskCloseReason = result.recoveredAfterAdapterFailure ? 'decomposed_by_runner_after_adapter_timeout_recovery' : 'decomposed_by_runner';
   const runCloseReason = result.recoveredAfterAdapterFailure ? 'decomposition_recorded_after_adapter_timeout_recovery' : 'decomposition_recorded';
-  closeTaskWithEow({ task, reason: taskCloseReason, finishedAt });
+  closeTaskWithEow({ task, reason: taskCloseReason, finishedAt, resolvedByTaskGroupId: result.childTaskGroupId });
   updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, finishedAt });
   const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
