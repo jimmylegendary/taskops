@@ -1731,8 +1731,8 @@ function promptWithBudget(lines, budget, options = {}) {
   return [...lines, ...budgetPromptLines(budget, options)].join('\n');
 }
 
-function selfResolutionGuideLines(delegationMode, guideText) {
-  if (delegationMode !== true) return [];
+function selfResolutionGuideLines(inject, guideText) {
+  if (inject !== true) return [];
   return ['', (guideText && guideText.trim() ? guideText : SELF_RESOLUTION_GUIDE)];
 }
 
@@ -1843,6 +1843,7 @@ function surpriseReportPromptLines({ artifactRequired = false } = {}) {
 export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null, delegationMode = false, selfResolutionGuide = null }) {
   const projectDirForPrompt = projectDir ? resolve(projectDir) : null;
   const artifactWorkspaceForPrompt = artifactWorkspacePath ? resolve(artifactWorkspacePath) : null;
+  const injectSelfGuide = delegationMode === true || task?.resolverKind === 'self';
   return promptWithBudget([
     'You are a TaskOps worker agent.',
     `Work: ${project.id} — ${project.title || ''}`.trim(),
@@ -1866,7 +1867,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
-    ...selfResolutionGuideLines(delegationMode, selfResolutionGuide),
+    ...selfResolutionGuideLines(injectSelfGuide, selfResolutionGuide),
   ], budget, { actionKind: 'execute', allowPartialRequest: true });
 }
 

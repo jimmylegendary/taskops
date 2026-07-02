@@ -46,10 +46,38 @@ const overridePrompt = buildAgentExecutionPrompt({
 assert.ok(overridePrompt.includes('<x>OVERRIDE</x>'), 'custom selfResolutionGuide should be injected when provided');
 assert.equal(overridePrompt.includes(SELF_RESOLUTION_GUIDE), false, 'custom selfResolutionGuide should replace the default guide');
 
+const selfResolverPrompt = buildAgentExecutionPrompt({
+  project,
+  task: { ...task, resolverKind: 'self' },
+});
+assert.ok(selfResolverPrompt.includes(SELF_RESOLUTION_GUIDE), "resolverKind:'self' should inject the default self-resolution guide without delegationMode");
+assert.ok(selfResolverPrompt.includes('<self_resolution_mode>'), "resolverKind:'self' prompt should contain the XML guide tag");
+
+const explicitOffSelfResolverPrompt = buildAgentExecutionPrompt({
+  project,
+  task: { ...task, resolverKind: 'self' },
+  delegationMode: false,
+});
+assert.ok(explicitOffSelfResolverPrompt.includes(SELF_RESOLUTION_GUIDE), "resolverKind:'self' should inject the guide when delegationMode:false");
+
+const humanResolverPrompt = buildAgentExecutionPrompt({
+  project,
+  task: { ...task, resolverKind: 'human' },
+});
+assert.equal(humanResolverPrompt.includes('self_resolution_mode'), false, "resolverKind:'human' should not inject self-resolution mode without delegationMode");
+
+const selfResolverOverridePrompt = buildAgentExecutionPrompt({
+  project,
+  task: { ...task, resolverKind: 'self' },
+  selfResolutionGuide: '<x>OVERRIDE</x>',
+});
+assert.ok(selfResolverOverridePrompt.includes('<x>OVERRIDE</x>'), "resolverKind:'self' should inject custom selfResolutionGuide when provided");
+assert.equal(selfResolverOverridePrompt.includes(SELF_RESOLUTION_GUIDE), false, "resolverKind:'self' custom guide should replace the default guide");
+
 assert.equal(
   sha256(explicitOffPrompt),
   BASE_OFF_PROMPT_SHA256,
-  'delegationMode:false prompt should remain byte-identical to base main ad52252 fixture prompt',
+  'no resolverKind and delegationMode:false prompt should remain byte-identical to base main 10de642 fixture prompt',
 );
 
 console.log('OK self-resolution guide');
