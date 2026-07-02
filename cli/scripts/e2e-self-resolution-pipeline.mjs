@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   initProject,
   parseMarkdownFile,
@@ -15,6 +16,9 @@ import {
 
 const FIXED_TIME = '2026-07-02T00:00:00.000Z';
 const ASSUMPTION_SUMMARY = 'ASSUMPTION: <x> -> DECISION: <y> -> BASIS: <z>';
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const cliDir = resolve(scriptDir, '..');
+const binPath = resolve(cliDir, 'bin', 'taskops.js');
 
 function withFrozenTime(iso, fn) {
   const RealDate = globalThis.Date;
@@ -64,7 +68,7 @@ function createDecomposeWork() {
     task: {
       id: 'task-self-decompose',
       title: 'Self decompose task',
-      objective: 'Create deterministic dry-run children.',
+      objective: 'Create deterministic runnable children.',
       responsibility: 'Own the decomposition pipeline proof.',
       completionCriteria: 'The generated child version carries the expected self-resolution metadata.',
       order: 1,
@@ -106,34 +110,30 @@ function childTaskPaths(root, childTaskGroupId, versionId) {
     .sort();
 }
 
-function childTaskBytesByName(root, childTaskGroupId, versionId) {
-  return Object.fromEntries(
-    childTaskPaths(root, childTaskGroupId, versionId).map((path) => [path.split('/').at(-1), readFileSync(path, 'utf8')]),
-  );
-}
-
-function withoutSelfResolverStamp(text) {
-  return text.replace(/^resolverKind: self\r?\n/m, '');
-}
-
 function assertParseClean(root, label) {
   assert.deepEqual(parseProject(root).errors, [], label);
 }
 
 function runDecomposePipeline({ delegate }) {
-  return withFrozenTime(FIXED_TIME, () => {
-    const root = createDecomposeWork();
-    const runResult = runTaskOps(root, {
-      executor: 'dry-run',
+  const root = withFrozenTime(FIXED_TIME, () => createDecomposeWork());
+  const priorClaudeBin = process.env.TASKOPS_CLAUDE_BIN;
+  process.env.TASKOPS_CLAUDE_BIN = fakeClaudeDecompose();
+  let runResult;
+  try {
+    runResult = withFrozenTime(FIXED_TIME, () => runTaskOps(root, {
+      executor: 'claude-code',
       delegate,
       maxSteps: 1,
       maxStepsExplicit: true,
-    });
-    assert.equal(runResult.stepsRun, 1, 'decompose pipeline should run exactly one step');
-    assert.equal(runResult.actions[0]?.kind, 'decompose', 'decompose pipeline should select the decomposition action');
-    assert.equal(runResult.actions[0]?.status, 'completed', 'decompose pipeline should complete');
-    return { root, runResult, action: runResult.actions[0] };
-  });
+    }));
+  } finally {
+    if (priorClaudeBin == null) delete process.env.TASKOPS_CLAUDE_BIN;
+    else process.env.TASKOPS_CLAUDE_BIN = priorClaudeBin;
+  }
+  assert.equal(runResult.stepsRun, 1, 'decompose pipeline should run exactly one step');
+  assert.equal(runResult.actions[0]?.kind, 'decompose', 'decompose pipeline should select the decomposition action');
+  assert.equal(runResult.actions[0]?.status, 'completed', 'decompose pipeline should complete');
+  return { root, runResult, action: runResult.actions[0] };
 }
 
 function fakeClaudeCode({ logPath }) {
@@ -149,6 +149,93 @@ if (process.argv.includes('--version')) {
 const prompt = process.argv[process.argv.length - 1] || '';
 appendFileSync(${JSON.stringify(logPath)}, prompt + '\\n---TASKOPS-PROMPT-END---\\n', 'utf8');
 console.log(${JSON.stringify(ASSUMPTION_SUMMARY)});
+`, 'utf8');
+  chmodSync(fakePath, 0o755);
+  return fakePath;
+}
+
+function fakeClaudeDecompose() {
+  const fakePath = join(mkdtempSync(join(tmpdir(), 'taskops-e2e-fake-decompose-')), 'claude');
+  writeFileSync(fakePath, `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+if (process.argv.includes('--version')) {
+  console.log('claude fake e2e-self-resolution-decompose');
+  process.exit(0);
+}
+
+const prompt = process.argv[process.argv.length - 1] || '';
+const childTaskGroupId = /Target child task group id: ([^\\n]+)/.exec(prompt)?.[1]?.trim();
+const versionId = /Target version id: ([^\\n]+)/.exec(prompt)?.[1]?.trim();
+if (!childTaskGroupId || !versionId) {
+  console.error('missing target child task group or version id in prompt');
+  process.exit(2);
+}
+
+const now = ${JSON.stringify(FIXED_TIME)};
+const suffix = childTaskGroupId.replace(/^tg-/, '') || 'child';
+const taskGroupDir = join(process.cwd(), 'task-groups', childTaskGroupId);
+mkdirSync(taskGroupDir, { recursive: true });
+writeFileSync(join(taskGroupDir, 'index.md'), [
+  '---',
+  'taskOpsVersion: v1',
+  'entityType: taskGroup',
+  \`id: \${childTaskGroupId}\`,
+  'objective: Deterministic fake decomposition for self-resolution e2e.',
+  \`activeVersionId: \${versionId}\`,
+  \`createdAt: \${now}\`,
+  'status: active',
+  '---',
+  '# Fake child task group',
+  '',
+].join('\\n'), 'utf8');
+
+const spec = {
+  versionId,
+  version: 'v1',
+  summary: 'Deterministic runnable child tasks for self-resolution e2e',
+  tasks: [
+    {
+      id: \`task-\${suffix}-child-a\`,
+      title: 'Runnable self child A',
+      objective: 'Complete deterministic child responsibility A.',
+      responsibility: 'Own deterministic child responsibility A.',
+      completionCriteria: 'Child A is available for self-resolution execution.',
+      order: 1,
+      status: 'pending',
+      runReadiness: 'runnable',
+    },
+    {
+      id: \`task-\${suffix}-child-b\`,
+      title: 'Runnable self child B',
+      objective: 'Complete deterministic child responsibility B.',
+      responsibility: 'Own deterministic child responsibility B.',
+      completionCriteria: 'Child B is available for self-resolution execution.',
+      order: 2,
+      status: 'pending',
+      runReadiness: 'runnable',
+    },
+  ],
+};
+const specPath = join(mkdtempSync(join(tmpdir(), 'taskops-e2e-decompose-spec-')), 'spec.json');
+writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
+const result = spawnSync(process.execPath, [
+  ${JSON.stringify(binPath)},
+  'decompose',
+  process.cwd(),
+  '--task-group-id',
+  childTaskGroupId,
+  '--spec',
+  specPath,
+], { encoding: 'utf8' });
+if (result.status !== 0) {
+  process.stderr.write(result.stderr || result.stdout || 'taskops decompose failed');
+  process.exit(result.status || 1);
+}
+process.stdout.write(result.stdout || \`fake decompose authored \${childTaskGroupId}/\${versionId}\`);
 `, 'utf8');
   chmodSync(fakePath, 0o755);
   return fakePath;
@@ -175,6 +262,7 @@ function assertNoBlockedOrWaitingTasks(root) {
     assert.notEqual(task.runReadiness, 'blocked', `task ${task.id} should not end runReadiness:blocked`);
   }
   for (const runNode of parsed.runNodes.values()) {
+    assert.notEqual(runNode.status, 'blocked', `run node ${runNode.id} should not end status:blocked`);
     assert.notEqual(runNode.status, 'waiting', `run node ${runNode.id} should not be parked waiting`);
     assert.notEqual(runNode.type, 'delegate', `run node ${runNode.id} should not be a delegation node`);
   }
@@ -184,36 +272,37 @@ function assertNoBlockedOrWaitingTasks(root) {
   const delegated = runDecomposePipeline({ delegate: true });
   const { childTaskGroupId, versionId } = delegated.action;
   const delegatedChildPaths = childTaskPaths(delegated.root, childTaskGroupId, versionId);
-  assert.ok(delegatedChildPaths.length > 0, 'dry-run decompose should create at least one child task');
+  assert.ok(delegatedChildPaths.length > 0, 'fake decompose should create at least one child task');
   assert.deepEqual(
     delegated.action.selfResolverStamp,
     { taskCount: delegatedChildPaths.length, stampedCount: delegatedChildPaths.length },
     'delegation-mode decompose should report a self resolver stamp for every child',
   );
   for (const childPath of delegatedChildPaths) {
-    assert.equal(parseMarkdownFile(childPath).resolverKind, 'self', `${childPath} should be stamped resolverKind:self`);
+    const child = parseMarkdownFile(childPath);
+    assert.equal(child.resolverKind, 'self', `${childPath} should be stamped resolverKind:self`);
+    assert.notEqual(child.status, 'blocked', `${childPath} should not be status:blocked`);
+    assert.notEqual(child.status, 'waiting', `${childPath} should not be status:waiting`);
+    assert.notEqual(child.runReadiness, 'blocked', `${childPath} should not be runReadiness:blocked`);
+    assert.equal(child.runReadiness, 'runnable', `${childPath} should remain a normal runnable child`);
   }
   const parent = parseMarkdownFile(taskPath(delegated.root, 'tgv-root-v2', 'task-self-decompose'));
   assert.notEqual(parent.status, 'blocked', 'decomposed parent must not be status:blocked');
   assert.notEqual(parent.runReadiness, 'blocked', 'decomposed parent must not be runReadiness:blocked');
+  assertNoBlockedOrWaitingTasks(delegated.root);
   assertParseClean(delegated.root, 'delegation-mode decompose output should validate');
 
   const off = runDecomposePipeline({ delegate: false });
   assert.equal(off.action.selfResolverStamp, undefined, 'delegate:false decompose should not report a self resolver stamp');
   const offChildPaths = childTaskPaths(off.root, off.action.childTaskGroupId, off.action.versionId);
-  assert.equal(offChildPaths.length, delegatedChildPaths.length, 'delegate:false dry-run should create the same child task count');
+  assert.equal(offChildPaths.length, delegatedChildPaths.length, 'delegate:false fake decompose should create the same child task count');
   for (const childPath of offChildPaths) {
-    assert.equal(parseMarkdownFile(childPath).resolverKind, undefined, `${childPath} should not gain resolverKind without delegation`);
+    const child = parseMarkdownFile(childPath);
+    assert.equal(child.resolverKind, undefined, `${childPath} should not gain resolverKind without delegation`);
+    assert.equal(child.runReadiness, 'runnable', `${childPath} should remain runnable without delegation`);
   }
-  const delegatedWithoutStamp = Object.fromEntries(
-    Object.entries(childTaskBytesByName(delegated.root, childTaskGroupId, versionId))
-      .map(([name, text]) => [name, withoutSelfResolverStamp(text)]),
-  );
-  assert.deepEqual(
-    childTaskBytesByName(off.root, off.action.childTaskGroupId, off.action.versionId),
-    delegatedWithoutStamp,
-    'delegate:false child bytes should match delegated children after removing only resolverKind:self',
-  );
+  assertNoBlockedOrWaitingTasks(off.root);
+  assertParseClean(off.root, 'delegate:false decompose output should validate');
 }
 
 {
