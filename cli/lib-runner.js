@@ -88,6 +88,44 @@ export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled
 
 export const PARTIAL_REQUEST_PREFIX = 'TASKOPS_PARTIAL_REQUEST:';
 export const SURPRISE_REPORT_PREFIX = 'TASKOPS_SURPRISE_REPORT:';
+export const SELF_RESOLUTION_GUIDE = `<self_resolution_mode>
+ <context>
+ This execution has no human or external agent available to make decisions on your behalf.
+ You are running in delegation (self-resolution) mode. Autonomous completion is the goal.
+ </context>
+
+ <trigger>
+ Follow the procedure below whenever you reach a decision point where you feel you cannot
+ definitively settle the answer. When this trigger fires, never stop and never request a
+ decision from an external resolver (human/ai).
+ </trigger>
+
+ <procedure>
+ 1. Make the most reasonable, defensible decision you can from the information you have.
+ 2. Record the decision and the assumption it rests on, in your execution summary, using
+ exactly this format: "ASSUMPTION: <assumption> -> DECISION: <decision made> -> BASIS: <grounds / remaining uncertainty>".
+ 3. If this execution emits a surprise report, record the same assumption there as well.
+ 4. Continue the work on top of that decision.
+ 5. Only if, having made an assumption, you still cannot progress this turn, leave the
+ remainder as follow-up. Describe follow-up as "work you could continue yourself",
+ not as "a decision needed from a human or another AI".
+ </procedure>
+
+ <constraints>
+ - Do not present anything uncertain as if it were certain. In this mode, an undisclosed
+ assumption is treated as a failure.
+ - Do not call graph/queue control commands (taskops close, queue claim, etc.). Setting
+ resolverKind and EoW closure are owned by the runner.
+ - Your role ends at describing whether a decision is escalated or self-resolved. You do
+ not mutate task state directly.
+ </constraints>
+
+ <rationale>
+ This is a deliberate trade of some correctness for autonomy. An honestly disclosed
+ assumption can be reviewed and corrected later; an execution that stalls waiting for
+ input leaves nothing behind.
+ </rationale>
+</self_resolution_mode>`;
 
 const RUNNER_DIR = dirname(fileURLToPath(import.meta.url));
 const TASKOPS_CLI_PATH = realpathSync(join(RUNNER_DIR, 'bin', 'taskops.js'));
@@ -1693,6 +1731,11 @@ function promptWithBudget(lines, budget, options = {}) {
   return [...lines, ...budgetPromptLines(budget, options)].join('\n');
 }
 
+function selfResolutionGuideLines(delegationMode, guideText) {
+  if (delegationMode !== true) return [];
+  return ['', (guideText && guideText.trim() ? guideText : SELF_RESOLUTION_GUIDE)];
+}
+
 function taskUncertaintyPromptLines(task) {
   const knownList = Array.isArray(task.knownList) && task.knownList.length
     ? task.knownList.map((item) => `${item?.id || '(no id)'}: ${item?.claim || ''} [${item?.verificationStatus || 'unverified'}]`).join('; ')
@@ -1797,7 +1840,7 @@ function surpriseReportPromptLines({ artifactRequired = false } = {}) {
   ];
 }
 
-export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null }) {
+export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null, delegationMode = false, selfResolutionGuide = null }) {
   const projectDirForPrompt = projectDir ? resolve(projectDir) : null;
   const artifactWorkspaceForPrompt = artifactWorkspacePath ? resolve(artifactWorkspacePath) : null;
   return promptWithBudget([
@@ -1823,6 +1866,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
     ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
+    ...selfResolutionGuideLines(delegationMode, selfResolutionGuide),
   ], budget, { actionKind: 'execute', allowPartialRequest: true });
 }
 
@@ -1922,7 +1966,7 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null }) {
+function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null, delegationMode = false }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
@@ -1933,7 +1977,7 @@ function invokeExecutor({ project, projectDir = null, task, executor, agentId, s
   }
   const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
   if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
-    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath });
+    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, delegationMode });
     const result = invokeRuntimeAdapter(adapter, {
       prompt,
       agentId,
@@ -2516,7 +2560,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
@@ -2547,7 +2591,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath });
+    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err), executor, workspacePath: artifactWorkspacePath };
   }
@@ -4399,6 +4443,7 @@ export function runTaskOps(workDir, options = {}) {
     : (executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : 'taskops-runner');
   const maxStepsExplicit = options.maxStepsExplicit === true || options.maxStepsExplicit === 'true';
   const budgetEnabled = maxStepsExplicit && maxSteps != null;
+  const delegationMode = options.delegate === true || options.delegate === 'true';
   const targetTaskId = options.targetTaskId || null;
   const targetTaskGroupVersionId = options.targetTaskGroupVersionId || null;
   const allowConcurrentTarget = options.allowConcurrentTarget === true && Boolean(targetTaskId);
@@ -4576,6 +4621,7 @@ export function runTaskOps(workDir, options = {}) {
           project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
           budget: stepBudget,
+          delegationMode,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
