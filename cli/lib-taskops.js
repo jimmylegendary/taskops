@@ -5,6 +5,7 @@ import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } 
 
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
+export const RESOLVER_KIND_VALUES = ['human', 'ai', 'self'];
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
 export const UNCERTAINTY_STATE_VALUES = ['unknown_unknown', 'known_unknown', 'known'];
 export const KNOWN_VERIFICATION_STATUS_VALUES = ['unverified'];
@@ -97,6 +98,7 @@ const LOCALIZED_TEXT = {
       entityTypeMustBeOneOf: (types) => `entityType must be one of: ${types.join(', ')}`,
       invalidStatus: (status) => `invalid status '${status}'`,
       invalidRunReadiness: (value) => `invalid runReadiness '${value}'`,
+      invalidResolverKind: (value) => `invalid resolverKind '${value}'`,
       invalidUnderstandingLevel: (value) => `invalid understandingLevel '${value}'`,
       invalidUncertaintyState: (value) => `invalid uncertaintyState '${value}'`,
       invalidConfidenceScore: (value) => `invalid confidenceScore '${value}'`,
@@ -179,6 +181,7 @@ const LOCALIZED_TEXT = {
       entityTypeMustBeOneOf: (types) => `entityType은 다음 중 하나여야 함: ${types.join(', ')}`,
       invalidStatus: (status) => `유효하지 않은 status '${status}'`,
       invalidRunReadiness: (value) => `유효하지 않은 runReadiness '${value}'`,
+      invalidResolverKind: (value) => `유효하지 않은 resolverKind '${value}'`,
       invalidUnderstandingLevel: (value) => `유효하지 않은 understandingLevel '${value}'`,
       invalidUncertaintyState: (value) => `유효하지 않은 uncertaintyState '${value}'`,
       invalidConfidenceScore: (value) => `유효하지 않은 confidenceScore '${value}'`,
@@ -838,6 +841,7 @@ export function parseProject(projectDir) {
         if (task.taskGroupVersionId !== v.id) errors.push(withPath(taskPath, t.taskGroupVersionIdMustBe(v.id)));
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
+        if (task.resolverKind && !RESOLVER_KIND_VALUES.includes(task.resolverKind)) errors.push(withPath(taskPath, t.invalidResolverKind(task.resolverKind)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
         validateTaskUncertaintyFields(task, taskPath, errors, t);
         validateTaskInheritedFromFields(task, taskPath, errors, t);
