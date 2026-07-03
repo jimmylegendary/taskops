@@ -3347,14 +3347,23 @@ export function stampChildrenSelfResolver({ projectDir, childTaskGroupId, versio
   const summary = {
     taskCount: taskPaths.length,
     stampedCount: 0,
+    preservedCount: 0,
   };
   for (const taskPath of taskPaths) {
+    let preserved = false;
     updateMarkdownFrontmatter(taskPath, (fm) => {
-      // Delegation mode is literal for this slice: overwrite any explicit child resolverKind.
+      // C2: preserve a deliberate external hand-off — never overwrite an explicit human/ai
+      // resolverKind to 'self'. Only default self-resolution where no external resolver was assigned.
+      const existing = String(fm.resolverKind || '').trim().toLowerCase();
+      if (existing === 'human' || existing === 'ai') {
+        preserved = true;
+        return fm;
+      }
       fm.resolverKind = 'self';
       return fm;
     });
-    summary.stampedCount += 1;
+    if (preserved) summary.preservedCount += 1;
+    else summary.stampedCount += 1;
   }
   return summary;
 }
