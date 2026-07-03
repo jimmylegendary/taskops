@@ -1102,6 +1102,23 @@ function buildExecutionResult({ task, runId, runNodeId, executorResult }) {
   };
 }
 
+// C3: the run-node summary collapses newlines and truncates to 1000 chars, which would silently drop
+// a worker's ASSUMPTION->DECISION->BASIS disclosure past the cutoff (the training-data record). When the
+// raw output would be truncated/collapsed, persist it verbatim as a durable evidence file and return a
+// project-relative ref to add to evidenceRefs. Short single-line outputs (e.g. dry-run) are unaffected.
+export function persistExecutorDisclosure({ projectDir, runId, runNodeId, message }) {
+  const text = String(message == null ? '' : message);
+  if (text.length <= 1000 && !/[\r\n]/.test(text)) return null;
+  try {
+    const dir = join(projectDir, 'runs', runId, 'artifacts', runNodeId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'executor-output.md'), text.endsWith('\n') ? text : `${text}\n`, 'utf8');
+    return `runs/${runId}/artifacts/${runNodeId}/executor-output.md`;
+  } catch {
+    return null;
+  }
+}
+
 function buildReviewReport({ projectDir, task, runNode }) {
   const acceptance = normalizeAcceptance(task);
   const result = normalizeResult(runNode);
@@ -2684,6 +2701,12 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   if (result.ok) {
     const executionResult = buildExecutionResult({ task, runId, runNodeId, executorResult: result });
+    // C3: preserve the full raw disclosure (untruncated) as durable evidence so nothing past the
+    // 1000-char run-node summary cutoff is lost.
+    const disclosureRef = persistExecutorDisclosure({ projectDir, runId, runNodeId, message: result.message });
+    if (disclosureRef && !executionResult.observed.evidenceRefs.includes(disclosureRef)) {
+      executionResult.observed.evidenceRefs.push(disclosureRef);
+    }
     const partialRequest = parsePartialRequestFromExecutorResult(result);
     if (partialRequest.partialRequested) {
       return closeExecutePartial({
