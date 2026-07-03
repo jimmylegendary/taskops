@@ -1360,7 +1360,11 @@ function inheritedKnownRefs(task) {
 }
 
 function hasLocalKnownEvidence(task) {
-  if (Array.isArray(task?.knownList) && task.knownList.length > 0) return true;
+  const knownList = Array.isArray(task?.knownList) ? task.knownList : [];
+  // B2: a merely-declared UNVERIFIED known does not revalidate an inherited claim. Only a locally
+  // VERIFIED known — or a known discovered through an actual surprise observation (execution-validated)
+  // — counts as local evidence that an inherited known reference has been revalidated.
+  if (knownList.some((k) => String(k?.verificationStatus || '').trim().toLowerCase() === 'verified')) return true;
   const history = Array.isArray(task?.surpriseHistory) ? task.surpriseHistory : [];
   return history.some((entry) => Array.isArray(entry?.newKnownIds) && entry.newKnownIds.length > 0);
 }
@@ -1484,22 +1488,28 @@ export function informationGainConvergence(task, { window = 3, maxSurpriseScore 
   }
   const recent = history.slice(-normalizedWindow);
   const highSurprise = recent.filter((entry) => Number(entry.surpriseScore) > threshold);
+  // B3: a missing/non-numeric surpriseScore is NOT low-surprise evidence — silence must not count as
+  // convergence. An unscored observation blocks convergence until it is honestly scored.
+  const unscored = recent.filter((entry) => !Number.isFinite(Number(entry?.surpriseScore)));
   const contradictedKnownIds = recent.flatMap((entry) => Array.isArray(entry.contradictedKnownIds) ? entry.contradictedKnownIds : []);
   const blockingNewUnknownIds = recent.flatMap((entry) => Array.isArray(entry.blockingNewUnknownIds)
     ? entry.blockingNewUnknownIds
     : (Array.isArray(entry.newUnknownIds) ? entry.newUnknownIds : []));
-  const converged = highSurprise.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
+  const converged = highSurprise.length === 0 && unscored.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
   return {
     converged,
     window: normalizedWindow,
     maxSurpriseScore: threshold,
     observedCount: history.length,
     recentScores: recent.map((entry) => Number(entry.surpriseScore || 0)),
+    unscoredCount: unscored.length,
     contradictedKnownIds,
     blockingNewUnknownIds,
     reason: converged
       ? `${normalizedWindow} consecutive low-surprise observations`
-      : 'recent surprise history still contains high surprise, contradicted known claims, or blocking unknowns',
+      : (unscored.length > 0
+        ? `${unscored.length} of the last ${normalizedWindow} observations have no numeric surpriseScore; unscored observations do not count as convergence`
+        : 'recent surprise history still contains high surprise, contradicted known claims, or blocking unknowns'),
   };
 }
 
@@ -1621,11 +1631,14 @@ export function lineageInformationGainConvergence(parsed, task, activeSnapshot =
 
   const recent = sortedEntries.slice(-normalizedWindow);
   const highSurprise = recent.filter((entry) => Number(entry.surpriseScore) > threshold);
+  // B3: an unscored (missing/non-numeric surpriseScore) lineage observation is not low-surprise
+  // evidence — silence must not count as convergence.
+  const unscored = recent.filter((entry) => !Number.isFinite(Number(entry?.surpriseScore)));
   const contradictedKnownIds = recent.flatMap((entry) => Array.isArray(entry.contradictedKnownIds) ? entry.contradictedKnownIds : []);
   const blockingNewUnknownIds = recent.flatMap((entry) => Array.isArray(entry.blockingNewUnknownIds)
     ? entry.blockingNewUnknownIds
     : []);
-  const converged = highSurprise.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
+  const converged = highSurprise.length === 0 && unscored.length === 0 && contradictedKnownIds.length === 0 && blockingNewUnknownIds.length === 0;
   return {
     converged,
     window: normalizedWindow,
@@ -1635,12 +1648,15 @@ export function lineageInformationGainConvergence(parsed, task, activeSnapshot =
     entries: sortedEntries,
     entriesBySource,
     recentScores: recent.map((entry) => Number(entry.surpriseScore || 0)),
+    unscoredCount: unscored.length,
     contradictedKnownIds,
     blockingNewUnknownIds,
     lineageWarnings,
     reason: converged
       ? `${normalizedWindow} consecutive low-surprise lineage observations`
-      : 'recent lineage surprise history still contains high surprise, contradicted known claims, or blocking unknowns',
+      : (unscored.length > 0
+        ? `${unscored.length} of the last ${normalizedWindow} lineage observations have no numeric surpriseScore; unscored observations do not count as convergence`
+        : 'recent lineage surprise history still contains high surprise, contradicted known claims, or blocking unknowns'),
   };
 }
 
