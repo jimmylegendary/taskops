@@ -1182,6 +1182,11 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
       missingExpected.push(`required check not observed: ${command}`);
       continue;
     }
+    if (verifyMode && observed.verifiedBy !== 'runner') {
+      // under --verify-checks, a self-reported check result cannot certify; only a runner-executed one counts.
+      missingExpected.push(`required check not runner-verified: ${command}`);
+      continue;
+    }
     const status = checkStatus(observed);
     // An unverified check is NOT a passed check: a self-reported checkResult with no explicit
     // pass status (or a non-pass status) must not silently satisfy a required check.
@@ -1199,10 +1204,16 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   // Honest policy approval: a policy-approving mode (enforced/guarded/runner-managed) must NOT be
   // 'approved' on a prose expectedOutcome + a runner-generated summary alone — require at least one
   // independently-checkable acceptance signal so claimSafe=true is never minted from self-narration.
+  // Honest floor: count only signals that can actually be checked. An empty-command requiredCheck or an
+  // empty requiredArtifact ref is SKIPPED by the loops above, so it must not count as a machine-checkable
+  // signal — otherwise a vacuous requiredChecks:[{command:''}] mints claimSafe with zero evidence (and
+  // defeats verify mode too).
   const semantic = acceptance.semanticAssertions || {};
-  const hasCheckableAcceptance = (acceptance.requiredArtifacts || []).length > 0
-    || (acceptance.requiredChecks || []).length > 0
-    || Object.values(semantic).some((v) => Array.isArray(v) && v.length > 0);
+  const executableChecks = (acceptance.requiredChecks || []).filter((c) => String(commandText(c) || '').trim().length > 0);
+  const concreteArtifacts = (acceptance.requiredArtifacts || []).filter((a) => String(refText(a) || '').trim().length > 0);
+  const hasCheckableAcceptance = concreteArtifacts.length > 0
+    || executableChecks.length > 0
+    || Object.values(semantic).some((v) => Array.isArray(v) && v.some((x) => String(x ?? '').trim().length > 0));
   if (POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && !hasCheckableAcceptance) {
     missingExpected.push('policy-approving acceptance has no machine-checkable signal (requiredChecks/requiredArtifacts/semanticAssertions); a self-reported summary cannot certify completion');
   }
@@ -1210,8 +1221,8 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   // verify-resolver: under --verify-checks, policy approval must rest on a runner-EXECUTED requiredCheck.
   // requiredArtifacts (existsSync / self-reported refs) and content semanticAssertions (matched against the
   // agent's own output) are NOT independently verified by --verify-checks, so a policy-approving task that
-  // carries no requiredChecks cannot be certified claim-safe under verify mode.
-  if (verifyMode && POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && (acceptance.requiredChecks || []).length === 0) {
+  // carries no EXECUTABLE requiredCheck cannot be certified claim-safe under verify mode.
+  if (verifyMode && POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && executableChecks.length === 0) {
     missingExpected.push('--verify-checks: policy approval requires at least one runner-executed requiredCheck; requiredArtifacts/semanticAssertions are not independently verified by --verify-checks');
   }
 

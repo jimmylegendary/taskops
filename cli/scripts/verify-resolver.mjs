@@ -61,5 +61,13 @@ const artifactOnly = makeRunnableWork('verify-artifact-only', { mode: 'guarded',
 const artRes = runTaskOps(artifactOnly, { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
 assert.notEqual(artRes.tasks[0].reviewDecision, 'approved', 'verify-checks: an artifact-only task (no requiredChecks) must not be claim-safe under verify mode');
 
+// self-review NEW_ISSUE: a vacuous requiredChecks:[{command:''}] must not certify. The empty-command check
+// is skipped by both the runner and the review loop, so it counts as NO machine-checkable signal — under
+// verify mode AND the plain A2/A4 floor. Otherwise claimSafe is minted with zero evidence.
+const vacV = runTaskOps(makeRunnableWork('verify-vacuous', { mode: 'guarded', expectedOutcome: 'x', requiredChecks: [{ command: '' }] }), { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
+assert.notEqual(vacV.tasks[0].reviewDecision, 'approved', 'verify-checks: an empty-command requiredCheck must not certify');
+const vacP = runTaskOps(makeRunnableWork('plain-vacuous', { mode: 'guarded', expectedOutcome: 'x', requiredChecks: [{ command: '' }] }), { executor: 'dry-run', maxSteps: 1 });
+assert.notEqual(vacP.tasks[0].reviewDecision, 'approved', 'plain floor: an empty-command requiredCheck must not certify either');
+
 rmSync(root, { recursive: true, force: true });
 console.log('OK verify-resolver');
