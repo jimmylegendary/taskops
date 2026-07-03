@@ -1226,6 +1226,34 @@ function isManualAttestedEow(eow) {
   return Boolean(eow && ['manual_verified', 'manual_close'].includes(eow.reason));
 }
 
+function externalResolutionSection(body, heading) {
+  const lines = String(body == null ? '' : body).split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === heading);
+  if (start === -1) return null;
+  const collected = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) break;
+    collected.push(lines[i]);
+  }
+  return collected.join('\n').trim();
+}
+
+function externalResolutionSectionFilled(section) {
+  return section != null && section.length > 0 && !section.includes('<resolver:');
+}
+
+export function deriveExternalResolutionStatus({ resolverKind, body } = {}) {
+  if (resolverKind !== 'human' && resolverKind !== 'ai') return 'none';
+  const decision = externalResolutionSection(body, '## DECISION');
+  const basis = externalResolutionSection(body, '## BASIS');
+  if (decision === null || basis === null) return 'invalid';
+  const decisionFilled = externalResolutionSectionFilled(decision);
+  const basisFilled = externalResolutionSectionFilled(basis);
+  if (decisionFilled && basisFilled) return 'resolved';
+  if (!decisionFilled && !basisFilled) return 'waiting';
+  return 'invalid';
+}
+
 export function classifyTaskReadiness(task) {
   if (!task || typeof task !== 'object') throw new Error('Task is required');
   const legacy = classifyTaskReadinessV05(task);
