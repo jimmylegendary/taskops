@@ -28,6 +28,39 @@ export function isProcessAlive(pid) {
   }
 }
 
+// D3: process start-time disambiguates a reused PID. On Linux, field 22 of /proc/<pid>/stat is the
+// process start-time (clock ticks since boot); two different processes that happen to share a pid will
+// have different start-times. Returns null where unavailable (non-Linux) so callers degrade to pid-only.
+export function processStartTime(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  try {
+    const stat = readFileSync(`/proc/${n}/stat`, 'utf8');
+    // The comm field (2nd) may contain spaces/parens, so parse after the last ')'.
+    const rparen = stat.lastIndexOf(')');
+    if (rparen === -1) return null;
+    const fields = stat.slice(rparen + 2).trim().split(/\s+/);
+    // fields[0] is state (stat field 3); starttime is stat field 22 => index 19 here.
+    const starttime = fields[19];
+    return starttime != null && /^\d+$/.test(starttime) ? starttime : null;
+  } catch {
+    return null;
+  }
+}
+
+// D3: a lock owner is alive only if the pid is alive AND (when a start-time was recorded) the current
+// process at that pid has the SAME start-time — otherwise the pid was reused after the owner crashed.
+export function isMutationLockOwnerAlive(meta) {
+  const pid = Number(meta?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (!isProcessAlive(pid)) return false;
+  if (meta.pidStartTime != null) {
+    const current = processStartTime(pid);
+    if (current != null && String(current) !== String(meta.pidStartTime)) return false;
+  }
+  return true;
+}
+
 export function readMutationLockMeta(lockDir) {
   try {
     return JSON.parse(readFileSync(join(lockDir, 'meta.json'), 'utf8'));
@@ -45,8 +78,7 @@ export function isMutationLockActive(projectDir, { nowMs = Date.now(), ignorePid
   if (ignorePid != null && Number(ignorePid) === pid) return false;
   const expiresAtMs = Date.parse(String(meta.expiresAt || ''));
   const hasLiveExpiry = Number.isFinite(expiresAtMs) && expiresAtMs > nowMs;
-  const ownerAlive = Number.isInteger(pid) && pid > 0 && isProcessAlive(pid);
-  return hasLiveExpiry && ownerAlive;
+  return hasLiveExpiry && isMutationLockOwnerAlive(meta);
 }
 
 export function waitForMutationLockClear(projectDir, {
