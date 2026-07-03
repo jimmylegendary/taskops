@@ -4740,6 +4740,7 @@ export function runTaskOps(workDir, options = {}) {
   }
   const agentId = options.agent || DEFAULT_AGENT_ID;
   const verifyRequiredChecks = options.verifyChecks === true;
+  const continueOnFailure = options.continueOnFailure === true;
 
   let maxSteps = null;
   if (options.maxSteps != null) {
@@ -4983,7 +4984,15 @@ export function runTaskOps(workDir, options = {}) {
       actions.push(stepResult);
       stepsRun += 1;
 
-      if (stepResult.status === 'failed') { stopReason = STOP_REASONS.TASK_FAILED; break; }
+      if (stepResult.status === 'failed') {
+        // continue-on-failure: a caught fake / un-completable step is already surfaced as a blocked stall
+        // (pickNextAction skips it), so ISOLATE it and keep making honest progress on independent runnable
+        // work instead of halting the whole run. The run still ends honestly (blocked_only surfaces the stall;
+        // never all_closed while a blocker remains). Composes with --verify-checks for honest-monotone runs.
+        if (continueOnFailure) continue;
+        stopReason = STOP_REASONS.TASK_FAILED;
+        break;
+      }
     }
 
     if (!stopReason) stopReason = STOP_REASONS.NO_RUNNABLE;
