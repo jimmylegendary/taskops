@@ -1127,8 +1127,10 @@ function buildReviewReport({ projectDir, task, runNode }) {
       continue;
     }
     const status = checkStatus(observed);
-    if (status && !['passed', 'pass', 'ok', 'success', 'succeeded'].includes(status)) {
-      failedChecks.push(`${command}: ${status}`);
+    // An unverified check is NOT a passed check: a self-reported checkResult with no explicit
+    // pass status (or a non-pass status) must not silently satisfy a required check.
+    if (!['passed', 'pass', 'ok', 'success', 'succeeded'].includes(status)) {
+      failedChecks.push(`${command}: ${status || 'no pass status reported'}`);
     }
   }
 
@@ -1136,6 +1138,17 @@ function buildReviewReport({ projectDir, task, runNode }) {
 
   if (result.executorSummary && !result.observed.outcomeSummary && result.observed.artifactRefs.length === 0 && result.observed.evidenceRefs.length === 0) {
     unsupportedObserved.push('executorSummary exists without observed outcome or evidence refs');
+  }
+
+  // Honest policy approval: a policy-approving mode (enforced/guarded/runner-managed) must NOT be
+  // 'approved' on a prose expectedOutcome + a runner-generated summary alone — require at least one
+  // independently-checkable acceptance signal so claimSafe=true is never minted from self-narration.
+  const semantic = acceptance.semanticAssertions || {};
+  const hasCheckableAcceptance = (acceptance.requiredArtifacts || []).length > 0
+    || (acceptance.requiredChecks || []).length > 0
+    || Object.values(semantic).some((v) => Array.isArray(v) && v.length > 0);
+  if (POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && !hasCheckableAcceptance) {
+    missingExpected.push('policy-approving acceptance has no machine-checkable signal (requiredChecks/requiredArtifacts/semanticAssertions); a self-reported summary cannot certify completion');
   }
 
   const decision = failedChecks.length > 0
