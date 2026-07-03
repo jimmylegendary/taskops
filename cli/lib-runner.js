@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -1121,6 +1122,39 @@ export function persistExecutorDisclosure({ projectDir, runId, runNodeId, messag
   } catch {
     return null;
   }
+}
+
+// verify-resolver: independently EXECUTE a task's requiredChecks instead of trusting the agent's
+// self-reported checkResults. This is the only thing that grounds claimSafe in evidence the runner
+// did not author. It runs arbitrary shell commands, so it is OPT-IN (run --verify-checks) and never
+// runs by default. Returns runner-authored checkResults (status from the real exit code).
+export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000 }) {
+  const runCwd = cwd && existsSync(cwd) ? cwd : process.cwd();
+  const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : 120_000;
+  const results = [];
+  for (const check of requiredChecks || []) {
+    const command = commandText(check);
+    if (!command) continue;
+    let status = 'failed';
+    let exitCode = null;
+    let detail = '';
+    try {
+      const out = spawnSync(command, {
+        cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
+      });
+      if (out.error) {
+        detail = out.error.code === 'ETIMEDOUT' ? `timed out after ${limit}ms` : String(out.error.message || out.error);
+      } else {
+        exitCode = out.status;
+        status = out.status === 0 ? 'passed' : 'failed';
+        detail = sanitizeFmScalar(`${out.stdout || ''}${out.stderr || ''}`.trim(), { maxLen: 500, fallback: '' });
+      }
+    } catch (error) {
+      detail = error instanceof Error ? error.message : String(error);
+    }
+    results.push({ command, status, exitCode, detail, verifiedBy: 'runner' });
+  }
+  return results;
 }
 
 function buildReviewReport({ projectDir, task, runNode }) {
@@ -2670,7 +2704,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
@@ -2715,6 +2749,19 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     const disclosureRef = persistExecutorDisclosure({ projectDir, runId, runNodeId, message: result.message });
     if (disclosureRef && !executionResult.observed.evidenceRefs.includes(disclosureRef)) {
       executionResult.observed.evidenceRefs.push(disclosureRef);
+    }
+    // verify-resolver (opt-in): independently run the task's requiredChecks and REPLACE the agent's
+    // self-reported checkResults with runner-authored results, so the later review verifies real evidence
+    // (the runner did not author) rather than the agent's own claim.
+    if (verifyRequiredChecks) {
+      const acceptance = normalizeAcceptance(task);
+      if ((acceptance.requiredChecks || []).length > 0) {
+        executionResult.observed.checkResults = executeRequiredChecks({
+          cwd: artifactWorkspacePath,
+          requiredChecks: acceptance.requiredChecks,
+          timeoutMs: stepTimeoutMs,
+        });
+      }
     }
     const partialRequest = parsePartialRequestFromExecutorResult(result);
     if (partialRequest.partialRequested) {
@@ -4583,6 +4630,7 @@ export function runTaskOps(workDir, options = {}) {
     throw new Error(`Invalid --executor '${executor}'. Use ${allowedExecutors.join(', ')}.`);
   }
   const agentId = options.agent || DEFAULT_AGENT_ID;
+  const verifyRequiredChecks = options.verifyChecks === true;
 
   let maxSteps = null;
   if (options.maxSteps != null) {
@@ -4804,6 +4852,7 @@ export function runTaskOps(workDir, options = {}) {
           budget: stepBudget,
           delegationMode,
           selfResolutionGuide,
+          verifyRequiredChecks,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
