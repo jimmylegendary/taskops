@@ -1192,6 +1192,11 @@ export function snapshotArtifactState({ requiredArtifacts, cwd, projectDir }) {
 
 // Runner-authored artifact verification: exists on disk now AND was created/modified during this run.
 // A pre-existing, untouched file does NOT count as produced — closing the "existsSync of a stale file" leak.
+// SCOPE (honest limitation, confirmed by adversarial review): this is a FRESHNESS gate, not a correctness
+// gate — the agent controls the workspace, so an artifact it produces satisfies provenance regardless of
+// content. For correctness, pair the artifact with a runner-executed requiredCheck (a test/validator command,
+// ideally out-of-workspace so the agent cannot plant a passing stub). Declaring a taskops-internal run path
+// as a requiredArtifact is not meaningful (it would be "produced" by the runner's own bookkeeping).
 export function verifyArtifactProvenance({ requiredArtifacts, cwd, projectDir, preState = {} }) {
   const results = [];
   for (const artifact of requiredArtifacts || []) {
@@ -1306,6 +1311,9 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     followUpNeeded: decision === 'approved' ? [] : ['Add observed evidence/check results or revise acceptance before closure is trusted.'],
     reviewedAcceptanceHash: sha256Of(acceptance),
     reviewedResultHash: sha256Of(result),
+    // Auditability: record whether this review was runner-verified (--verify-checks) or based on
+    // self-reported evidence, so a downstream reader can tell how the resulting claimSafe was grounded.
+    verified: verifyMode === true,
   };
 }
 
