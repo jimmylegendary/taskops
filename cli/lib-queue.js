@@ -570,7 +570,9 @@ export function heartbeatLease(workDir, leaseId, { ttlSeconds = 300 } = {}) {
   const ttl = leaseTtlSeconds(ttlSeconds);
   db.exec('BEGIN IMMEDIATE');
   try {
-    expireStaleLeases(db, now);
+    // A heartbeat renews ITS OWN lease; never let its own (possibly just-expired)
+    // lease be reaped here, which would let a second worker re-claim a still-running task.
+    expireStaleLeases(db, now, { excludeLeaseIds: [leaseId] });
     const current = readLease(db, leaseId);
     if (!current) throw new Error(`Lease not found: ${leaseId}`);
     if (current.status !== 'active') throw new Error(`Lease is not active: ${leaseId} (${current.status})`);
