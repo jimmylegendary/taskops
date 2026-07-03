@@ -86,9 +86,9 @@ function createFixture() {
     {
       id: 'task-child-b',
       title: 'Child B',
-      objective: 'Validate overwrite of external resolver.',
+      objective: 'Validate preservation of an explicit external resolver.',
       responsibility: 'Own child B.',
-      completionCriteria: 'Child B resolverKind is overwritten.',
+      completionCriteria: 'Child B resolverKind:human is preserved under delegation.',
       order: 2,
       resolverKind: 'human',
     },
@@ -145,12 +145,12 @@ function createFixture() {
     versionId: 'tgv-child-v1',
   });
 
-  assert.deepEqual(summary, { taskCount: 3, stampedCount: 3 }, 'stamp summary should count every child task');
-  for (const taskId of ['task-child-a', 'task-child-b', 'task-child-c']) {
+  assert.deepEqual(summary, { taskCount: 3, stampedCount: 2, preservedCount: 1 }, 'stamp summary counts self-stamped vs preserved external children');
+  for (const taskId of ['task-child-a', 'task-child-c']) {
     assert.equal(parseMarkdownFile(childTaskPath(root, taskId)).resolverKind, 'self', `${taskId} should be stamped resolverKind:self`);
   }
-  assert.equal(parseMarkdownFile(childTaskPath(root, 'task-child-b')).resolverKind, 'self', "delegation mode overwrites resolverKind:'human' to 'self'");
-  assert.deepEqual(parseProject(root).errors, [], 'stamped child resolverKind:self values should validate');
+  assert.equal(parseMarkdownFile(childTaskPath(root, 'task-child-b')).resolverKind, 'human', "delegation mode preserves an explicit resolverKind:'human' external hand-off");
+  assert.deepEqual(parseProject(root).errors, [], 'stamped/preserved child resolverKind values should validate');
 
   const firstStampBytes = childTaskBytes(root);
   const secondSummary = stampChildrenSelfResolver({
@@ -159,7 +159,7 @@ function createFixture() {
     versionId: 'tgv-child-v1',
   });
   const secondStampBytes = childTaskBytes(root);
-  assert.deepEqual(secondSummary, { taskCount: 3, stampedCount: 3 }, 'second stamp still processes every child task');
+  assert.deepEqual(secondSummary, { taskCount: 3, stampedCount: 2, preservedCount: 1 }, 'second stamp still processes every child task');
   assert.deepEqual(secondStampBytes, firstStampBytes, 'stamping twice should be byte-identical after the first stamp');
 }
 

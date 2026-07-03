@@ -129,7 +129,7 @@ function inputRequiredChildPath(root, childTaskGroupId, versionId) {
   const { root, action } = runDryRunDecompose({ delegate: true });
   const childPath = inputRequiredChildPath(root, action.childTaskGroupId, action.versionId);
   const child = parseMarkdownFile(childPath);
-  assert.equal(child.resolverKind, 'self', 'delegation dry-run child stamp should overwrite resolverKind:human with self');
+  assert.equal(child.resolverKind, 'human', 'delegation must PRESERVE the external-escalation child resolverKind:human — not orphan the human QUESTION by self-stamping (ultrareview C4)');
 }
 
 console.log('OK external resolver emit');

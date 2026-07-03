@@ -275,8 +275,8 @@ function assertNoBlockedOrWaitingTasks(root) {
   assert.ok(delegatedChildPaths.length > 0, 'fake decompose should create at least one child task');
   assert.deepEqual(
     delegated.action.selfResolverStamp,
-    { taskCount: delegatedChildPaths.length, stampedCount: delegatedChildPaths.length },
-    'delegation-mode decompose should report a self resolver stamp for every child',
+    { taskCount: delegatedChildPaths.length, stampedCount: delegatedChildPaths.length, preservedCount: 0 },
+    'delegation-mode decompose should self-stamp every child that has no explicit external resolver',
   );
   for (const childPath of delegatedChildPaths) {
     const child = parseMarkdownFile(childPath);
