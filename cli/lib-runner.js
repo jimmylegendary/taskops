@@ -1144,11 +1144,15 @@ function buildReviewReport({ projectDir, task, runNode }) {
   // 'approved' on a prose expectedOutcome + a runner-generated summary alone — require at least one
   // independently-checkable acceptance signal so claimSafe=true is never minted from self-narration.
   const semantic = acceptance.semanticAssertions || {};
-  const hasCheckableAcceptance = (acceptance.requiredArtifacts || []).length > 0
+  // Content-only assertions (contentIncludes/contentExcludes) match the agent's OWN self-authored
+  // observed.content — advisory, not certification-grade. Policy approval requires a structured
+  // signal beyond a self-narrated prose match.
+  const CONTENT_ONLY_ASSERTIONS = new Set(['contentIncludes', 'contentExcludes']);
+  const hasGroundedAcceptance = (acceptance.requiredArtifacts || []).length > 0
     || (acceptance.requiredChecks || []).length > 0
-    || Object.values(semantic).some((v) => Array.isArray(v) && v.length > 0);
-  if (POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && !hasCheckableAcceptance) {
-    missingExpected.push('policy-approving acceptance has no machine-checkable signal (requiredChecks/requiredArtifacts/semanticAssertions); a self-reported summary cannot certify completion');
+    || Object.entries(semantic).some(([k, v]) => !CONTENT_ONLY_ASSERTIONS.has(k) && Array.isArray(v) && v.length > 0);
+  if (POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && !hasGroundedAcceptance) {
+    missingExpected.push('policy-approving acceptance has no structured checkable signal beyond a self-authored content match (need requiredChecks/requiredArtifacts/requiredUrls/requiredSources/requiredCoverage/requiredArtifactIdentities); a self-narrated summary or content match cannot certify completion');
   }
 
   const decision = failedChecks.length > 0
