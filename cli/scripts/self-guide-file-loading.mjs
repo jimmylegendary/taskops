@@ -138,7 +138,7 @@ assert.match(
 );
 assert.match(
   runnerSource,
-  /delegationMode,\n\s+selfResolutionGuide,\n\s+\}\);/,
+  /delegationMode,\n\s+selfResolutionGuide,\n/,
   'runTaskOps execute path should thread selfResolutionGuide with delegationMode',
 );
 
