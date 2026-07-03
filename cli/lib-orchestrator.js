@@ -13,6 +13,8 @@ import {
 } from './lib-queue.js';
 import { DEFAULT_MAX_LOOPBACKS, explainWork, runTaskOps } from './lib-runner.js';
 import { executorForRuntime, normalizeRuntimeAdapter } from './lib-runtime-adapters.js';
+import { auditParsedWork } from './lib-audit.js';
+import { parseProject } from './lib-taskops.js';
 
 const DEFAULT_LOOPBACK_WORKER_MAX_STEPS = 50;
 
@@ -812,6 +814,20 @@ export async function runQueueWatch(workDir, options = {}) {
     }
   }
 
+  // Honest terminal signal: `all_closed` / `finalExplain.complete` is only STRUCTURAL closure.
+  // Run the claim-safety audit so a consumer never mistakes a structurally-complete but
+  // unapproved (or manually-attested) graph for a policy-approved, inductively-sound one.
+  let claimSafe = null;
+  let strictSafe = null;
+  let closureState = finalExplain?.closure?.closureState ?? null;
+  try {
+    const auditProjectDir = finalExplain?.projectDir || workDir;
+    const audit = auditParsedWork(parseProject(auditProjectDir));
+    claimSafe = audit.claimSafe;
+    strictSafe = audit.strictSafe;
+    closureState = audit.metrics?.closureState ?? closureState;
+  } catch { /* leave the verdict null when the work cannot be re-parsed */ }
+
   return {
     projectDir: waves[0]?.projectDir || finalExplain.projectDir || null,
     workId: waves[0]?.workId || finalExplain.workId || null,
@@ -838,6 +854,9 @@ export async function runQueueWatch(workDir, options = {}) {
     idleExitAfterSeconds,
     pollIntervalMs,
     stopOnFailure,
+    claimSafe,
+    strictSafe,
+    closureState,
     finalExplain,
     waves,
   };
