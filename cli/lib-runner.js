@@ -2908,10 +2908,16 @@ function performDryRunDecomposition({ projectDir, task }) {
     needsManualReview: true,
     manualReviewReason: 'Synthetic dry-run placeholder requires human-supplied real inputs.',
     understandingLevel: 'unknown',
+    resolverKind: 'human',
   };
+  const escalationQuestion = `${task.title}: which concrete decision or input is required before this task can be expanded into a runnable plan?`;
+  const externalResolutionBody = EXTERNAL_RESOLUTION_TEMPLATE.replace(
+    '<agent: the single decision that could not be settled — one decision unit, crisp>',
+    escalationQuestion,
+  );
   writeTextFileAtomic(
     join(tgDir, 'versions', versionId, 'tasks', `${childTaskId}.md`),
-    fmBlock(childFm) + `# ${childFm.title}\n\nSynthetic placeholder created by the TaskOps dry-run runner. This is not real progress; it is structural scaffolding so the parent task can be marked decomposed without losing trace to the open question.\n`,
+    fmBlock(childFm) + `# ${childFm.title}\n\n${externalResolutionBody}\n`,
   );
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
