@@ -13,6 +13,7 @@ import {
   parseProject,
   readBody,
   deriveExternalResolutionStatus,
+  isPartialUnresolved,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
 import {
@@ -4412,6 +4413,22 @@ export function closeTarget(workDir, targetId, {
             throw new Error(`Task '${task.id}' has ${unclosedTerminals.length} child terminal task(s) without EoW (e.g. '${unclosedTerminals[0].id}'); close children first`);
           }
         }
+      }
+    }
+
+    // A5: manual_verified must not FORCE-CLOSE a task that still carries an unresolved partial marker
+    // — that would orphan honest-unfinished work. Require the partial to be promoted/superseded first.
+    if (task.status !== 'done' && declaredReason === 'manual_verified') {
+      const unresolvedPartial = task.awaitingPromotion === true
+        || Boolean(task.awaitingPromotionPartialId)
+        || [...(parsed.partialNodes?.values() || [])].some((p) => p
+            && p.graphType === 'task'
+            && p.attachedToId === task.id
+            && p.taskGroupVersionId === task.taskGroupVersionId
+            && isPartialUnresolved(p)
+            && p.followUpNeeded !== false);
+      if (unresolvedPartial) {
+        throw new Error(`Task '${task.id}' has an unresolved partial marker; promote or supersede the partial before closing with --reason manual_verified (refusing to orphan unfinished work).`);
       }
     }
 
