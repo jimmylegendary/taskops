@@ -1686,6 +1686,42 @@ function uncertaintyReadinessConsistencyIssues(task, semanticReadiness) {
       });
     }
   }
+
+  // B1: uncertaintyState:'known' must NOT override contradicting metadata. When the uncertainty
+  // path derives 'runnable', apply the SAME contradiction-aware downgrade that guards an explicit
+  // runnable (declared unknowns / explorationNeeded / understandingLevel unknown|partial / low
+  // confidence / blocked status / incomplete guarded acceptance). Otherwise 'known' is a single-field
+  // bypass of the override-resistant downgrade.
+  if (semanticReadiness.runReadiness === 'runnable') {
+    const unknowns = Array.isArray(task.unknowns) ? task.unknowns : (task.unknowns ? [task.unknowns] : []);
+    const understanding = task.understandingLevel ? String(task.understandingLevel) : '';
+    const explorationNeeded = task.explorationNeeded === true || task.needsExploration === true;
+    if (task.status === 'blocked') {
+      issues.push({ code: 'uncertainty_runnable_blocked_status', severity: 'error', downgradeTo: 'blocked', message: "uncertaintyState 'known' runnable conflicts with blocked task status" });
+    }
+    if (explorationNeeded) {
+      issues.push({ code: 'uncertainty_runnable_exploration_flag', severity: 'error', downgradeTo: 'needs_exploration', message: "uncertaintyState 'known' runnable conflicts with explorationNeeded/needsExploration" });
+    }
+    if (understanding === 'unknown') {
+      issues.push({ code: 'uncertainty_runnable_unknown_understanding', severity: 'error', downgradeTo: 'needs_exploration', message: "uncertaintyState 'known' runnable conflicts with understandingLevel 'unknown'" });
+    } else if (understanding === 'partial') {
+      issues.push({ code: 'uncertainty_runnable_partial_understanding', severity: 'warning', downgradeTo: null, message: "uncertaintyState 'known' runnable has partial understanding; keep only with concrete scope or acceptance evidence" });
+    }
+    if (unknowns.length > 0) {
+      issues.push({ code: 'uncertainty_runnable_declared_unknowns', severity: 'error', downgradeTo: 'needs_exploration', message: "uncertaintyState 'known' runnable conflicts with declared unknowns" });
+    }
+    for (const field of lowConfidenceFields(task)) {
+      issues.push({ code: `uncertainty_runnable_low_${field}`, severity: 'error', downgradeTo: 'needs_exploration', message: `uncertaintyState 'known' runnable conflicts with low ${field}` });
+    }
+    const acceptance = task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance) ? task.acceptance : null;
+    const acceptanceMode = String(acceptance?.mode || '').trim();
+    if (acceptance && ['guarded', 'runner-managed'].includes(acceptanceMode)) {
+      const missing = missingConcreteAcceptanceFields(acceptance);
+      if (missing.length > 0) {
+        issues.push({ code: 'uncertainty_runnable_incomplete_guarded_acceptance', severity: 'error', downgradeTo: 'blocked', message: `uncertaintyState 'known' runnable with ${acceptanceMode} acceptance is missing concrete acceptance: ${missing.join(', ')}` });
+      }
+    }
+  }
   return issues;
 }
 
