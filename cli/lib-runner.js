@@ -12,6 +12,7 @@ import {
   parseMarkdownFile,
   parseProject,
   readBody,
+  deriveExternalResolutionStatus,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
 import {
@@ -1351,6 +1352,24 @@ function taskPause(task) {
   }
 }
 
+// C1: gate task selection on external (human/ai) resolution status. A task whose resolverKind is
+// human/ai must NOT be auto-executed until its DECISION/BASIS block is RESOLVED — otherwise the
+// external decision is never actually waited on. Returns a delegation_pending pause otherwise.
+function externalResolutionPause(task) {
+  const resolverKind = task?.resolverKind;
+  if (resolverKind !== 'human' && resolverKind !== 'ai') return null;
+  let body = '';
+  try { body = task.path ? readBody(task.path) : ''; } catch { body = ''; }
+  const status = deriveExternalResolutionStatus({ resolverKind, body });
+  if (status === 'resolved' || status === 'none') return null;
+  return {
+    reason: STOP_REASONS.DELEGATION_PENDING,
+    detail: status === 'waiting'
+      ? `Task ${task.id} awaits an external ${resolverKind} decision; its DECISION/BASIS resolution block is not filled.`
+      : `Task ${task.id} has an unresolved external ${resolverKind} resolution block (DECISION/BASIS missing or only partially filled).`,
+  };
+}
+
 function blockerKey(ref) {
   if (!ref || typeof ref !== 'object') return 'invalid:blocker';
   switch (ref.type) {
@@ -1650,12 +1669,24 @@ export function pickNextAction(parsed, target = {}) {
         source: { type: 'task', id: task.id },
       };
     }
+    if (action === 'execute') {
+      const extPause = externalResolutionPause(task);
+      if (extPause) {
+        return {
+          kind: 'stop',
+          reason: extPause.reason,
+          detail: extPause.detail,
+          source: { type: 'task', id: task.id },
+        };
+      }
+    }
     return { kind: action, task, classification };
   }
 
   const candidates = collectTaskCandidates(parsed);
   let anyOpenTask = false;
   let onlyBlockedSeen = true;
+  let anyDelegationPending = false;
   for (const { task } of candidates) {
     if (['done', 'cancelled'].includes(task.status)) continue;
     anyOpenTask = true;
@@ -1673,12 +1704,19 @@ export function pickNextAction(parsed, target = {}) {
     }
     const classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
     if (classification.runReadiness === 'blocked') continue;
-    onlyBlockedSeen = false;
     const action = ACTION_BY_READINESS[classification.runReadiness];
     if (!action) continue;
+    if (action === 'execute') {
+      const extPause = externalResolutionPause(task);
+      if (extPause) { anyDelegationPending = true; continue; }
+    }
+    onlyBlockedSeen = false;
     return { kind: action, task, classification };
   }
 
+  if (anyDelegationPending) {
+    return { kind: 'stop', reason: STOP_REASONS.DELEGATION_PENDING, detail: 'One or more tasks await an external human/ai decision; fill their DECISION/BASIS resolution block before continuing.' };
+  }
   if (anyOpenTask && onlyBlockedSeen) {
     return { kind: 'stop', reason: STOP_REASONS.BLOCKED_ONLY, detail: 'Only blocked tasks remain; unblock or cancel them before continuing.' };
   }
