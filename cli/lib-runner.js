@@ -1157,7 +1157,7 @@ export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000
   return results;
 }
 
-function buildReviewReport({ projectDir, task, runNode }) {
+function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   const acceptance = normalizeAcceptance(task);
   const result = normalizeResult(runNode);
   const missingExpected = [];
@@ -1205,6 +1205,14 @@ function buildReviewReport({ projectDir, task, runNode }) {
     || Object.values(semantic).some((v) => Array.isArray(v) && v.length > 0);
   if (POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && !hasCheckableAcceptance) {
     missingExpected.push('policy-approving acceptance has no machine-checkable signal (requiredChecks/requiredArtifacts/semanticAssertions); a self-reported summary cannot certify completion');
+  }
+
+  // verify-resolver: under --verify-checks, policy approval must rest on a runner-EXECUTED requiredCheck.
+  // requiredArtifacts (existsSync / self-reported refs) and content semanticAssertions (matched against the
+  // agent's own output) are NOT independently verified by --verify-checks, so a policy-approving task that
+  // carries no requiredChecks cannot be certified claim-safe under verify mode.
+  if (verifyMode && POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && (acceptance.requiredChecks || []).length === 0) {
+    missingExpected.push('--verify-checks: policy approval requires at least one runner-executed requiredCheck; requiredArtifacts/semanticAssertions are not independently verified by --verify-checks');
   }
 
   const decision = failedChecks.length > 0
@@ -2457,7 +2465,7 @@ function writeRunPartialMarker({ projectDir, runNode, declaredAt, options = {} }
   return { partialId, partialPath, partial: partialFm };
 }
 
-function writeReviewForRunNode({ projectDir, task, runNode }) {
+function writeReviewForRunNode({ projectDir, task, runNode, verifyMode = false }) {
   const runDir = join(projectDir, 'runs', runNode.runId);
   const reviewNodeId = `review-${runNode.id}`;
   const reviewNodePath = ensureRunNode({
@@ -2471,7 +2479,7 @@ function writeReviewForRunNode({ projectDir, task, runNode }) {
     status: 'done',
     kindLabel: 'review',
   });
-  const report = buildReviewReport({ projectDir, task, runNode });
+  const report = buildReviewReport({ projectDir, task, runNode, verifyMode });
   const reviewReportHash = sha256Of(report);
   updateMarkdownFrontmatter(reviewNodePath, (fm) => {
     fm.status = 'done';
@@ -2630,6 +2638,7 @@ function closeExecuteSuccess({
   surpriseReport,
   budget,
   artifactWorkspacePath,
+  verifyMode = false,
 }) {
   const surpriseHistoryEntry = surpriseReport.surpriseReported
     ? appendSurpriseHistory({
@@ -2655,7 +2664,7 @@ function closeExecuteSuccess({
     return fm;
   });
   const reviewedRunNode = parseMarkdownFile(runNodePath);
-  const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode });
+  const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode, verifyMode });
   const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
   if (review.reviewReport.decision !== 'approved' && isGuarded) {
     return closeExecuteFailure({
@@ -2903,6 +2912,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       surpriseReport,
       budget,
       artifactWorkspacePath,
+      verifyMode: verifyRequiredChecks,
     });
   }
 
@@ -4475,16 +4485,17 @@ export function closeTarget(workDir, targetId, {
     }
 
     // A5: manual_verified must not FORCE-CLOSE a task that still carries an unresolved partial marker
-    // — that would orphan honest-unfinished work. Require the partial to be promoted/superseded first.
+    // — that would orphan honest-unfinished work. Key on the LIVE partial-node state (isPartialUnresolved)
+    // so this is resolution-aware (a promoted/superseded partial no longer blocks) and covers BOTH
+    // partial-creation paths (closeExecutePartial and `close --reason partial_complete`); do NOT rely on
+    // the write-once, never-cleared awaitingPromotion flag, and do NOT narrow on followUpNeeded (an
+    // unresolved partial is unresolved whether or not follow-up is flagged).
     if (task.status !== 'done' && declaredReason === 'manual_verified') {
-      const unresolvedPartial = task.awaitingPromotion === true
-        || Boolean(task.awaitingPromotionPartialId)
-        || [...(parsed.partialNodes?.values() || [])].some((p) => p
-            && p.graphType === 'task'
-            && p.attachedToId === task.id
-            && p.taskGroupVersionId === task.taskGroupVersionId
-            && isPartialUnresolved(p)
-            && p.followUpNeeded !== false);
+      const unresolvedPartial = [...(parsed.partialNodes?.values() || [])].some((p) => p
+        && p.graphType === 'task'
+        && p.attachedToId === task.id
+        && p.taskGroupVersionId === task.taskGroupVersionId
+        && isPartialUnresolved(p));
       if (unresolvedPartial) {
         throw new Error(`Task '${task.id}' has an unresolved partial marker; promote or supersede the partial before closing with --reason manual_verified (refusing to orphan unfinished work).`);
       }

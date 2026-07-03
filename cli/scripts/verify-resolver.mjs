@@ -19,7 +19,7 @@ assert.equal(prim[0].status, 'passed'); assert.equal(prim[0].exitCode, 0); asser
 assert.equal(prim[1].status, 'failed'); assert.equal(prim[1].exitCode, 1); assert.equal(prim[1].verifiedBy, 'runner');
 
 // ---- 2) integration via runTaskOps --verify-checks ----
-function makeRunnableWork(name, requiredChecks) {
+function makeRunnableWork(name, acceptance) {
   const w = join(root, name);
   const tv = 'task-groups/tg-root/versions/tgv-root-v1';
   for (const d of [`${tv}/tasks`, `${tv}/eow`, 'snapshots']) mkdirSync(join(w, d), { recursive: true });
@@ -28,7 +28,7 @@ function makeRunnableWork(name, requiredChecks) {
   md('task-groups/tg-root/index.md', { taskOpsVersion: 'v1', entityType: 'taskGroup', id: 'tg-root', objective: 'x', activeVersionId: 'tgv-root-v1', createdAt: now, status: 'active' });
   md(`${tv}/index.md`, { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: 'tgv-root-v1', taskGroupId: 'tg-root', version: 'v1', summary: 's', selected: true, createdAt: now, status: 'active' });
   md('snapshots/snapshot-root-v1.md', { taskOpsVersion: 'v1', entityType: 'versionSnapshot', id: 'snapshot-root-v1', rootTaskGroupId: 'tg-root', createdAt: now, label: 'R', status: 'active', selectedVersions: [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }] });
-  md(`${tv}/tasks/task-01.md`, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-01', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'checks pass', order: 1, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known', acceptance: { mode: 'guarded', expectedOutcome: 'the required checks pass', requiredChecks } });
+  md(`${tv}/tasks/task-01.md`, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-01', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'checks pass', order: 1, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known', acceptance });
   return w;
 }
 function runNodeCheckResults(w, res) {
@@ -38,7 +38,7 @@ function runNodeCheckResults(w, res) {
 
 // a check that REALLY passes → runner records passed → review approves.
 // (use `exit 0`/`exit 1` rather than `true`/`false`, which YAML re-parses as booleans.)
-const passWork = makeRunnableWork('verify-pass', [{ command: 'exit 0' }]);
+const passWork = makeRunnableWork('verify-pass', { mode: 'guarded', expectedOutcome: 'the required checks pass', requiredChecks: [{ command: 'exit 0' }] });
 const passRes = runTaskOps(passWork, { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
 assert.equal(passRes.tasks[0].reviewDecision, 'approved', 'a runner-verified passing check approves');
 const passChecks = runNodeCheckResults(passWork, passRes);
@@ -47,12 +47,19 @@ assert.equal(passChecks[0]?.status, 'passed');
 
 // a check that REALLY fails → runner records failed → review is NOT approved, even though the dry-run
 // executor "completed" the task. Self-narration cannot manufacture claimSafe.
-const failWork = makeRunnableWork('verify-fail', [{ command: 'exit 1' }]);
+const failWork = makeRunnableWork('verify-fail', { mode: 'guarded', expectedOutcome: 'the required checks pass', requiredChecks: [{ command: 'exit 1' }] });
 const failRes = runTaskOps(failWork, { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
 assert.notEqual(failRes.tasks[0].reviewDecision, 'approved', 'a runner-verified FAILING check must not approve');
 const failChecks = runNodeCheckResults(failWork, failRes);
 assert.equal(failChecks[0]?.status, 'failed', 'runner records the real failing result');
 assert.equal(failChecks[0]?.verifiedBy, 'runner');
+
+// verify-resolver gap (found by self-review): a policy-approving task with NO requiredChecks — only
+// requiredArtifacts / semanticAssertions, which --verify-checks does NOT independently verify — must not be
+// approved under verify mode. Otherwise claimSafe would still rest on self-report even with --verify-checks on.
+const artifactOnly = makeRunnableWork('verify-artifact-only', { mode: 'guarded', expectedOutcome: 'index exists', requiredArtifacts: [{ path: 'index.md' }] });
+const artRes = runTaskOps(artifactOnly, { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
+assert.notEqual(artRes.tasks[0].reviewDecision, 'approved', 'verify-checks: an artifact-only task (no requiredChecks) must not be claim-safe under verify mode');
 
 rmSync(root, { recursive: true, force: true });
 console.log('OK verify-resolver');
