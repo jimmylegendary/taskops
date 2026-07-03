@@ -1739,6 +1739,11 @@ export function pickNextAction(parsed, target = {}) {
     return { kind: 'stop', reason: STOP_REASONS.BLOCKED_ONLY, detail: 'Only blocked tasks remain; unblock or cancel them before continuing.' };
   }
   if (!anyOpenTask && parsed.closure && parsed.closure.complete === true) {
+    // A6: never report ALL_CLOSED for a canonically-invalid graph — validation errors mean closure
+    // cannot be trusted until they are resolved.
+    if (parsed.errors.length > 0) {
+      return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE, detail: `Work has ${parsed.errors.length} validation error(s); closure cannot be trusted until resolved.` };
+    }
     return {
       kind: 'stop',
       reason: STOP_REASONS.ALL_CLOSED,
@@ -4130,7 +4135,8 @@ function commandForAction(action, workDir) {
 }
 
 function shapeNextAction(next, workDir, parsed = null) {
-  if (parsed?.closure?.complete === true) {
+  // A6: do not shape a 'done' action for a canonically-invalid graph (validation errors present).
+  if (parsed?.closure?.complete === true && !(parsed.errors?.length > 0)) {
     return {
       action: 'done',
       target: null,
@@ -4212,7 +4218,9 @@ export function explainWork(workDir) {
   const next = pickNextAction(parsed);
   const shaped = shapeNextAction(next, workDir, parsed);
   const closure = parsed.closure || {};
-  const complete = closure.complete === true;
+  // A6: a canonically-invalid graph is never honestly complete — closure cannot be trusted while
+  // validation errors exist.
+  const complete = closure.complete === true && parsed.errors.length === 0;
   const reasons = [];
   const readinessCounts = complete
     ? { runnable: 0, needs_decomposition: 0, needs_exploration: 0, blocked: 0, waiting: 0 }
