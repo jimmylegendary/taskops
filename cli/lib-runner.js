@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -953,6 +953,7 @@ function normalizeResult(runNode) {
       ],
       coverage: asArray(observed.coverage),
       checkResults: asArray(observed.checkResults),
+      verifiedArtifacts: asArray(observed.verifiedArtifacts),
     },
   };
 }
@@ -1138,6 +1139,7 @@ export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000
     let status = 'failed';
     let exitCode = null;
     let detail = '';
+    let outputHash = null;
     try {
       const out = spawnSync(command, {
         cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
@@ -1147,12 +1149,61 @@ export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000
       } else {
         exitCode = out.status;
         status = out.status === 0 ? 'passed' : 'failed';
-        detail = sanitizeFmScalar(`${out.stdout || ''}${out.stderr || ''}`.trim(), { maxLen: 500, fallback: '' });
+        const raw = `${out.stdout || ''}${out.stderr || ''}`;
+        outputHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+        detail = sanitizeFmScalar(raw.trim(), { maxLen: 500, fallback: '' });
       }
     } catch (error) {
       detail = error instanceof Error ? error.message : String(error);
     }
-    results.push({ command, status, exitCode, detail, verifiedBy: 'runner' });
+    // outputHash makes the result tamper-evident/auditable; verifiedBy marks it as runner-produced.
+    results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner' });
+  }
+  return results;
+}
+
+// verify-resolver provenance: resolve a required-artifact ref to an on-disk path (workspace first, then project).
+function resolveArtifactPath(ref, cwd, projectDir) {
+  const needle = String(ref || '').trim();
+  if (!needle) return null;
+  for (const base of [cwd, projectDir]) {
+    if (!base) continue;
+    const p = resolve(base, needle);
+    if (existsSync(p)) return p;
+  }
+  return cwd ? resolve(cwd, needle) : (projectDir ? resolve(projectDir, needle) : resolve(needle));
+}
+
+function artifactMtimeMs(path) {
+  try { return statSync(path).mtimeMs; } catch { return null; }
+}
+
+// Snapshot the PRE-execution state of each required artifact so we can later tell whether THIS run produced it.
+export function snapshotArtifactState({ requiredArtifacts, cwd, projectDir }) {
+  const state = {};
+  for (const artifact of requiredArtifacts || []) {
+    const ref = String(refText(artifact) || '').trim();
+    if (!ref) continue;
+    const path = resolveArtifactPath(ref, cwd, projectDir);
+    state[ref] = { existedBefore: path ? existsSync(path) : false, mtimeBefore: path ? artifactMtimeMs(path) : null };
+  }
+  return state;
+}
+
+// Runner-authored artifact verification: exists on disk now AND was created/modified during this run.
+// A pre-existing, untouched file does NOT count as produced — closing the "existsSync of a stale file" leak.
+export function verifyArtifactProvenance({ requiredArtifacts, cwd, projectDir, preState = {} }) {
+  const results = [];
+  for (const artifact of requiredArtifacts || []) {
+    const ref = String(refText(artifact) || '').trim();
+    if (!ref) continue;
+    const path = resolveArtifactPath(ref, cwd, projectDir);
+    const exists = path ? existsSync(path) : false;
+    const pre = preState[ref] || { existedBefore: false, mtimeBefore: null };
+    const mtimeAfter = exists ? artifactMtimeMs(path) : null;
+    const producedThisRun = exists
+      && (!pre.existedBefore || (mtimeAfter != null && pre.mtimeBefore != null && mtimeAfter > pre.mtimeBefore));
+    results.push({ ref, exists, producedThisRun, verifiedBy: 'runner' });
   }
   return results;
 }
@@ -1169,6 +1220,19 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   }
 
   for (const artifact of acceptance.requiredArtifacts) {
+    const artifactRef = String(refText(artifact) || '').trim();
+    if (verifyMode) {
+      // under --verify-checks, a requiredArtifact is satisfied only if the runner verified it exists on disk
+      // AND was produced/modified by THIS run — a self-reported ref or a stale pre-existing file does not count.
+      if (!artifactRef) continue;
+      const v = (result.observed.verifiedArtifacts || []).find((a) => a.ref === artifactRef);
+      if (!v || !v.exists) {
+        missingExpected.push(`required artifact not produced (runner found it absent): ${artifactRef}`);
+      } else if (!v.producedThisRun) {
+        failedChecks.push(`required artifact not produced by this run (pre-existing, unchanged): ${artifactRef}`);
+      }
+      continue;
+    }
     if (!evidenceContainsRef(result, artifact, projectDir)) {
       missingExpected.push(`required artifact not observed: ${refText(artifact)}`);
     }
@@ -1218,12 +1282,13 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     missingExpected.push('policy-approving acceptance has no machine-checkable signal (requiredChecks/requiredArtifacts/semanticAssertions); a self-reported summary cannot certify completion');
   }
 
-  // verify-resolver: under --verify-checks, policy approval must rest on a runner-EXECUTED requiredCheck.
-  // requiredArtifacts (existsSync / self-reported refs) and content semanticAssertions (matched against the
-  // agent's own output) are NOT independently verified by --verify-checks, so a policy-approving task that
-  // carries no EXECUTABLE requiredCheck cannot be certified claim-safe under verify mode.
-  if (verifyMode && POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && executableChecks.length === 0) {
-    missingExpected.push('--verify-checks: policy approval requires at least one runner-executed requiredCheck; requiredArtifacts/semanticAssertions are not independently verified by --verify-checks');
+  // verify-resolver: under --verify-checks, policy approval must rest on a runner-verifiable signal — a
+  // runner-EXECUTED requiredCheck or a requiredArtifact whose PROVENANCE the runner verified (produced this
+  // run). Content semanticAssertions (matched against the agent's own output) are not independently
+  // verifiable, so a policy-approving task carrying neither an executable check nor a concrete artifact
+  // cannot be certified claim-safe under verify mode.
+  if (verifyMode && POLICY_APPROVING_ACCEPTANCE_MODES.has(acceptance.mode) && executableChecks.length === 0 && concreteArtifacts.length === 0) {
+    missingExpected.push('--verify-checks: policy approval requires a runner-executed requiredCheck or a runner-verified requiredArtifact; content semanticAssertions are not independently verified by --verify-checks');
   }
 
   const decision = failedChecks.length > 0
@@ -2753,6 +2818,12 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
   });
   appendRunLog(runDir, `${startedAt} task_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
 
+  // verify-resolver provenance: snapshot required-artifact state BEFORE execution so we can tell whether
+  // THIS run produced each artifact (vs a pre-existing file the runner would otherwise accept via existsSync).
+  const artifactPreState = verifyRequiredChecks
+    ? snapshotArtifactState({ requiredArtifacts: normalizeAcceptance(task).requiredArtifacts, cwd: artifactWorkspacePath, projectDir })
+    : {};
+
   let result;
   try {
     result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode, selfResolutionGuide });
@@ -2780,6 +2851,14 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
           cwd: artifactWorkspacePath,
           requiredChecks: acceptance.requiredChecks,
           timeoutMs: stepTimeoutMs,
+        });
+      }
+      if ((acceptance.requiredArtifacts || []).length > 0) {
+        executionResult.observed.verifiedArtifacts = verifyArtifactProvenance({
+          requiredArtifacts: acceptance.requiredArtifacts,
+          cwd: artifactWorkspacePath,
+          projectDir,
+          preState: artifactPreState,
         });
       }
     }
