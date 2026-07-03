@@ -54,12 +54,18 @@ const failChecks = runNodeCheckResults(failWork, failRes);
 assert.equal(failChecks[0]?.status, 'failed', 'runner records the real failing result');
 assert.equal(failChecks[0]?.verifiedBy, 'runner');
 
-// verify-resolver gap (found by self-review): a policy-approving task with NO requiredChecks — only
-// requiredArtifacts / semanticAssertions, which --verify-checks does NOT independently verify — must not be
-// approved under verify mode. Otherwise claimSafe would still rest on self-report even with --verify-checks on.
-const artifactOnly = makeRunnableWork('verify-artifact-only', { mode: 'guarded', expectedOutcome: 'index exists', requiredArtifacts: [{ path: 'index.md' }] });
-const artRes = runTaskOps(artifactOnly, { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
-assert.notEqual(artRes.tasks[0].reviewDecision, 'approved', 'verify-checks: an artifact-only task (no requiredChecks) must not be claim-safe under verify mode');
+// verify-resolver strengthening (artifact provenance): a requiredArtifact that is a PRE-EXISTING file this
+// run did not produce must NOT certify under verify mode (index.md exists before the task runs). Closes the
+// self-review "existsSync of a stale file" leak.
+const stale = runTaskOps(makeRunnableWork('verify-artifact-stale', { mode: 'guarded', expectedOutcome: 'index exists', requiredArtifacts: [{ path: 'index.md' }] }), { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
+assert.notEqual(stale.tasks[0].reviewDecision, 'approved', 'verify-checks: a stale pre-existing artifact must not certify (provenance)');
+
+// a requiredArtifact PRODUCED during this run (a runner-executed check creates it) IS provenance-verified → approves.
+const produced = makeRunnableWork('verify-artifact-produced', { mode: 'guarded', expectedOutcome: 'produce out.txt', requiredChecks: [{ command: 'echo hi > out.txt' }], requiredArtifacts: [{ path: 'out.txt' }] });
+const prodRes = runTaskOps(produced, { executor: 'dry-run', maxSteps: 1, verifyChecks: true });
+assert.equal(prodRes.tasks[0].reviewDecision, 'approved', 'verify-checks: an artifact produced by this run (runner-verified provenance) certifies');
+const prodChecks = runNodeCheckResults(produced, prodRes);
+assert.ok(prodChecks[0]?.outputHash, 'check result carries a tamper-evident outputHash');
 
 // self-review NEW_ISSUE: a vacuous requiredChecks:[{command:''}] must not certify. The empty-command check
 // is skipped by both the runner and the review loop, so it counts as NO machine-checkable signal — under
