@@ -21,6 +21,8 @@ import {
   DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
   isMutationLockActive,
   isProcessAlive,
+  isMutationLockOwnerAlive,
+  processStartTime,
   readMutationLockMeta,
   waitForMutationLockClear,
 } from './lib-mutation-lock.js';
@@ -370,7 +372,7 @@ function reapStaleMutationLock(lockDir, nowMs) {
   if (!meta) return false;
   const expiresAtMs = Date.parse(String(meta.expiresAt || ''));
   const expired = Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs;
-  const deadOwner = meta.pid != null && !isProcessAlive(meta.pid);
+  const deadOwner = meta.pid != null && !isMutationLockOwnerAlive(meta);
   if (!expired && !deadOwner) return false;
   try {
     rmSync(lockDir, { recursive: true, force: true });
@@ -393,6 +395,7 @@ export function acquireMutationLock({ projectDir, runId, runNodeId, task, action
       const nonce = randomUUID();
       const meta = {
         pid: process.pid,
+        pidStartTime: processStartTime(process.pid),
         nonce,
         acquiredAt,
         expiresAt,
