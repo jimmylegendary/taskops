@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -378,7 +378,7 @@ function reapStaleMutationLock(lockDir, nowMs) {
   }
 }
 
-function acquireMutationLock({ projectDir, runId, runNodeId, task, action, executor, stepTimeoutMs }) {
+export function acquireMutationLock({ projectDir, runId, runNodeId, task, action, executor, stepTimeoutMs }) {
   const lockDir = join(projectDir, MUTATION_LOCK_DIR);
   const ttlMs = mutationLockTtlMs(stepTimeoutMs);
   const deadlineMs = Date.now() + ttlMs;
@@ -388,8 +388,10 @@ function acquireMutationLock({ projectDir, runId, runNodeId, task, action, execu
       mkdirSync(lockDir, { recursive: false });
       const acquiredAt = new Date(nowMs).toISOString();
       const expiresAt = new Date(nowMs + ttlMs).toISOString();
+      const nonce = randomUUID();
       const meta = {
         pid: process.pid,
+        nonce,
         acquiredAt,
         expiresAt,
         ttlMs,
@@ -410,7 +412,15 @@ function acquireMutationLock({ projectDir, runId, runNodeId, task, action, execu
       return () => {
         if (released) return;
         released = true;
-        try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+        // Ownership-checked release: only delete the lock if it is still OURS.
+        // After a TTL overrun another owner may have reaped + re-acquired the lock;
+        // deleting it unconditionally here would corrupt their critical section.
+        try {
+          const cur = readMutationLockMeta(lockDir);
+          if (cur && cur.nonce === nonce && cur.pid === process.pid) {
+            rmSync(lockDir, { recursive: true, force: true });
+          }
+        } catch {}
       };
     } catch (error) {
       if (!error || error.code !== 'EEXIST') throw error;
