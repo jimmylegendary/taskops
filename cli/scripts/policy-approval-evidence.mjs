@@ -47,6 +47,14 @@ const a4 = reviewTarget(makeWork('a4-no-status', {
 assert.notEqual(a4.decision, 'approved', 'A4: a requiredCheck with no pass status must not be approved');
 assert.ok(a4.failedChecks.some((f) => f.includes('npm test')), 'A4: must flag the unverified check');
 
+// A3: a content-only assertion (contentIncludes) matches the agent's OWN self-authored content →
+// advisory, not certification-grade → must NOT approve on that alone.
+const a3 = reviewTarget(makeWork('a3-content-only', {
+  acceptance: { mode: 'guarded', expectedOutcome: 'ok', semanticAssertions: { contentIncludes: ['All 42 tests passed'] } },
+  result: { observed: { content: 'All 42 tests passed', outcomeSummary: 'done', artifactRefs: [], evidenceRefs: [], checkResults: [] } },
+}), 'task-review').reviewReport;
+assert.notEqual(a3.decision, 'approved', 'A3: a self-authored content match alone must not certify (approve)');
+
 // Positive control: a genuinely-passed requiredCheck still approves.
 const ok = reviewTarget(makeWork('ok-passed', {
   acceptance: { mode: 'runner-managed', expectedOutcome: 'tests pass', requiredChecks: ['npm test'] },
