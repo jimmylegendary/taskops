@@ -66,6 +66,8 @@ const prodRes = runTaskOps(produced, { executor: 'dry-run', maxSteps: 1, verifyC
 assert.equal(prodRes.tasks[0].reviewDecision, 'approved', 'verify-checks: an artifact produced by this run (runner-verified provenance) certifies');
 const prodChecks = runNodeCheckResults(produced, prodRes);
 assert.ok(prodChecks[0]?.outputHash, 'check result carries a tamper-evident outputHash');
+const prodReview = parseMarkdownFile(join(produced, 'runs', prodRes.runId, 'nodes', `review-${prodRes.tasks[0].runNodeId}.md`));
+assert.equal(prodReview.reviewReport?.verified, true, 'a --verify-checks review is stamped verified:true so claimSafe provenance is auditable');
 
 // self-review NEW_ISSUE: a vacuous requiredChecks:[{command:''}] must not certify. The empty-command check
 // is skipped by both the runner and the review loop, so it counts as NO machine-checkable signal — under
