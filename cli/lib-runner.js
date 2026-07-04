@@ -2755,7 +2755,9 @@ function closeExecuteSuccess({
   const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
   if (review.reviewReport.decision !== 'approved' && isGuarded) {
     const attempts = Number(task.verifyAttempts || 0);
-    if (verifyRetries > 0 && attempts < verifyRetries) {
+    // Only retry under --verify-checks: a passing retry must be RUNNER-verified. Retrying a self-reported
+    // review would just give the agent more attempts to self-report a pass, so gate on verifyMode.
+    if (verifyMode && verifyRetries > 0 && attempts < verifyRetries) {
       // test-time-scaling: retry with the check failure fed back instead of a permanent block — more
       // test-time may convert a stall into an honest verified completion. Bounded by verifyRetries.
       const feedback = review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected).join('; ');
@@ -2804,6 +2806,10 @@ function closeExecuteSuccess({
   const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
+  // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
+  if (task.verifyAttempts != null || task.lastCheckFailure != null) {
+    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; return fm; });
+  }
 
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'task_completed', runId,

@@ -27,18 +27,25 @@ md('snapshots/snapshot-root-v1.md', { taskOpsVersion: 'v1', entityType: 'version
 const task = (id, cmd, order) => md(`${tv}/tasks/${id}.md`, { taskOpsVersion: 'v1', entityType: 'task', id, taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: id, objective: 'x', responsibility: 'own', completionCriteria: 'check', order, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known', acceptance: { mode: 'guarded', expectedOutcome: 'check', requiredChecks: [{ command: cmd }] } });
 task('t-pass', 'exit 0', 1);
 task('t-fail', 'exit 1', 2);
+// t-retry: a check that fails once then passes — exercises --verify-retries THROUGH the parallel worker
+// (the worker subprocess must receive --verify-retries and retry the task).
+const marker = join(root, 'retry-marker');
+task('t-retry', `test -f ${marker} || { touch ${marker}; exit 1; }`, 3);
 
 syncQueueProjection(w);
 const res = await runQueueWatch(w, {
-  runtimeAdapter: 'dry-run', verifyChecks: true, continueOnFailure: true,
-  maxParallel: 2, stopOnFailure: false,
+  runtimeAdapter: 'dry-run', verifyChecks: true, continueOnFailure: true, verifyRetries: 2,
+  maxParallel: 3, stopOnFailure: false,
   maxIdleCycles: 3, pollIntervalMs: 1, idleExitAfterSeconds: 0,
   cliPath, nodePath: process.execPath,
 });
 
+// The t-pass gate is DISCRIMINATING: without --verify-checks reaching the worker, a guarded requiredCheck
+// task self-reports nothing and blocks; only a runner-executed passing check flips it to done.
 const st = (id) => parseMarkdownFile(join(w, `${tv}/tasks/${id}.md`)).status;
 assert.equal(st('t-pass'), 'done', 'parallel worker: a task whose real check PASSES under --verify-checks is verified-done');
 assert.equal(st('t-fail'), 'blocked', 'parallel worker: a task whose real check FAILS is rejected+blocked (verify-grounded, not self-reported)');
+assert.equal(st('t-retry'), 'done', 'parallel worker: --verify-retries composes with the parallel path (fail-then-pass retried to verified-done)');
 assert.notEqual(res.stopReason, 'all_closed', 'the watch must not report all_closed while the failed task is blocked');
 
 rmSync(root, { recursive: true, force: true });
