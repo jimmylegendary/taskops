@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fmBlock, parseMarkdownFile } from '../lib-taskops.js';
+import { fmBlock, parseMarkdownFile, classifyTaskReadiness } from '../lib-taskops.js';
 import { runTaskOps } from '../lib-runner.js';
 
 const now = '2026-06-26T00:00:00.000Z';
@@ -68,4 +68,13 @@ const markerCmd = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails onc
   assert.equal(Number(t.verifyAttempts), 2, 'retries are bounded by the budget (exactly N), no infinite loop');
   rmSync(root, { recursive: true, force: true });
 }
-console.log('OK verify-retries (test-time-scaling: gated on verify-checks, bounded, state cleared)');
+// 5) RETRY STAYS ON THE EXECUTE PATH: a real executor often records a surpriseHistory entry, which flips
+// classifyTaskReadiness onto the uncertainty path and (without an uncertaintyState) defaults to needs_exploration
+// — so the retry would EXPLORE instead of re-execute. The retry reset stamps uncertaintyState='known' to prevent it.
+{
+  const post = { id: 't', objective: 'x', responsibility: 'own', completionCriteria: 'c', status: 'pending', runReadiness: 'runnable', understandingLevel: 'known', surpriseHistory: [{ id: 's1', surpriseScore: 0.1, surpriseLevel: 'low' }] };
+  assert.equal(classifyTaskReadiness(post).runReadiness, 'needs_exploration', 'baseline: a surpriseHistory entry alone flips a runnable task to exploration');
+  assert.equal(classifyTaskReadiness({ ...post, uncertaintyState: 'known' }).runReadiness, 'runnable', 'the retry reset stamps uncertaintyState=known so a retried task RE-EXECUTES, not explores');
+}
+
+console.log('OK verify-retries (gated on verify-checks, bounded, state cleared, retry stays on execute path)');

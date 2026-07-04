@@ -1,0 +1,8 @@
+.venv/
+runs/
+preflight/pred-*.json
+preflight/*.log
+# swebench harness dumps report files named <model>.<run_id>.json in the eval root + logs/
+/*.json
+logs/
+__pycache__/
