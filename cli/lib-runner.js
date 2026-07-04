@@ -1549,6 +1549,7 @@ const ACTION_BY_READINESS = Object.freeze({
   runnable: 'execute',
   needs_decomposition: 'decompose',
   needs_exploration: 'explore',
+  needs_prototype: 'prototype',
 });
 
 function runNodePause(runNode) {
@@ -4389,6 +4390,73 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   };
 }
 
+// Prototype action (Unknown Knowns): produce N cheap alternatives for a recognize-when-seen requirement, then set
+// the task up for a human PICK (reusing the external-resolution machinery). Unlike exploration, this does NOT close
+// the task — it stays open and, once resolverKind is set, becomes runnable and is HELD by the external-resolution
+// pause until the human fills DECISION/BASIS (which surfaces the previously-implicit requirement as a known).
+function performAgentPrototype({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget }) {
+  const dims = Array.isArray(task.unknownKnowns) && task.unknownKnowns.length ? task.unknownKnowns.join(', ') : 'the recognize-when-seen dimensions of this task';
+  const workspace = join(runDir, 'artifacts', runNodeId, 'workspace');
+  mkdirSync(workspace, { recursive: true });
+  const prompt = [
+    `PROTOTYPE (brainstorm) — the task "${task.title}" has UNKNOWN KNOWNS: implicit, recognize-when-seen requirements (${dims}).`,
+    'Produce 2-4 CHEAP, DIVERGENT alternatives (mockups / stubs / option sketches) for a human to react to — do NOT build the real thing yet.',
+    `Write each as option-1..N (e.g. option-1.md / option-1.html) in the current directory (${workspace}), plus a short options.md summarizing the trade-offs.`,
+    'Prototyping cheaply now surfaces the implicit requirement before it gets expensive to change.',
+  ].join('\n');
+  const invocation = invokeRuntimeAdapter(executor, { prompt, agentId: `${agentId}-prototype`, timeoutMs: stepTimeoutMs, cwd: workspace });
+  return { ok: invocation?.ok !== false, artifactPath: existsSync(join(workspace, 'options.md')) ? join(workspace, 'options.md') : null, message: invocation?.message || null };
+}
+
+function executePrototypeTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+  const startedAt = isoNow();
+  const runNodeId = runNodeIdForTask(runDir, task);
+  const runNodePath = ensureRunNode({
+    runDir, runId, runNodeId, type: 'prototype',
+    title: `Prototype: ${task.title}`,
+    sourceTaskId: task.id, sourceTaskGroupVersionId: task.taskGroupVersionId,
+    status: 'active', kindLabel: 'prototype',
+  });
+  attachRunRef(task.path, runId, runNodeId, 'primary_prototype');
+  logEvent(eventsPath, { timestamp: startedAt, type: 'prototype_started', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor });
+  appendRunLog(runDir, `${startedAt} prototype_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
+
+  let result;
+  try {
+    result = executor === 'dry-run'
+      ? { ok: true, artifactPath: null, message: 'dry-run prototype (external human pick set up without generated options)' }
+      : performAgentPrototype({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
+  } catch (err) { result = { ok: false, message: err instanceof Error ? err.message : String(err) }; }
+
+  const finishedAt = isoNow();
+  if (!result.ok) {
+    updateMarkdownFrontmatter(task.path, (fm) => { fm.status = 'blocked'; fm.lastRunFailureReason = sanitizeFmScalar(result.message); return fm; });
+    updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+    logEvent(eventsPath, { timestamp: finishedAt, type: 'prototype_failed', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor, message: result.message || null });
+    appendRunLog(runDir, `${finishedAt} prototype_failed taskId=${task.id} reason=${result.message || ''}`);
+    return { taskId: task.id, runNodeId, kind: 'prototype', status: 'failed', executor, message: result.message || null, budget };
+  }
+
+  // Set up the human PICK (surfaces the unknown-known). Reuses the external-resolution machinery: resolverKind
+  // 'human' + an EXTERNAL_RESOLUTION_TEMPLATE block in the task body. The task stays OPEN.
+  const dims = Array.isArray(task.unknownKnowns) && task.unknownKnowns.length ? ` (dimensions: ${task.unknownKnowns.join(', ')})` : '';
+  const question = `${task.title}: which prototype option best matches the intended${dims} approach, and why? Naming it surfaces the recognize-when-seen requirement so execution reflects the real intent.`;
+  const externalResolutionBody = EXTERNAL_RESOLUTION_TEMPLATE.replace('<agent: the single decision that could not be settled — one decision unit, crisp>', question);
+  updateMarkdownFrontmatter(task.path, (fm) => {
+    fm.resolverKind = 'human';
+    fm.runReadinessReason = sanitizeFmScalar('Prototype options recorded; awaiting a human pick to surface the unknown-known before execution.');
+    delete fm.lastRunFailureReason;
+    return fm;
+  });
+  appendFileSync(task.path, `\n${externalResolutionBody}\n`);
+
+  updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'done'; fm.result = { artifactPath: result.artifactPath || null }; return fm; });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'prototype_recorded', finishedAt });
+  logEvent(eventsPath, { timestamp: finishedAt, type: 'prototype_completed', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor, artifactPath: result.artifactPath || null });
+  appendRunLog(runDir, `${finishedAt} prototype_completed taskId=${task.id} runNodeId=${runNodeId} artifact=${result.artifactPath || ''}`);
+  return { taskId: task.id, runNodeId, kind: 'prototype', status: 'completed', executor, artifactPath: result.artifactPath || null, budget };
+}
+
 const ACTION_BY_STOP_REASON = Object.freeze({
   [STOP_REASONS.ALL_CLOSED]: 'done',
   [STOP_REASONS.NO_RUNNABLE]: 'no_runnable',
@@ -4427,7 +4495,7 @@ function shapeNextAction(next, workDir, parsed = null) {
       command: commandForAction('done', workDir),
     };
   }
-  if (next.kind === 'execute' || next.kind === 'decompose' || next.kind === 'explore') {
+  if (next.kind === 'execute' || next.kind === 'decompose' || next.kind === 'explore' || next.kind === 'prototype') {
     const task = next.task;
     const action = next.kind;
     return {
@@ -5099,6 +5167,12 @@ export function runTaskOps(workDir, options = {}) {
         });
       } else if (next.kind === 'explore') {
         stepResult = executeExplorationTask({
+          projectDir, project: parsed.project, task: next.task,
+          runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
+          budget: stepBudget,
+        });
+      } else if (next.kind === 'prototype') {
+        stepResult = executePrototypeTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
           budget: stepBudget,
