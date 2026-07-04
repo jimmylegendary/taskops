@@ -1253,15 +1253,14 @@ export function verifyArtifactProvenance({ requiredArtifacts, cwd, projectDir, p
 // Comprehension Quiz: read the probes an INDEPENDENT quiz-generator wrote (comprehension-quiz.json:
 // {probes:[{command,rationale}]}) and RUNNER-EXECUTE them (reusing executeRequiredChecks) against the change.
 // Returns runner-authored quiz results; [] if no valid runnable probes (→ the review treats that as inconclusive).
-export function runComprehensionQuizProbes({ quizJsonPath, cwd, timeoutMs = 120_000, maxProbes = 6 }) {
+export function runComprehensionQuizProbes({ quizJsonPath, cwd, timeoutMs = 120_000, maxProbes = 6, baselineArtifacts = [] }) {
   let probes = [];
   try {
     const raw = JSON.parse(readFileSync(quizJsonPath, 'utf8'));
     probes = Array.isArray(raw?.probes) ? raw.probes : (Array.isArray(raw) ? raw : []);
   } catch { return []; }
   // Drop trivially-constant probes (exit 0 / true / : / echo …) — a probe that passes without exercising the
-  // change carries no understanding evidence. (Deeper hardening — a differential baseline where the probe must
-  // FAIL on the unchanged state — is a documented follow-up.)
+  // change carries no understanding evidence.
   const isTrivial = (c) => /^(exit\s+0|true|:)$/.test(c) || /^echo(\s|$)/.test(c);
   const runnable = probes.filter((p) => {
     const c = String(commandText(p) || '').trim();
@@ -1269,7 +1268,29 @@ export function runComprehensionQuizProbes({ quizJsonPath, cwd, timeoutMs = 120_
   }).slice(0, Math.max(1, maxProbes));
   if (runnable.length === 0) return [];
   const results = executeRequiredChecks({ cwd, requiredChecks: runnable, timeoutMs, isolate: true });
-  return results.map((r, i) => ({ ...r, rationale: runnable[i]?.rationale || null, quizGeneratedBy: 'independent-reviewer' }));
+
+  // Differential baseline: run the SAME probes against the change with its PRODUCED artifacts removed. A probe
+  // that still passes without the change does not exercise it — differential:false, so it is not understanding
+  // evidence. differential:null when there is no artifact baseline to build (backward-compatible).
+  const isPass = (r) => ['passed', 'pass', 'ok', 'success', 'succeeded'].includes(String(r && r.status));
+  let baselineResults = null;
+  const refs = (baselineArtifacts || []).map((a) => (a && typeof a === 'object' ? (a.path || a.ref) : a)).filter((x) => x && String(x).trim());
+  if (refs.length) {
+    let baseDir;
+    try {
+      baseDir = mkdtempSync(join(tmpdir(), 'taskops-quizbase-'));
+      cpSync(cwd, baseDir, { recursive: true });
+      for (const ref of refs) { try { rmSync(join(baseDir, String(ref)), { recursive: true, force: true }); } catch {} }
+      baselineResults = executeRequiredChecks({ cwd: baseDir, requiredChecks: runnable, timeoutMs, isolate: true });
+    } catch { baselineResults = null; }
+    finally { if (baseDir) { try { rmSync(baseDir, { recursive: true, force: true }); } catch {} } }
+  }
+  return results.map((r, i) => ({
+    ...r,
+    rationale: runnable[i]?.rationale || null,
+    quizGeneratedBy: 'independent-reviewer',
+    differential: baselineResults ? (isPass(r) && !isPass(baselineResults[i])) : null,
+  }));
 }
 
 // Isolate the quiz from executor-planted state: copy the change into a fresh dir and STRIP agent-instruction
@@ -1403,6 +1424,7 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     if (quiz.length === 0) {
       missingExpected.push('comprehension quiz produced no probes; cannot certify understanding (inconclusive)');
     } else {
+      let discriminatingPass = 0;
       for (const q of quiz) {
         const qcmd = commandText(q) || 'quiz-probe';
         if (verifyMode && q.verifiedBy !== 'runner') {
@@ -1412,7 +1434,16 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
         const status = checkStatus(q);
         if (!['passed', 'pass', 'ok', 'success', 'succeeded'].includes(status)) {
           failedChecks.push(`comprehension quiz probe failed: ${qcmd}: ${status || 'no pass status reported'}`);
+          continue;
         }
+        // A passing probe is understanding evidence only if it DISCRIMINATES the change: differential:false means
+        // it passed even with the change removed (a baseline), so it tests nothing the change introduced.
+        if (q.differential !== false) discriminatingPass += 1;
+      }
+      // With a baseline available, at least one passing probe must actually depend on the change; otherwise the
+      // quiz demonstrated no understanding of what changed (inconclusive, never a free pass).
+      if (failedChecks.length === 0 && discriminatingPass === 0) {
+        missingExpected.push('comprehension quiz has no discriminating probe (every passing probe also passes without the change); understanding not demonstrated (inconclusive)');
       }
     }
   }
@@ -3052,7 +3083,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         // gates claim-safety on them passing (empty quiz = inconclusive).
         const quizCwd = prepareIsolatedQuizWorkspace(artifactWorkspacePath);
         invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeoutMs, cwd: quizCwd, acceptance });
-        executionResult.observed.quizResults = runComprehensionQuizProbes({ quizJsonPath: join(quizCwd, 'comprehension-quiz.json'), cwd: quizCwd, timeoutMs: stepTimeoutMs });
+        executionResult.observed.quizResults = runComprehensionQuizProbes({ quizJsonPath: join(quizCwd, 'comprehension-quiz.json'), cwd: quizCwd, timeoutMs: stepTimeoutMs, baselineArtifacts: acceptance.requiredArtifacts || [] });
       }
     }
     const partialRequest = parsePartialRequestFromExecutorResult(result);
