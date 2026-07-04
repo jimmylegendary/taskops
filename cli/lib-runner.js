@@ -1137,8 +1137,11 @@ export function persistExecutorDisclosure({ projectDir, runId, runNodeId, messag
 // npm_config_* (e.g. ignore-scripts=false / registry), LD_PRELOAD/DYLD_*, PYTHONPATH, and any TASKOPS_* leak.
 function sanitizedCheckEnv(home) {
   const src = process.env;
+  // Keep the runner's own node/npm dir reachable (it may live outside the standard prefixes — nvm/volta/brew),
+  // so a clean PATH doesn't spuriously fail every `node` check, but nothing else from the inherited PATH leaks.
+  const nodeDir = dirname(process.execPath);
   return {
-    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    PATH: `${nodeDir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
     HOME: home,
     LANG: src.LANG || 'C.UTF-8',
     LC_ALL: src.LC_ALL || 'C.UTF-8',
