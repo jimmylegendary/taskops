@@ -37,10 +37,20 @@ function readNode(projectDir, runId, runNodeId, prefix = '') {
 }
 
 const ACTION_EVENT_KINDS = new Set(['implementation', 'exploration', 'decomposition', 'prototype', 'loopback']);
+// Only these acceptance modes gate a completion on a real policy; an informational 'done' is self-declared and is
+// never a verified completion, however its checks happen to run.
+const POLICY_APPROVING_MODES = new Set(['enforced', 'guarded', 'runner-managed']);
 
-// Classify a task's terminal state into an HONEST outcome — verify-grounded vs self-reported vs an honest stall.
-function classifyOutcome(task, verifyGrounded) {
-  if (task.status === 'done') return verifyGrounded ? 'verified_done' : 'reported_done';
+// Classify a task's terminal state into an HONEST outcome. verified_done ONLY when the closure is runner-grounded
+// (review approved under verify mode WITH actual runner-passing evidence). A structural close (decomposition /
+// exploration) is its OWN bucket, never a completion claim; a self-declared done is reported_done.
+function classifyOutcome(task, verifyGrounded, actions) {
+  if (task.status === 'done') {
+    if (verifyGrounded) return 'verified_done';
+    if (actions.includes('decomposition') && !actions.includes('implementation')) return 'decomposed';
+    if (actions.includes('exploration') && !actions.includes('implementation')) return 'explored';
+    return 'reported_done';
+  }
   if (task.status === 'blocked') return 'honest_stall';
   if (task.status === 'cancelled') return 'cancelled';
   if (task.resolverKind === 'human' || task.resolverKind === 'ai') return 'awaiting_resolution';
@@ -56,29 +66,45 @@ export function extractTrainingData(projectDir) {
   const trajectories = [];
   for (const task of parsed.tasks.values()) {
     const events = eventsByTask.get(task.id) || [];
-    const retries = events.filter((e) => e.type === 'verify_retry').length;
     const actions = [...new Set(events.filter((e) => ACTION_EVENT_KINDS.has(e.type)).map((e) => e.type))];
     const partialRequested = events.some((e) => e.type === 'task_partial_requested');
 
-    const ref = (task.runRefs || []).find((r) => /execution/.test(String(r.role || ''))) || (task.runRefs || [])[0] || {};
+    // Read the LAST execution run node (a retry appends a new ref; the final one carries the real outcome — the
+    // runner itself reviews the latest, not the first). Fall back to the last ref of any role.
+    const refs = task.runRefs || [];
+    const execRefs = refs.filter((r) => /execution/.test(String(r.role || '')));
+    const ref = (execRefs.length ? execRefs : refs).slice(-1)[0] || {};
     const node = readNode(projectDir, ref.runId, ref.runNodeId);
     const review = readNode(projectDir, ref.runId, ref.runNodeId, 'review-');
     const reviewReport = review?.reviewReport || node?.reviewReport || null;
     const observed = node?.result?.observed || {};
     const checkResults = (observed.checkResults || []).map((c) => ({ command: c.command, status: c.status, verifiedBy: c.verifiedBy || null }));
     const quizResults = (observed.quizResults || []).map((q) => ({ command: q.command, status: q.status, verifiedBy: q.verifiedBy || null }));
+    const verifiedArtifacts = observed.verifiedArtifacts || [];
 
-    const verifyGrounded = reviewReport?.verified === true;
-    const comprehensionVerified = reviewReport?.comprehensionVerified === true;
-    const outcome = classifyOutcome(task, verifyGrounded);
+    // Retries CAUSAL to this closure: only verify_retry events in the SAME run that produced the closing node
+    // (retries logged in an earlier, separate run did not cause this pass).
+    const retries = events.filter((e) => e.type === 'verify_retry' && (!ref.runId || e.runId === ref.runId)).length;
+
+    // verifyGrounded = the closure rests on RUNNER-VERIFIED evidence: the review APPROVED it, under verify mode,
+    // AND there is an actual runner-passing check or runner-verified produced artifact. `verified` alone is only
+    // an audit flag ("was --verify-checks on"), NOT "the check passed" — never trust it by itself.
+    const runnerPassEvidence = checkResults.some((c) => c.verifiedBy === 'runner' && ['passed', 'pass', 'ok', 'success', 'succeeded'].includes(String(c.status)))
+      || verifiedArtifacts.some((a) => a && a.verifiedBy === 'runner' && a.producedThisRun === true);
+    const verifyGrounded = POLICY_APPROVING_MODES.has(String((task.acceptance && task.acceptance.mode) || 'informational'))
+      && reviewReport?.decision === 'approved'
+      && reviewReport?.verified === true
+      && runnerPassEvidence;
+    const comprehensionVerified = reviewReport?.comprehensionVerified === true && reviewReport?.decision === 'approved';
+    const outcome = classifyOutcome(task, verifyGrounded, actions);
     const attempts = 1 + retries;
 
     const labels = {
-      // A completion is honest ONLY when it is runner-verified (verified_done); a self-reported done is a
-      // separate, weaker label — never conflated with an honest completion.
+      // A completion is honest ONLY when it is runner-verified (verified_done); a self-reported done, a structural
+      // close, and an honest stall are all separate — never conflated with an honest completion.
       honest_completion: outcome === 'verified_done',
-      // The money label: more test-time (a retry with the check failure fed back) converted a first-attempt
-      // stall into an HONEST verified completion.
+      // The money label: a retry (with the check failure fed back) IN THE CLOSING RUN converted a first-attempt
+      // stall into an HONEST verified completion — more test-time causally produced this verified pass.
       test_time_scaling_gain: retries > 0 && outcome === 'verified_done',
       understanding_verified: comprehensionVerified,
       honest_stall: ['honest_stall', 'awaiting_resolution'].includes(outcome),
