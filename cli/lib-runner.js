@@ -1593,6 +1593,30 @@ function taskPause(task) {
 // C1: gate task selection on external (human/ai) resolution status. A task whose resolverKind is
 // human/ai must NOT be auto-executed until its DECISION/BASIS block is RESOLVED — otherwise the
 // external decision is never actually waited on. Returns a delegation_pending pause otherwise.
+function externalResolutionSectionText(body, heading) {
+  const lines = String(body || '').split(/\r?\n/);
+  const start = lines.findIndex((l) => l.trim() === heading);
+  if (start === -1) return '';
+  const out = [];
+  for (let i = start + 1; i < lines.length; i++) { if (/^##\s/.test(lines[i])) break; out.push(lines[i]); }
+  return out.join(' ').trim();
+}
+
+// Feed a RESOLVED external (human/ai) decision into the execution prompt, so the executor actually HONORS the
+// pick — the recognize-when-seen requirement an Unknown-Knowns prototype surfaced. Without this the decision is
+// recorded but ignored, and execution would not reflect the surfaced intent.
+function externalResolutionDecisionPromptLines(task) {
+  const rk = task?.resolverKind;
+  if (rk !== 'human' && rk !== 'ai') return [];
+  let body = '';
+  try { body = task.path ? readBody(task.path) : ''; } catch { return []; }
+  if (deriveExternalResolutionStatus({ resolverKind: rk, body }) !== 'resolved') return [];
+  const decision = externalResolutionSectionText(body, '## DECISION');
+  if (!decision) return [];
+  const basis = externalResolutionSectionText(body, '## BASIS');
+  return [`Resolved external ${rk} decision to HONOR (the recognize-when-seen requirement): ${decision}${basis ? ` — basis: ${basis}` : ''}`];
+}
+
 function externalResolutionPause(task) {
   const resolverKind = task?.resolverKind;
   if (resolverKind !== 'human' && resolverKind !== 'ai') return null;
@@ -2181,6 +2205,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
     ...(task.lastCheckFailure ? [`RETRY — the previous attempt failed the required check. ${task.lastCheckFailure}`] : []),
+    ...externalResolutionDecisionPromptLines(task),
     ...taskUncertaintyPromptLines(task),
     ...inheritedContextPromptLines(inheritedContext),
     '',
@@ -2211,6 +2236,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
     ...(task.lastCheckFailure ? [`RETRY — the previous attempt failed the required check. ${task.lastCheckFailure}`] : []),
+    ...externalResolutionDecisionPromptLines(task),
     ...taskUncertaintyPromptLines(task),
     ...inheritedContextPromptLines(inheritedContext),
     '',

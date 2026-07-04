@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fmBlock, parseMarkdownFile, parseProject, classifyTaskReadiness } from '../lib-taskops.js';
-import { runTaskOps, pickNextAction } from '../lib-runner.js';
+import { runTaskOps, pickNextAction, buildAgentExecutionPrompt } from '../lib-runner.js';
 
 const now = '2026-07-04T00:00:00.000Z';
 const root = mkdtempSync(join(tmpdir(), 'taskops-uk-'));
@@ -57,8 +57,20 @@ writeFileSync(taskAbs, resolved, 'utf8');
 
 // now runnable, and the external-resolution pause is cleared -> executes to done.
 assert.equal(classifyTaskReadiness(parseMarkdownFile(taskAbs)).runReadiness, 'runnable', 'once the pick is set up + filled the task is runnable');
+
+// the human PICK must actually reach the executor — recorded-but-ignored would defeat the feature.
+const withPath = { ...parseMarkdownFile(taskAbs), path: taskAbs };
+const prompt = buildAgentExecutionPrompt({ project: { id: 'uk', title: 'UK', objective: 'x' }, task: withPath });
+const promptText = Array.isArray(prompt) ? prompt.join('\n') : String(prompt);
+assert.ok(promptText.includes('Option 2: compact KPI grid'), 'the resolved human pick (surfaced requirement) is fed into the execution prompt, not ignored');
 runTaskOps(w, { executor: 'dry-run', maxSteps: 2 });
 assert.equal(parseMarkdownFile(taskAbs).status, 'done', 'after the human pick surfaces the requirement, the task executes to done');
 
+// NOTE (documented limitation): a WELL-FORMED unknown_known task carries a full run-contract, so after the pick
+// is set up it is 'runnable' and held by the execute-path external-resolution pause (the main path above). An
+// unknown_known task with an INCOMPLETE contract classifies needs_decomposition instead; decomposition is a
+// legitimate way to add structure and is NOT held (the same external-resolution mechanism is used by synthetic
+// input-required placeholders that are MEANT to be decomposed), so that narrow edge is left to decompose.
+
 rmSync(root, { recursive: true, force: true });
-console.log('OK unknown-knowns (prototype -> human pick -> surfaced requirement -> execute)');
+console.log('OK unknown-knowns (prototype -> hold -> pick fed to executor -> execute)');
