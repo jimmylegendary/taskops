@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fmBlock, parseMarkdownFile } from '../lib-taskops.js';
-import { explainWork } from '../lib-runner.js';
+import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
+import { explainWork, pickNextAction } from '../lib-runner.js';
 
 const now = '2026-06-26T00:00:00.000Z';
 const root = mkdtempSync(join(tmpdir(), 'taskops-a6-'));
@@ -29,6 +29,8 @@ const clean = explainWork(w);
 assert.equal(clean.complete, true, 'baseline: a clean structurally-complete graph is complete');
 assert.equal(clean.next.action, 'done', 'baseline: next action is done');
 assert.deepEqual(clean.validationErrors, [], 'baseline: no validation errors');
+// baseline at the pickNextAction layer: a clean closed graph stops ALL_CLOSED.
+assert.equal(pickNextAction(parseProject(w)).reason, 'all_closed', 'baseline: pickNextAction stops all_closed on a clean closed graph');
 
 // inject a validation error that does not lower the EoW counts (taskGroupId mismatch); still structurally
 // complete, but canonically INVALID.
@@ -38,6 +40,10 @@ const invalid = explainWork(w);
 assert.ok(invalid.validationErrors.length > 0, 'A6: the corrupted graph has validation errors');
 assert.equal(invalid.complete, false, 'A6: a canonically-invalid graph must NOT be reported complete');
 assert.notEqual(invalid.next.action, 'done', 'A6: next action must not be done for an invalid graph');
+// A6 at the pickNextAction layer: the invalid-but-closed graph must stop NO_RUNNABLE, NEVER all_closed.
+const invalidPick = pickNextAction(parseProject(w));
+assert.equal(invalidPick.kind, 'stop', 'A6: pickNextAction stops on an invalid closed graph');
+assert.equal(invalidPick.reason, 'no_runnable', 'A6: pickNextAction returns NO_RUNNABLE (not all_closed) for an invalid closed graph');
 
 rmSync(root, { recursive: true, force: true });
 console.log('OK invalid-graph not complete (A6)');
