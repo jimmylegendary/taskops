@@ -2089,6 +2089,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     `Task objective: ${task.objective || ''}`,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
+    ...(task.lastCheckFailure ? [`RETRY — the previous attempt failed the required check. ${task.lastCheckFailure}`] : []),
     ...taskUncertaintyPromptLines(task),
     ...inheritedContextPromptLines(inheritedContext),
     '',
@@ -2118,6 +2119,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     `Task objective: ${task.objective || ''}`,
     `Task responsibility: ${task.responsibility || ''}`,
     `Task completion criteria: ${task.completionCriteria || ''}`,
+    ...(task.lastCheckFailure ? [`RETRY — the previous attempt failed the required check. ${task.lastCheckFailure}`] : []),
     ...taskUncertaintyPromptLines(task),
     ...inheritedContextPromptLines(inheritedContext),
     '',
@@ -2723,6 +2725,7 @@ function closeExecuteSuccess({
   budget,
   artifactWorkspacePath,
   verifyMode = false,
+  verifyRetries = 0,
 }) {
   const surpriseHistoryEntry = surpriseReport.surpriseReported
     ? appendSurpriseHistory({
@@ -2751,6 +2754,22 @@ function closeExecuteSuccess({
   const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode, verifyMode });
   const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
   if (review.reviewReport.decision !== 'approved' && isGuarded) {
+    const attempts = Number(task.verifyAttempts || 0);
+    if (verifyRetries > 0 && attempts < verifyRetries) {
+      // test-time-scaling: retry with the check failure fed back instead of a permanent block — more
+      // test-time may convert a stall into an honest verified completion. Bounded by verifyRetries.
+      const feedback = review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected).join('; ');
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        fm.status = 'pending';
+        fm.runReadiness = 'runnable';
+        fm.verifyAttempts = attempts + 1;
+        fm.lastCheckFailure = sanitizeFmScalar(`Previous attempt failed verification: ${feedback}. Fix your implementation so the required check passes.`, { maxLen: 1000 });
+        return fm;
+      });
+      logEvent(eventsPath, { timestamp: finishedAt, type: 'verify_retry', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, attempt: attempts + 1, maxRetries: verifyRetries });
+      appendRunLog(runDir, `${finishedAt} verify_retry taskId=${task.id} attempt=${attempts + 1}/${verifyRetries}`);
+      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
+    }
     return closeExecuteFailure({
       task,
       runDir,
@@ -2797,7 +2816,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0 }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
@@ -3011,6 +3030,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       budget,
       artifactWorkspacePath,
       verifyMode: verifyRequiredChecks,
+      verifyRetries,
     });
   }
 
@@ -4741,6 +4761,7 @@ export function runTaskOps(workDir, options = {}) {
   const agentId = options.agent || DEFAULT_AGENT_ID;
   const verifyRequiredChecks = options.verifyChecks === true;
   const continueOnFailure = options.continueOnFailure === true;
+  const verifyRetries = Math.max(0, Math.floor(Number(options.verifyRetries) || 0));
 
   let maxSteps = null;
   if (options.maxSteps != null) {
@@ -4963,6 +4984,7 @@ export function runTaskOps(workDir, options = {}) {
           delegationMode,
           selfResolutionGuide,
           verifyRequiredChecks,
+          verifyRetries,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
