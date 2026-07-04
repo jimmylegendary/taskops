@@ -2946,6 +2946,11 @@ function closeExecuteSuccess({
       updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'pending';
         fm.runReadiness = 'runnable';
+        // Keep the retry on the EXECUTE path. A real executor often records a surpriseHistory entry, which flips
+        // classifyTaskReadiness onto the uncertainty path; without a uncertaintyState that defaults to
+        // needs_exploration, so the retry would EXPLORE instead of re-execute. The retry premise is "re-run with
+        // the specific check failure fed back" — the completion criterion is known — so stamp uncertaintyState.
+        fm.uncertaintyState = 'known';
         fm.verifyAttempts = attempts + 1;
         fm.lastCheckFailure = sanitizeFmScalar(`Previous attempt failed verification: ${feedback}. Fix your implementation so the required check passes.`, { maxLen: 1000 });
         return fm;
