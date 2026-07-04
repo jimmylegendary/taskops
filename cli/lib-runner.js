@@ -1135,68 +1135,66 @@ export function persistExecutorDisclosure({ projectDir, runId, runNodeId, messag
 // nothing else. Dropping the inherited env neutralizes the potent subversion vectors an agent (or a poisoned
 // runner env) could use to make a check pass without real work — NODE_OPTIONS (--require ./evil), NODE_PATH,
 // npm_config_* (e.g. ignore-scripts=false / registry), LD_PRELOAD/DYLD_*, PYTHONPATH, and any TASKOPS_* leak.
-function sanitizedCheckEnv(home) {
-  const src = process.env;
-  // Keep the runner's own node/npm dir reachable (it may live outside the standard prefixes — nvm/volta/brew),
-  // so a clean PATH doesn't spuriously fail every `node` check, but nothing else from the inherited PATH leaks.
-  const nodeDir = dirname(process.execPath);
-  return {
-    PATH: `${nodeDir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
-    HOME: home,
-    LANG: src.LANG || 'C.UTF-8',
-    LC_ALL: src.LC_ALL || 'C.UTF-8',
-    TZ: src.TZ || 'UTC',
-    SHELL: '/bin/sh',
-  };
+// DENYLIST the ENV-injection vectors an agent could use to make a check pass without real work — preload/module
+// hijack + runner-control leaks — while KEEPING the rest of the environment (PATH, HOME, proxies, tokens, tool
+// dirs) intact, so a legitimate check is never spuriously failed. A whitelist was tried first but false-failed
+// genuine checks that invoke brew/cargo/pyenv tools (off a hardcoded PATH) or need an inherited var (proxy/token).
+const DANGEROUS_ENV_EXACT = new Set([
+  'NODE_OPTIONS', 'NODE_PATH', 'NODE_REPL_EXTERNAL_MODULE',
+  'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME',
+  'PERL5LIB', 'PERL5OPT', 'RUBYOPT', 'RUBYLIB',
+  'BASH_ENV', 'ENV', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND',
+  'GIT_SSH_COMMAND', 'GIT_EXTERNAL_DIFF',
+]);
+const DANGEROUS_ENV_PREFIX = ['npm_config_', 'LD_', 'DYLD_', 'TASKOPS_'];
+function sanitizedCheckEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (DANGEROUS_ENV_EXACT.has(k)) continue;
+    if (DANGEROUS_ENV_PREFIX.some((p) => k.startsWith(p))) continue;
+    env[k] = v;
+  }
+  return env;
 }
 
 // runs by default. Returns runner-authored checkResults (status from the real exit code). When isolate=true the
-// check runs with a SANITIZED env (agent cannot make a check pass via env/preload/path subversion); it still runs
-// in the real cwd so a check that legitimately WRITES an artifact is provenance-verifiable. This closes the
-// env/NODE_OPTIONS/NODE_PATH/npm_config_*/LD_PRELOAD/PATH-shim/TASKOPS_* class; it does NOT sandbox a process that
-// the agent authored the target of (self-contained author checks + the comprehension-quiz/differential-probe axis
-// cover that) — full process sandboxing (containers) is documented future work. Results are stamped isolated:true.
+// check runs with a DENYLIST-sanitized env (dangerous ENV-injection vars dropped; PATH/HOME/proxies/tokens kept so
+// legitimate checks are never spuriously failed); it still runs in the real cwd so a check that legitimately WRITES
+// an artifact is provenance-verifiable. This closes the ENV-injection class (NODE_OPTIONS / NODE_PATH / the ENV
+// FORM of npm_config_* / LD_*/DYLD_* preload / TASKOPS_* leak); it does NOT strip agent-planted CWD config (a
+// ./.npmrc still applies) nor sandbox a check whose target the agent authored (the comprehension-quiz /
+// differential-probe axis covers that) — full process sandboxing (containers) is documented future work.
 export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000, isolate = false }) {
   const runCwd = cwd && existsSync(cwd) ? cwd : process.cwd();
   const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : 120_000;
-  let env = null;
-  const cleanup = [];
-  if (isolate) {
-    const home = mkdtempSync(join(tmpdir(), 'taskops-checkhome-'));
-    cleanup.push(home);
-    env = sanitizedCheckEnv(home);
-  }
+  const env = isolate ? sanitizedCheckEnv() : null;
   const results = [];
-  try {
-    for (const check of requiredChecks || []) {
-      const command = commandText(check);
-      if (!command) continue;
-      let status = 'failed';
-      let exitCode = null;
-      let detail = '';
-      let outputHash = null;
-      try {
-        const out = spawnSync(command, {
-          cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
-          ...(env ? { env } : {}),
-        });
-        if (out.error) {
-          detail = out.error.code === 'ETIMEDOUT' ? `timed out after ${limit}ms` : String(out.error.message || out.error);
-        } else {
-          exitCode = out.status;
-          status = out.status === 0 ? 'passed' : 'failed';
-          const raw = `${out.stdout || ''}${out.stderr || ''}`;
-          outputHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
-          detail = sanitizeFmScalar(raw.trim(), { maxLen: 500, fallback: '' });
-        }
-      } catch (error) {
-        detail = error instanceof Error ? error.message : String(error);
+  for (const check of requiredChecks || []) {
+    const command = commandText(check);
+    if (!command) continue;
+    let status = 'failed';
+    let exitCode = null;
+    let detail = '';
+    let outputHash = null;
+    try {
+      const out = spawnSync(command, {
+        cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
+        ...(env ? { env } : {}),
+      });
+      if (out.error) {
+        detail = out.error.code === 'ETIMEDOUT' ? `timed out after ${limit}ms` : String(out.error.message || out.error);
+      } else {
+        exitCode = out.status;
+        status = out.status === 0 ? 'passed' : 'failed';
+        const raw = `${out.stdout || ''}${out.stderr || ''}`;
+        outputHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+        detail = sanitizeFmScalar(raw.trim(), { maxLen: 500, fallback: '' });
       }
-      // outputHash makes the result tamper-evident/auditable; verifiedBy marks it as runner-produced.
-      results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner', ...(isolate ? { isolated: true } : {}) });
+    } catch (error) {
+      detail = error instanceof Error ? error.message : String(error);
     }
-  } finally {
-    for (const d of cleanup) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
+    // outputHash makes the result tamper-evident/auditable; verifiedBy marks it as runner-produced.
+    results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner', ...(isolate ? { isolated: true } : {}) });
   }
   return results;
 }
