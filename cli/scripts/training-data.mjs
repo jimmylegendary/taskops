@@ -26,7 +26,7 @@ function build(root, tasks) {
     taskOpsVersion: 'v1', entityType: 'task', id: t.id, taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1',
     title: t.id, objective: t.id, responsibility: 'own', completionCriteria: 'c', order: i + 1, createdAt: now,
     status: 'pending', runReadiness: 'runnable', understandingLevel: 'known',
-    acceptance: { mode: 'guarded', expectedOutcome: 'c', requiredChecks: [{ command: t.cmd }] },
+    acceptance: { mode: t.mode || 'guarded', expectedOutcome: 'c', requiredChecks: [{ command: t.cmd }] },
   }));
   return w;
 }
@@ -38,12 +38,26 @@ const marker = join(root, 'm');
 const w = build(root, [
   { id: 't-retry', cmd: `test -f ${marker} || { touch ${marker}; exit 1; }` },
   { id: 't-fail', cmd: 'exit 1' },
+  { id: 't-info-fail', cmd: 'exit 1', mode: 'informational' },  // check FAILS but informational -> stays done
+  { id: 't-info-pass', cmd: 'exit 0', mode: 'informational' },  // check passes but informational = no policy
 ]);
-runTaskOps(w, { executor: 'dry-run', maxSteps: 12, verifyChecks: true, verifyRetries: 2, continueOnFailure: true });
+runTaskOps(w, { executor: 'dry-run', maxSteps: 20, verifyChecks: true, verifyRetries: 2, continueOnFailure: true });
 
 const trajs = extractTrainingData(w);
 const retry = traj(trajs, 't-retry');
 const fail = traj(trajs, 't-fail');
+
+// LABEL-TRUST (self-review CRITICAL): an informational task whose runner-verified check FAILED still reaches
+// status 'done' (informational is not reverted) and its review carries verified:true (the mode flag). It must NOT
+// be labeled an honest completion — verifyGrounded requires an APPROVED review with a runner PASS, not the flag.
+const infoFail = traj(trajs, 't-info-fail');
+assert.equal(infoFail.reviewDecision, 'rejected', 'the runner-verified check really failed (review rejected)');
+assert.notEqual(infoFail.outcome, 'verified_done', 'a runner-verified FAILED check is not a verified completion');
+assert.equal(infoFail.labels.honest_completion, false, 'honest_completion is NOT minted from a runner-verified failure');
+// an informational done is self-declared (no policy), so even a passing check is reported_done, not verified_done.
+const infoPass = traj(trajs, 't-info-pass');
+assert.notEqual(infoPass.outcome, 'verified_done', 'an informational (no-policy) done is never a verified completion');
+assert.equal(infoPass.labels.honest_completion, false, 'informational done is not an honest completion');
 
 // t-retry: a stall the model fixed with more test-time -> verified_done + the money label.
 assert.equal(retry.outcome, 'verified_done', 't-retry ends a runner-verified completion');
@@ -71,7 +85,7 @@ const bin = new URL('../bin/taskops.js', import.meta.url).pathname;
 const jsonl = spawnSync(process.execPath, [bin, 'trainingdata', w], { encoding: 'utf8' });
 assert.equal(jsonl.status, 0, 'trainingdata CLI exits 0');
 const lines = jsonl.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
-assert.equal(lines.length, 2, 'one JSONL record per task');
+assert.equal(lines.length, 4, 'one JSONL record per task');
 assert.ok(lines.find((r) => r.taskId === 't-retry').labels.test_time_scaling_gain, 'CLI JSONL carries the labels');
 const sumOut = spawnSync(process.execPath, [bin, 'trainingdata', w, '--summary'], { encoding: 'utf8' });
 assert.equal(JSON.parse(sumOut.stdout).test_time_scaling_gains, 1, 'CLI --summary aggregates');
