@@ -19,6 +19,7 @@ import {
   writeVersionFromSpec,
 } from '../lib-taskops.js';
 import { auditParsedWork, renderAuditText } from '../lib-audit.js';
+import { extractTrainingData, summarizeTrainingData } from '../lib-trainingdata.js';
 import { closeTarget, computeNextAction, explainWork, recheckBlockedTasks, reviewTarget, runTaskOps } from '../lib-runner.js';
 
 function usage() {
@@ -29,6 +30,7 @@ Usage:
   taskops vault-init <vault-dir> [--repo-url <url>] [--branch <branch>] [--auto-sync true|false] [--language <code>] [--debounce-ms <ms>] [--commit-message <msg>]
   taskops validate <path>
   taskops audit <work-dir> [--strict] [--max-tasks-flat <n>] [--json]
+  taskops trainingdata <work-dir> [--summary]
   taskops summary <path> [--write]
   taskops show <path> [--json]
   taskops classify-runnable <work-dir> <task-id> [--json]
@@ -189,6 +191,19 @@ try {
     else process.stdout.write(renderAuditText(audit));
     const strict = flags.strict === true;
     process.exit(strict && !audit.claimSafe ? 1 : 0);
+  }
+
+  if (cmd === 'trainingdata') {
+    const pathArg = positional[1];
+    if (!pathArg) fail('Missing trainingdata work-dir');
+    const trajectories = extractTrainingData(resolve(pathArg));
+    if (flags.summary) {
+      console.log(JSON.stringify(summarizeTrainingData(trajectories), null, 2));
+    } else {
+      // JSONL: one labeled trajectory per line — a drop-in dataset shard.
+      for (const t of trajectories) console.log(JSON.stringify(t));
+    }
+    process.exit(0);
   }
 
   if (cmd === 'summary') {
