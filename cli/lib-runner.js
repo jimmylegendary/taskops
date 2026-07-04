@@ -918,6 +918,7 @@ function normalizeAcceptance(task) {
     requiredArtifacts: asArray(raw.requiredArtifacts),
     requiredChecks: asArray(raw.requiredChecks),
     semanticAssertions: semanticAssertionsFrom(raw),
+    comprehensionQuiz: raw.comprehensionQuiz === true,
   };
 }
 
@@ -954,6 +955,7 @@ function normalizeResult(runNode) {
       coverage: asArray(observed.coverage),
       checkResults: asArray(observed.checkResults),
       verifiedArtifacts: asArray(observed.verifiedArtifacts),
+      quizResults: asArray(observed.quizResults),
     },
   };
 }
@@ -1213,6 +1215,43 @@ export function verifyArtifactProvenance({ requiredArtifacts, cwd, projectDir, p
   return results;
 }
 
+// Comprehension Quiz: read the probes an INDEPENDENT quiz-generator wrote (comprehension-quiz.json:
+// {probes:[{command,rationale}]}) and RUNNER-EXECUTE them (reusing executeRequiredChecks) against the change.
+// Returns runner-authored quiz results; [] if no valid runnable probes (→ the review treats that as inconclusive).
+export function runComprehensionQuizProbes({ quizJsonPath, cwd, timeoutMs = 120_000, maxProbes = 6 }) {
+  let probes = [];
+  try {
+    const raw = JSON.parse(readFileSync(quizJsonPath, 'utf8'));
+    probes = Array.isArray(raw?.probes) ? raw.probes : (Array.isArray(raw) ? raw : []);
+  } catch { return []; }
+  const runnable = probes.filter((p) => String(commandText(p) || '').trim().length > 0).slice(0, Math.max(1, maxProbes));
+  if (runnable.length === 0) return [];
+  const results = executeRequiredChecks({ cwd, requiredChecks: runnable, timeoutMs });
+  return results.map((r, i) => ({ ...r, rationale: runnable[i]?.rationale || null, quizGeneratedBy: 'independent-reviewer' }));
+}
+
+function buildComprehensionQuizPrompt({ task, acceptance, cwd }) {
+  const checks = (acceptance.requiredChecks || []).map((c) => commandText(c)).filter(Boolean).join('; ');
+  return [
+    'COMPREHENSION QUIZ — you are an INDEPENDENT reviewer, NOT the implementer. Do not modify the change.',
+    `The change is in the current directory (${cwd}).`,
+    `The task was: ${task.objective || task.title || task.id}`,
+    `The author already verified these checks: ${checks || '(none)'}.`,
+    "Write 2-4 RUNNABLE shell probe-commands (exit 0 = pass) that test the change's INTERACTIONS, side-effects,",
+    'and edge cases NOT covered by the author checks (existing callers, boundary inputs, error paths).',
+    'Write them as JSON {"probes":[{"command":"...","rationale":"..."}]} to a file named comprehension-quiz.json',
+    'in the current directory. Output only that file; do not change any other file.',
+  ].join('\n');
+}
+
+// Invoke an INDEPENDENT quiz-generator (a fresh agent session, distinct agentId from the executor) that writes
+// runnable probes about the change. Independence + runner-execution keep the quiz honest (no self-grading).
+function invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeoutMs, cwd, acceptance }) {
+  if (executor === 'dry-run') return; // dry-run cannot independently generate a quiz
+  const prompt = buildComprehensionQuizPrompt({ task, acceptance, cwd });
+  try { invokeRuntimeAdapter(executor, { prompt, agentId: `${agentId}-quiz`, timeoutMs: stepTimeoutMs, cwd }); } catch {}
+}
+
 function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   const acceptance = normalizeAcceptance(task);
   const result = normalizeResult(runNode);
@@ -1296,6 +1335,29 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     missingExpected.push('--verify-checks: policy approval requires a runner-executed requiredCheck or a runner-verified requiredArtifact; content semanticAssertions are not independently verified by --verify-checks');
   }
 
+  // Comprehension Quiz: verify UNDERSTANDING, not just output. An independently-generated, runner-executed
+  // set of behavioral probes (interactions/side-effects the requiredChecks miss) must PASS for claim-safety.
+  // An EMPTY quiz is INCONCLUSIVE (needs_verification), never a free pass; under verify mode the probes must be
+  // runner-authored (not self-reported), mirroring the requiredCheck rule.
+  if (acceptance.comprehensionQuiz) {
+    const quiz = result.observed.quizResults || [];
+    if (quiz.length === 0) {
+      missingExpected.push('comprehension quiz produced no probes; cannot certify understanding (inconclusive)');
+    } else {
+      for (const q of quiz) {
+        const qcmd = commandText(q) || 'quiz-probe';
+        if (verifyMode && q.verifiedBy !== 'runner') {
+          missingExpected.push(`comprehension quiz probe not runner-verified: ${qcmd}`);
+          continue;
+        }
+        const status = checkStatus(q);
+        if (!['passed', 'pass', 'ok', 'success', 'succeeded'].includes(status)) {
+          failedChecks.push(`comprehension quiz probe failed: ${qcmd}: ${status || 'no pass status reported'}`);
+        }
+      }
+    }
+  }
+
   const decision = failedChecks.length > 0
     ? 'rejected'
     : (missingExpected.length > 0 || unsupportedObserved.length > 0 ? 'needs_verification' : 'approved');
@@ -1314,6 +1376,7 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     // Auditability: record whether this review was runner-verified (--verify-checks) or based on
     // self-reported evidence, so a downstream reader can tell how the resulting claimSafe was grounded.
     verified: verifyMode === true,
+    comprehensionVerified: acceptance.comprehensionQuiz === true && decision === 'approved',
   };
 }
 
@@ -2893,6 +2956,12 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
           projectDir,
           preState: artifactPreState,
         });
+      }
+      if (acceptance.comprehensionQuiz) {
+        // Comprehension Quiz: an INDEPENDENT quiz-generator writes runnable probes about the change; the runner
+        // executes them. buildReviewReport gates claim-safety on them passing (empty quiz = inconclusive).
+        invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeoutMs, cwd: artifactWorkspacePath, acceptance });
+        executionResult.observed.quizResults = runComprehensionQuizProbes({ quizJsonPath: join(artifactWorkspacePath, 'comprehension-quiz.json'), cwd: artifactWorkspacePath, timeoutMs: stepTimeoutMs });
       }
     }
     const partialRequest = parsePartialRequestFromExecutorResult(result);
