@@ -1,0 +1,8 @@
+{
+  "bench": "swebench",
+  "n": 30,
+  "verified_done": 26,
+  "resolved": 26,
+  "false_completions": 0,
+  "missed_honest": 0
+}

@@ -6,3 +6,4 @@ preflight/*.log
 /*.json
 logs/
 __pycache__/
+impossiblebench/
