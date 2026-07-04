@@ -322,6 +322,7 @@ async function runClaimedQueueItemWorker(workDir, {
   ttlSeconds,
   verifyChecks = false,
   continueOnFailure = false,
+  verifyRetries = 0,
 }) {
   const item = claim.item;
   const lease = claim.lease;
@@ -368,6 +369,7 @@ async function runClaimedQueueItemWorker(workDir, {
   // serial `run` loop — so a parallel frontier sweep is verify-grounded and honest-monotone too.
   if (verifyChecks) args.push('--verify-checks');
   if (continueOnFailure) args.push('--continue-on-failure');
+  if (verifyRetries) args.push('--verify-retries', String(verifyRetries));
 
   let runResult;
   let releaseStatus = 'failed';
@@ -527,6 +529,7 @@ export async function runQueueWave(workDir, options = {}) {
     until: options.until || null,
     verifyChecks: options.verifyChecks === true,
     continueOnFailure: options.continueOnFailure === true,
+    verifyRetries: Number(options.verifyRetries) || 0,
   })));
   return {
     projectDir: claim.projectDir,
@@ -607,6 +610,7 @@ export function runQueueOnce(workDir, options = {}) {
       maxLoopbacks,
       verifyChecks: options.verifyChecks === true,
       continueOnFailure: options.continueOnFailure === true,
+      verifyRetries: options.verifyRetries != null ? options.verifyRetries : null,
       actor: options.actor || runnerId,
       targetTaskId: target.taskId,
       targetTaskGroupVersionId: target.taskGroupVersionId,
@@ -737,6 +741,7 @@ export async function runQueueWatch(workDir, options = {}) {
       until: options.until || null,
       verifyChecks: options.verifyChecks === true,
       continueOnFailure: options.continueOnFailure === true,
+      verifyRetries: Number(options.verifyRetries) || 0,
     }).then((result) => ({ waveId, result }));
     active.set(waveId, promise);
     return true;
