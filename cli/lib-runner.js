@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -1224,10 +1225,31 @@ export function runComprehensionQuizProbes({ quizJsonPath, cwd, timeoutMs = 120_
     const raw = JSON.parse(readFileSync(quizJsonPath, 'utf8'));
     probes = Array.isArray(raw?.probes) ? raw.probes : (Array.isArray(raw) ? raw : []);
   } catch { return []; }
-  const runnable = probes.filter((p) => String(commandText(p) || '').trim().length > 0).slice(0, Math.max(1, maxProbes));
+  // Drop trivially-constant probes (exit 0 / true / : / echo …) — a probe that passes without exercising the
+  // change carries no understanding evidence. (Deeper hardening — a differential baseline where the probe must
+  // FAIL on the unchanged state — is a documented follow-up.)
+  const isTrivial = (c) => /^(exit\s+0|true|:)$/.test(c) || /^echo(\s|$)/.test(c);
+  const runnable = probes.filter((p) => {
+    const c = String(commandText(p) || '').trim();
+    return c.length > 0 && !isTrivial(c);
+  }).slice(0, Math.max(1, maxProbes));
   if (runnable.length === 0) return [];
   const results = executeRequiredChecks({ cwd, requiredChecks: runnable, timeoutMs });
   return results.map((r, i) => ({ ...r, rationale: runnable[i]?.rationale || null, quizGeneratedBy: 'independent-reviewer' }));
+}
+
+// Isolate the quiz from executor-planted state: copy the change into a fresh dir and STRIP agent-instruction
+// files, so the executor cannot steer the "independent" quiz-generator (via CLAUDE.md/AGENTS.md/etc.) or leave a
+// pre-authored quiz behind. Returns the clean dir (falls back to the source on copy failure).
+export function prepareIsolatedQuizWorkspace(sourceCwd) {
+  let dir;
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'taskops-quiz-'));
+    cpSync(sourceCwd, dir, { recursive: true });
+  } catch { return sourceCwd; }
+  const strip = ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', 'AGENT.md', 'GEMINI.md', '.cursorrules', '.windsurfrules', '.clauderc', '.claude', '.cursor', '.github', '.aider.conf.yml', 'comprehension-quiz.json'];
+  for (const name of strip) { try { rmSync(join(dir, name), { recursive: true, force: true }); } catch {} }
+  return dir;
 }
 
 function buildComprehensionQuizPrompt({ task, acceptance, cwd }) {
@@ -1247,6 +1269,9 @@ function buildComprehensionQuizPrompt({ task, acceptance, cwd }) {
 // Invoke an INDEPENDENT quiz-generator (a fresh agent session, distinct agentId from the executor) that writes
 // runnable probes about the change. Independence + runner-execution keep the quiz honest (no self-grading).
 function invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeoutMs, cwd, acceptance }) {
+  // Delete any pre-existing quiz file so the EXECUTOR cannot self-author trivial always-pass probes that
+  // survive — only the independent quiz-generator's fresh file counts (absent -> empty quiz -> inconclusive).
+  try { rmSync(join(cwd, 'comprehension-quiz.json'), { force: true }); } catch {}
   if (executor === 'dry-run') return; // dry-run cannot independently generate a quiz
   const prompt = buildComprehensionQuizPrompt({ task, acceptance, cwd });
   try { invokeRuntimeAdapter(executor, { prompt, agentId: `${agentId}-quiz`, timeoutMs: stepTimeoutMs, cwd }); } catch {}
@@ -1376,7 +1401,9 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     // Auditability: record whether this review was runner-verified (--verify-checks) or based on
     // self-reported evidence, so a downstream reader can tell how the resulting claimSafe was grounded.
     verified: verifyMode === true,
-    comprehensionVerified: acceptance.comprehensionQuiz === true && decision === 'approved',
+    // comprehensionVerified asserts the quiz was RUNNER-verified — only true under verify mode (else the
+    // probe results are self-attested and must not be stamped as an independent understanding check).
+    comprehensionVerified: acceptance.comprehensionQuiz === true && decision === 'approved' && verifyMode === true,
   };
 }
 
@@ -2958,10 +2985,12 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         });
       }
       if (acceptance.comprehensionQuiz) {
-        // Comprehension Quiz: an INDEPENDENT quiz-generator writes runnable probes about the change; the runner
-        // executes them. buildReviewReport gates claim-safety on them passing (empty quiz = inconclusive).
-        invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeoutMs, cwd: artifactWorkspacePath, acceptance });
-        executionResult.observed.quizResults = runComprehensionQuizProbes({ quizJsonPath: join(artifactWorkspacePath, 'comprehension-quiz.json'), cwd: artifactWorkspacePath, timeoutMs: stepTimeoutMs });
+        // Comprehension Quiz: an INDEPENDENT quiz-generator (run in an ISOLATED copy of the change, stripped of
+        // executor-planted instruction files) writes runnable probes; the runner executes them. buildReviewReport
+        // gates claim-safety on them passing (empty quiz = inconclusive).
+        const quizCwd = prepareIsolatedQuizWorkspace(artifactWorkspacePath);
+        invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeoutMs, cwd: quizCwd, acceptance });
+        executionResult.observed.quizResults = runComprehensionQuizProbes({ quizJsonPath: join(quizCwd, 'comprehension-quiz.json'), cwd: quizCwd, timeoutMs: stepTimeoutMs });
       }
     }
     const partialRequest = parsePartialRequestFromExecutorResult(result);
