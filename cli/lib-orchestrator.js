@@ -320,6 +320,8 @@ async function runClaimedQueueItemWorker(workDir, {
   maxStepsExplicit,
   until,
   ttlSeconds,
+  verifyChecks = false,
+  continueOnFailure = false,
 }) {
   const item = claim.item;
   const lease = claim.lease;
@@ -362,6 +364,10 @@ async function runClaimedQueueItemWorker(workDir, {
   if (actor) args.push('--actor', actor);
   if (until) args.push('--until', until);
   if (loopbackPolicy !== 'none') args.push('--loopback', loopbackPolicy, '--max-loopbacks', String(maxLoopbacks));
+  // verified execution + isolate-and-continue must compose with the PARALLEL worker path, not only the
+  // serial `run` loop — so a parallel frontier sweep is verify-grounded and honest-monotone too.
+  if (verifyChecks) args.push('--verify-checks');
+  if (continueOnFailure) args.push('--continue-on-failure');
 
   let runResult;
   let releaseStatus = 'failed';
@@ -519,6 +525,8 @@ export async function runQueueWave(workDir, options = {}) {
     maxStepsExplicit,
     ttlSeconds,
     until: options.until || null,
+    verifyChecks: options.verifyChecks === true,
+    continueOnFailure: options.continueOnFailure === true,
   })));
   return {
     projectDir: claim.projectDir,
@@ -597,6 +605,8 @@ export function runQueueOnce(workDir, options = {}) {
       until: options.until || null,
       loopback: loopbackPolicy,
       maxLoopbacks,
+      verifyChecks: options.verifyChecks === true,
+      continueOnFailure: options.continueOnFailure === true,
       actor: options.actor || runnerId,
       targetTaskId: target.taskId,
       targetTaskGroupVersionId: target.taskGroupVersionId,
@@ -725,6 +735,8 @@ export async function runQueueWatch(workDir, options = {}) {
       maxStepsExplicit,
       ttlSeconds,
       until: options.until || null,
+      verifyChecks: options.verifyChecks === true,
+      continueOnFailure: options.continueOnFailure === true,
     }).then((result) => ({ waveId, result }));
     active.set(waveId, promise);
     return true;

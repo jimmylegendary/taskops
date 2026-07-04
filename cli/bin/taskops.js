@@ -47,7 +47,7 @@ Usage:
   taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
   taskops queue reports <work-dir> [--json]
   taskops runner once <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--continue-on-failure] [--json]
+  taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--verify-checks] [--continue-on-failure] [--json]
   taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
   taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--json]
   taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--no-start] [--dry-run] [--json]
@@ -597,6 +597,8 @@ try {
       maxStepsExplicit: maxStepsExplicitFlag(flags),
       loopback: flags.loopback && flags.loopback !== true ? String(flags.loopback) : null,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
+      verifyChecks: flags['verify-checks'] === true,
+      continueOnFailure: flags['continue-on-failure'] === true,
     };
     if (subcmd === 'once') {
       const result = runQueueOnce(workDir, {
