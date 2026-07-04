@@ -4,10 +4,10 @@ import { spawnSync } from 'node:child_process';
 import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
 
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
-export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked'];
+export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'needs_prototype', 'blocked'];
 export const RESOLVER_KIND_VALUES = ['human', 'ai', 'self'];
 export const UNDERSTANDING_LEVEL_VALUES = ['known', 'partial', 'unknown'];
-export const UNCERTAINTY_STATE_VALUES = ['unknown_unknown', 'known_unknown', 'known'];
+export const UNCERTAINTY_STATE_VALUES = ['unknown_unknown', 'known_unknown', 'unknown_known', 'known'];
 export const KNOWN_VERIFICATION_STATUS_VALUES = ['unverified'];
 export const INHERITED_KNOWN_TRUST_VALUES = ['inherited_unverified', 'contradicted_upstream', 'locally_revalidated'];
 export const INHERITED_FAILURE_PATTERN_TYPES = ['contradicted_known', 'high_surprise', 'blocking_unknown'];
@@ -1445,6 +1445,20 @@ export function inferUncertaintyReadiness(task) {
       nextAction: nextActionForRunReadiness('needs_exploration'),
     };
   }
+  if (state === 'unknown_known') {
+    // Unknown Knowns = recognize-when-seen requirements (taste / implicit spec / which-of-several-valid). They
+    // resolve ONLY by a human/owner reacting to cheap prototypes, so they must NOT go straight to execute. Until
+    // the prototype has set up an external pick (resolverKind human/ai), the task needs a prototype run. Once the
+    // pick is set up, readiness follows the normal contract and the runner-owned external-resolution pause holds
+    // execution until the DECISION/BASIS is filled — at which point the recognize-when-seen requirement is surfaced.
+    if (task.resolverKind === 'human' || task.resolverKind === 'ai') {
+      if (hasRunnableTaskContract(task)) {
+        return { taskId: task.id, runReadiness: 'runnable', source: 'uncertainty', reason: 'unknown_known with an external pick set up; runnable pending the human/ai decision (held by the external-resolution pause).', nextAction: nextActionForRunReadiness('runnable') };
+      }
+      return { taskId: task.id, runReadiness: 'needs_decomposition', source: 'uncertainty', reason: 'unknown_known pick set up, but objective/responsibility/completionCriteria are not complete enough for one run.', nextAction: nextActionForRunReadiness('needs_decomposition') };
+    }
+    return { taskId: task.id, runReadiness: 'needs_prototype', source: 'uncertainty', reason: 'uncertaintyState unknown_known needs cheap prototypes + a human pick to surface the recognize-when-seen requirement before execution.', nextAction: nextActionForRunReadiness('needs_prototype') };
+  }
   if (state === 'known') {
     if (hasRunnableTaskContract(task)) {
       return {
@@ -1870,6 +1884,7 @@ function nextActionForRunReadiness(runReadiness) {
   if (runReadiness === 'runnable') return 'send_to_run_graph';
   if (runReadiness === 'needs_decomposition') return 'decompose_task_group';
   if (runReadiness === 'needs_exploration') return 'create_exploratory_run';
+  if (runReadiness === 'needs_prototype') return 'create_prototype_run';
   if (runReadiness === 'blocked') return 'resolve_blocker';
   return 'review_task';
 }
