@@ -103,5 +103,30 @@ assert.ok(empty.missingExpected.some((m) => m.includes('comprehension quiz produ
   rmSync(root, { recursive: true, force: true });
 }
 
+// 8) DIFFERENTIAL baseline: a probe is understanding evidence only if it FAILS when the change is removed. Given
+// a produced artifact add.js, a probe that requires it -> differential:true; a probe that passes regardless
+// (node --version) -> differential:false (passes on the baseline too).
+{
+  const dir = mkdtempSync(join(tmpdir(), 'taskops-quizdiff-'));
+  writeFileSync(join(dir, 'add.js'), 'module.exports = { add: (a, b) => a + b };\n', 'utf8');
+  writeFileSync(join(dir, 'comprehension-quiz.json'), JSON.stringify({ probes: [
+    { command: 'node -e "require(\'./add.js\')"' },   // depends on the change
+    { command: 'node --version' },                     // passes with or without the change
+  ] }), 'utf8');
+  const q = runComprehensionQuizProbes({ quizJsonPath: join(dir, 'comprehension-quiz.json'), cwd: dir, baselineArtifacts: ['add.js'] });
+  const byCmd = (needle) => q.find((r) => r.command.includes(needle));
+  assert.equal(byCmd('add.js').differential, true, 'a probe that needs the produced artifact discriminates the change');
+  assert.equal(byCmd('--version').differential, false, 'a probe that passes with the change removed is non-discriminating');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// 9) GATE: if every passing probe is NON-discriminating (differential:false), understanding is not demonstrated
+// -> inconclusive, never a free pass.
+{
+  const nd = review('quiz-nondiff', { acceptance: acc, result: { observed: { outcomeSummary: 'done', artifactRefs: [], evidenceRefs: [], checkResults: passingCheck, quizResults: [{ command: 'node --version', status: 'passed', verifiedBy: 'runner', differential: false }] } } });
+  assert.notEqual(nd.decision, 'approved', 'a quiz whose only passing probe does not discriminate the change must not certify');
+  assert.ok(nd.missingExpected.some((m) => m.includes('no discriminating probe')), 'non-discriminating quiz is flagged inconclusive');
+}
+
 rmSync(tempRoot, { recursive: true, force: true });
-console.log('OK comprehension-quiz (gate + probes + integration)');
+console.log('OK comprehension-quiz (gate + probes + integration + differential baseline)');
