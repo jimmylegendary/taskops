@@ -91,7 +91,9 @@ export function extractTrainingData(projectDir) {
     // an audit flag ("was --verify-checks on"), NOT "the check passed" — never trust it by itself.
     const runnerPassEvidence = checkResults.some((c) => c.verifiedBy === 'runner' && ['passed', 'pass', 'ok', 'success', 'succeeded'].includes(String(c.status)))
       || verifiedArtifacts.some((a) => a && a.verifiedBy === 'runner' && a.producedThisRun === true);
-    const verifyGrounded = POLICY_APPROVING_MODES.has(String((task.acceptance && task.acceptance.mode) || 'informational'))
+    // Key the policy-mode gate on the AUDITED reviewReport.mode (what the runner actually approved under), not the
+    // raw task frontmatter — removes a latent coupling and cannot be diverged by a rewritten acceptance block.
+    const verifyGrounded = POLICY_APPROVING_MODES.has(String(reviewReport?.mode || ''))
       && reviewReport?.decision === 'approved'
       && reviewReport?.verified === true
       && runnerPassEvidence;
