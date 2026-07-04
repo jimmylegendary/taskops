@@ -1131,36 +1131,69 @@ export function persistExecutorDisclosure({ projectDir, runId, runNodeId, messag
 // verify-resolver: independently EXECUTE a task's requiredChecks instead of trusting the agent's
 // self-reported checkResults. This is the only thing that grounds claimSafe in evidence the runner
 // did not author. It runs arbitrary shell commands, so it is OPT-IN (run --verify-checks) and never
-// runs by default. Returns runner-authored checkResults (status from the real exit code).
-export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000 }) {
+// A MINIMAL, sanitized environment for isolated check execution: a clean system PATH and a throwaway HOME, and
+// nothing else. Dropping the inherited env neutralizes the potent subversion vectors an agent (or a poisoned
+// runner env) could use to make a check pass without real work — NODE_OPTIONS (--require ./evil), NODE_PATH,
+// npm_config_* (e.g. ignore-scripts=false / registry), LD_PRELOAD/DYLD_*, PYTHONPATH, and any TASKOPS_* leak.
+function sanitizedCheckEnv(home) {
+  const src = process.env;
+  return {
+    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    HOME: home,
+    LANG: src.LANG || 'C.UTF-8',
+    LC_ALL: src.LC_ALL || 'C.UTF-8',
+    TZ: src.TZ || 'UTC',
+    SHELL: '/bin/sh',
+  };
+}
+
+// runs by default. Returns runner-authored checkResults (status from the real exit code). When isolate=true the
+// check runs with a SANITIZED env (agent cannot make a check pass via env/preload/path subversion); it still runs
+// in the real cwd so a check that legitimately WRITES an artifact is provenance-verifiable. This closes the
+// env/NODE_OPTIONS/NODE_PATH/npm_config_*/LD_PRELOAD/PATH-shim/TASKOPS_* class; it does NOT sandbox a process that
+// the agent authored the target of (self-contained author checks + the comprehension-quiz/differential-probe axis
+// cover that) — full process sandboxing (containers) is documented future work. Results are stamped isolated:true.
+export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000, isolate = false }) {
   const runCwd = cwd && existsSync(cwd) ? cwd : process.cwd();
   const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : 120_000;
+  let env = null;
+  const cleanup = [];
+  if (isolate) {
+    const home = mkdtempSync(join(tmpdir(), 'taskops-checkhome-'));
+    cleanup.push(home);
+    env = sanitizedCheckEnv(home);
+  }
   const results = [];
-  for (const check of requiredChecks || []) {
-    const command = commandText(check);
-    if (!command) continue;
-    let status = 'failed';
-    let exitCode = null;
-    let detail = '';
-    let outputHash = null;
-    try {
-      const out = spawnSync(command, {
-        cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
-      });
-      if (out.error) {
-        detail = out.error.code === 'ETIMEDOUT' ? `timed out after ${limit}ms` : String(out.error.message || out.error);
-      } else {
-        exitCode = out.status;
-        status = out.status === 0 ? 'passed' : 'failed';
-        const raw = `${out.stdout || ''}${out.stderr || ''}`;
-        outputHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
-        detail = sanitizeFmScalar(raw.trim(), { maxLen: 500, fallback: '' });
+  try {
+    for (const check of requiredChecks || []) {
+      const command = commandText(check);
+      if (!command) continue;
+      let status = 'failed';
+      let exitCode = null;
+      let detail = '';
+      let outputHash = null;
+      try {
+        const out = spawnSync(command, {
+          cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
+          ...(env ? { env } : {}),
+        });
+        if (out.error) {
+          detail = out.error.code === 'ETIMEDOUT' ? `timed out after ${limit}ms` : String(out.error.message || out.error);
+        } else {
+          exitCode = out.status;
+          status = out.status === 0 ? 'passed' : 'failed';
+          const raw = `${out.stdout || ''}${out.stderr || ''}`;
+          outputHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+          detail = sanitizeFmScalar(raw.trim(), { maxLen: 500, fallback: '' });
+        }
+      } catch (error) {
+        detail = error instanceof Error ? error.message : String(error);
       }
-    } catch (error) {
-      detail = error instanceof Error ? error.message : String(error);
+      // outputHash makes the result tamper-evident/auditable; verifiedBy marks it as runner-produced.
+      results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner', ...(isolate ? { isolated: true } : {}) });
     }
-    // outputHash makes the result tamper-evident/auditable; verifiedBy marks it as runner-produced.
-    results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner' });
+  } finally {
+    for (const d of cleanup) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
   }
   return results;
 }
@@ -1234,7 +1267,7 @@ export function runComprehensionQuizProbes({ quizJsonPath, cwd, timeoutMs = 120_
     return c.length > 0 && !isTrivial(c);
   }).slice(0, Math.max(1, maxProbes));
   if (runnable.length === 0) return [];
-  const results = executeRequiredChecks({ cwd, requiredChecks: runnable, timeoutMs });
+  const results = executeRequiredChecks({ cwd, requiredChecks: runnable, timeoutMs, isolate: true });
   return results.map((r, i) => ({ ...r, rationale: runnable[i]?.rationale || null, quizGeneratedBy: 'independent-reviewer' }));
 }
 
@@ -3001,6 +3034,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
           cwd: artifactWorkspacePath,
           requiredChecks: acceptance.requiredChecks,
           timeoutMs: stepTimeoutMs,
+          isolate: true,
         });
       }
       if ((acceptance.requiredArtifacts || []).length > 0) {
