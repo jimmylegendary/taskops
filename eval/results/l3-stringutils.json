@@ -1,0 +1,14 @@
+{
+  "level": "L3",
+  "depth": 2,
+  "leaves": 3,
+  "leaves_done": 3,
+  "leaves_verify_grounded": 3,
+  "parent_status": "done",
+  "no_false_rollup": true,
+  "false_completions": 0,
+  "steps_run": 6,
+  "stop_reason": "all_closed",
+  "closure_complete": true,
+  "wallclock_s": 419
+}
