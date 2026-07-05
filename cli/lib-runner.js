@@ -17,7 +17,7 @@ import {
   deriveExternalResolutionStatus,
   isPartialUnresolved,
 } from './lib-taskops.js';
-import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter } from './lib-runtime-adapters.js';
+import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeRuntimeAdapter, executorForRuntime } from './lib-runtime-adapters.js';
 import {
   MUTATION_LOCK_DIR,
   DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
@@ -1728,8 +1728,17 @@ function fillExternalResolution(taskPath, decision, basis) {
   return true;
 }
 
+// Independence by RUNTIME identity, not raw name: normalize an adapter NAME or an executor VALUE to its canonical
+// adapter, so aliases of the SAME runtime (e.g. executor 'openclaw-agent' vs resolver adapter 'openclaw-cli' — one
+// runtime) can't pass as independent and let a model resolve its own escalation.
+function runtimeIdentity(name) {
+  try { return normalizeRuntimeAdapter(name); } catch { /* not an adapter name — maybe an executor value */ }
+  try { return RUNTIME_ADAPTER_NAMES.find((adn) => executorForRuntime(adn) === name) || name; } catch { return name; }
+}
+function sameRuntime(a, b) { return a === b || runtimeIdentity(a) === runtimeIdentity(b); }
+
 function resolveAiDelegations({ parsed, aiResolver, executor, stepTimeoutMs, eventsPath, runId, runDir }) {
-  if (!aiResolver || aiResolver === executor) return 0;   // independence: the resolver must differ from the executor
+  if (!aiResolver || sameRuntime(aiResolver, executor)) return 0;   // independence: resolver must be a DIFFERENT runtime than the executor
   let resolved = 0;
   for (const task of parsed.tasks.values()) {
     if (task.resolverKind !== 'ai' || ['done', 'cancelled'].includes(task.status)) continue;
@@ -1749,7 +1758,9 @@ function resolveAiDelegations({ parsed, aiResolver, executor, stepTimeoutMs, eve
       dec = JSON.parse(readFileSync(join(cwd, 'delegation-decision.json'), 'utf8'));
     } catch { dec = null; }
     try { rmSync(cwd, { recursive: true, force: true }); } catch {}
-    if (!dec || !String(dec.decision || '').trim()) continue;   // declined / failed -> stays PENDING (honest)
+    // Require BOTH a decision AND a resolver-authored basis (grounds) — else DECLINE (stays pending). This keeps
+    // the BASIS provenance authored by the independent resolver, never a runner-fabricated generic string.
+    if (!dec || !String(dec.decision || '').trim() || !String(dec.basis || '').trim()) continue;
     if (fillExternalResolution(task.path, dec.decision, dec.basis)) {
       logEvent(eventsPath, { timestamp: isoNow(), type: 'delegation_resolved', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, resolvedBy: `ai:${aiResolver}` });
       appendRunLog(runDir, `${isoNow()} delegation_resolved taskId=${task.id} resolvedBy=ai:${aiResolver}`);

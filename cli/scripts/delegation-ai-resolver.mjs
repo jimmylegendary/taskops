@@ -13,10 +13,10 @@ import { runTaskOps, EXTERNAL_RESOLUTION_TEMPLATE } from '../lib-runner.js';
 
 const now = '2026-07-05T00:00:00.000Z';
 // a scripted AI resolver bin: ignore args/stdin, write the decision file to cwd, exit 0.
-function resolverBin(decision) {
+function resolverBin(decision, basis = 'resolver picked') {
   const dir = mkdtempSync(join(tmpdir(), 'taskops-resolverbin-'));
   const p = join(dir, 'resolver.sh');
-  writeFileSync(p, `#!/usr/bin/env bash\ncat >/dev/null 2>&1 || true\nprintf '%s' '{"decision":${JSON.stringify(decision)},"basis":"resolver picked"}' > delegation-decision.json\necho ok\n`, 'utf8');
+  writeFileSync(p, `#!/usr/bin/env bash\ncat >/dev/null 2>&1 || true\nprintf '%s' '{"decision":${JSON.stringify(decision)},"basis":${JSON.stringify(basis)}}' > delegation-decision.json\necho ok\n`, 'utf8');
   chmodSync(p, 0o755);
   return p;
 }
@@ -75,4 +75,25 @@ const events = (w) => { try { return readFileSync(join(w, 'runs/r1/events.jsonl'
   rmSync(join(w, '..'), { recursive: true, force: true });
 }
 
-console.log('OK delegation-ai-resolver (active resolve + resume / independence / decline stays pending)');
+// 4) RUNTIME-IDENTITY INDEPENDENCE: two DIFFERENT names for the SAME runtime (executor 'openclaw-agent' vs
+// aiResolver 'openclaw-cli') must NOT pass as independent — a model may not resolve its own escalation.
+{
+  process.env.TASKOPS_CLAUDE_BIN = resolverBin('Strategy A');
+  const w = build();
+  runTaskOps(w, { executor: 'openclaw-agent', aiResolver: 'openclaw-cli', verifyChecks: true, continueOnFailure: true, maxSteps: 3 });
+  assert.notEqual(task(w).status, 'done', 'aliases of the same runtime are not independent — no auto-resolve; stays pending');
+  rmSync(join(w, '..'), { recursive: true, force: true });
+}
+
+// 5) BASIS REQUIRED: a resolver that gives a decision but NO basis must DECLINE — the grounds provenance must be
+// resolver-authored, never runner-fabricated. Stays pending.
+{
+  process.env.TASKOPS_CLAUDE_BIN = resolverBin('Strategy A', '');
+  const w = build();
+  runTaskOps(w, { executor: 'dry-run', aiResolver: 'claude-code', verifyChecks: true, continueOnFailure: true, maxSteps: 4 });
+  assert.notEqual(task(w).status, 'done', 'a resolution with no resolver-authored basis is declined (stays pending)');
+  assert.ok(readBody(join(w, 'task-groups/tg-root/versions/tgv-root-v1/tasks/t.md')).includes('<resolver:'), 'no basis -> block left unfilled (not fabricated)');
+  rmSync(join(w, '..'), { recursive: true, force: true });
+}
+
+console.log('OK delegation-ai-resolver (active resolve+resume / independence [name+runtime] / decline / basis required)');
