@@ -69,14 +69,41 @@
   .toast.show{opacity:1}
   .legend{position:absolute;bottom:12px;left:12px;display:flex;gap:12px;font-size:11px;color:var(--muted);background:rgba(22,26,32,.85);border:1px solid var(--line);border-radius:8px;padding:7px 11px}
   .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  /* folder open */
+  .opener{position:relative}
+  .openbtn{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 12px;font-size:12.5px;cursor:pointer;font-family:var(--sans)}
+  .openbtn:hover{border-color:var(--muted)}
+  .openpanel{display:none;position:absolute;top:36px;right:0;width:360px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;z-index:20;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+  .openpanel.open{display:block}
+  .oplab{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:2px 0 6px}
+  .oplab:not(:first-child){margin-top:14px}
+  .oprow{display:flex;gap:6px}
+  .oprow input{margin-top:0;font-family:var(--mono);font-size:12px}
+  .oprow button{background:var(--explore);color:#0c0f16;border:none;border-radius:7px;padding:0 13px;font-weight:650;cursor:pointer;font-size:12.5px}
+  .opitem{display:flex;align-items:center;gap:8px;padding:7px 9px;margin-top:5px;border:1px solid var(--line);border-radius:7px;cursor:pointer;font-size:12.5px}
+  .opitem:hover{border-color:var(--explore);background:var(--panel2)}
+  .opitem .op-t{font-weight:600}.opitem .op-p{color:var(--muted);font-family:var(--mono);font-size:10.5px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
+  .operr{color:var(--block);font-size:11.5px;margin-top:8px}
+  .nowork{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--muted)}
+  .nowork b{color:var(--ink);font-size:15px}
 </style>
 </head>
 <body>
 <div class="app">
   <header>
     <span class="brand">TaskOps</span><span class="pill" id="closure">…</span>
-    <span class="work" id="work"></span>
+    <span class="work" id="work">no work open</span>
     <span class="spacer"></span>
+    <div class="opener">
+      <button class="openbtn" onclick="toggleOpen(event)">📁 Open work…</button>
+      <div class="openpanel" id="openpanel">
+        <div class="oplab">Open a TaskOps work folder</div>
+        <div class="oprow"><input id="oppath" placeholder="/path/to/work" onkeydown="if(event.key==='Enter')openFolder()" /><button onclick="openFolder()">Open</button></div>
+        <div class="oplab">Discover works under a root</div>
+        <div class="oprow"><input id="oproot" placeholder="/path/to/parent" onkeydown="if(event.key==='Enter')scanWorks()" /><button onclick="scanWorks()">Scan</button></div>
+        <div id="opworks"></div>
+      </div>
+    </div>
     <span class="live"><span class="dot"></span><span id="livetxt">live</span></span>
   </header>
   <aside>
@@ -126,6 +153,10 @@ function layout(tasks, edges) {
 
 async function renderGraph() {
   const g = await j('/api/graph');
+  $('work').textContent = g.noWork ? 'no work open' : (g.workTitle || g.work || '');
+  $('work').title = g.work || '';
+  if (g.noWork) { $('closure').textContent = '—'; $('closure').className = 'pill'; $('graph').innerHTML = ''; showNoWork(true); return; }
+  showNoWork(false);
   $('closure').textContent = g.closure && g.closure.complete ? 'all closed' : (g.errors ? g.errors + ' errors' : 'running');
   $('closure').className = 'pill' + (g.closure && g.closure.complete ? ' ok' : '');
   const { pos, width, height } = layout(g.tasks, g.edges);
@@ -164,8 +195,28 @@ async function submitResolve(id) {
 function closeDetail() { $('detail').classList.remove('open'); selId = null; renderGraph(); renderQueue(); }
 function toast(m) { const t = $('toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2200); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+// --- open a work folder (TaskOps is file-based; point the UI at any live work — this session, a daemon, another AI) ---
+function toggleOpen(e) { if (e) e.stopPropagation(); $('openpanel').classList.toggle('open'); }
+document.addEventListener('click', (e) => { if (!e.target.closest('.opener')) $('openpanel').classList.remove('open'); });
+async function openWorkPath(path) {
+  const r = await j('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+  if (r.ok) { $('openpanel').classList.remove('open'); selId = null; toast('Opened ' + (r.title || path)); refresh(); }
+  else { $('opworks').innerHTML = `<div class="operr">⚠ ${esc(r.error || 'failed')}</div>`; }
+}
+function openFolder() { const p = $('oppath').value.trim(); if (p) openWorkPath(p); }
+async function scanWorks() {
+  const root = $('oproot').value.trim(); if (!root) return;
+  const works = await j('/api/works?root=' + encodeURIComponent(root));
+  $('opworks').innerHTML = works.length ? works.map(w => `<div class="opitem" onclick="openWorkPath('${w.path.replace(/'/g, "\\'")}')"><span class="op-t">${esc(w.title)}</span><span class="op-p">${esc(w.path)}</span></div>`).join('') : '<div class="operr">No TaskOps works found under that root.</div>';
+}
+function showNoWork(on) {
+  let el = $('nowork');
+  if (on && !el) { el = document.createElement('div'); el.id = 'nowork'; el.className = 'nowork'; el.innerHTML = '<b>No work open</b><br>Open a TaskOps work folder (↗ top-right) to watch it live.'; document.querySelector('main').appendChild(el); }
+  else if (!on && el) el.remove();
+}
 async function refresh() { await renderGraph(); await renderQueue(); if (selId) openTask(selId); }
-refresh().then(() => { const t = new URLSearchParams(location.search).get('task'); if (t) openTask(t); });
+refresh().then(() => { const q = new URLSearchParams(location.search); const t = q.get('task'); if (t) openTask(t); const o = q.get('open'); if (o) { $('openpanel').classList.add('open'); $('oproot').value = o; scanWorks(); } });
 try { const es = new EventSource('/api/events'); es.addEventListener('update', () => refresh()); es.onerror = () => { $('livetxt').textContent = 'reconnecting'; }; es.onopen = () => { $('livetxt').textContent = 'live'; }; } catch (e) {}
 </script>
 </body>
