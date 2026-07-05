@@ -1,0 +1,11 @@
+{
+  "handoff": "claude-code(executor) <- codex-cli(resolver)",
+  "delegation_resolved_by": "ai:codex-cli",
+  "decision_recorded": "formal",
+  "decision_present": true,
+  "resumed_and_executed": true,
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "wallclock_s": 60
+}
