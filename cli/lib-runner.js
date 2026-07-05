@@ -1697,6 +1697,68 @@ function externalResolutionPause(task) {
   };
 }
 
+// D1 — the ACTIVE delegation loop for resolverKind:'ai'. Instead of only PAUSING, actively INVOKE an INDEPENDENT
+// AI resolver (a different runtime adapter than the executor) to answer the escalated QUESTION, then fill the
+// DECISION/BASIS so the task resumes. Honesty: (a) the resolver is independent of the executor; (b) only a fully
+// WAITING block is filled — an invalid/partial one stays held (integrity); (c) a resolver that declines / produces
+// nothing leaves the task PENDING (never fabricated); (d) the resolution is recorded with provenance (resolvedBy).
+function buildAiResolverPrompt({ question, options, escalationBasis }) {
+  return [
+    'DELEGATED DECISION — you are an INDEPENDENT resolver, not the implementer. Another agent escalated a decision',
+    'it could not settle. Choose the best answer that honors the intent, and give a crisp DECISION (a concrete,',
+    'downstream-consumable value — not prose) plus a one-line BASIS.',
+    `QUESTION: ${question}`,
+    `OPTIONS: ${options || '(the escalating agent did not enumerate options; decide the smallest defensible answer)'}`,
+    `WHY IT WAS ESCALATED: ${escalationBasis || '(not given)'}`,
+    'Write ONLY the file delegation-decision.json in the current directory: {"decision":"...","basis":"..."}.',
+    'If you genuinely cannot resolve it, write {"decision":"","basis":"why not"} — do NOT invent an answer.',
+  ].join('\n');
+}
+
+function fillExternalResolution(taskPath, decision, basis) {
+  let raw;
+  try { raw = readFileSync(taskPath, 'utf8'); } catch { return false; }
+  const dec = sanitizeFmScalar(String(decision), { maxLen: 400, fallback: '' });
+  const bas = sanitizeFmScalar(String(basis || 'resolved by ai resolver'), { maxLen: 400, fallback: 'resolved by ai resolver' });
+  if (!raw.includes('<resolver: the concrete, downstream-consumable choice — a value, not prose>')) return false;
+  raw = raw
+    .replace('<resolver: the concrete, downstream-consumable choice — a value, not prose>', dec)
+    .replace('<resolver: the grounds for this decision>', bas);
+  writeTextFileAtomic(taskPath, raw);
+  return true;
+}
+
+function resolveAiDelegations({ parsed, aiResolver, executor, stepTimeoutMs, eventsPath, runId, runDir }) {
+  if (!aiResolver || aiResolver === executor) return 0;   // independence: the resolver must differ from the executor
+  let resolved = 0;
+  for (const task of parsed.tasks.values()) {
+    if (task.resolverKind !== 'ai' || ['done', 'cancelled'].includes(task.status)) continue;
+    let body = '';
+    try { body = task.path ? readBody(task.path) : ''; } catch { continue; }
+    // only resolve a fully-empty (waiting) block; an invalid/partial one stays HELD (D0 integrity)
+    if (deriveExternalResolutionStatus({ resolverKind: 'ai', body }) !== 'waiting') continue;
+    const question = externalResolutionSectionText(body, '## QUESTION');
+    if (!question) continue;
+    const cwd = mkdtempSync(join(tmpdir(), 'taskops-airesolve-'));
+    let dec = null;
+    try {
+      invokeRuntimeAdapter(aiResolver, {
+        prompt: buildAiResolverPrompt({ question, options: externalResolutionSectionText(body, '## OPTIONS'), escalationBasis: externalResolutionSectionText(body, '## ESCALATION_BASIS') }),
+        agentId: `ai-resolver-${task.id}`, timeoutMs: stepTimeoutMs, cwd,
+      });
+      dec = JSON.parse(readFileSync(join(cwd, 'delegation-decision.json'), 'utf8'));
+    } catch { dec = null; }
+    try { rmSync(cwd, { recursive: true, force: true }); } catch {}
+    if (!dec || !String(dec.decision || '').trim()) continue;   // declined / failed -> stays PENDING (honest)
+    if (fillExternalResolution(task.path, dec.decision, dec.basis)) {
+      logEvent(eventsPath, { timestamp: isoNow(), type: 'delegation_resolved', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, resolvedBy: `ai:${aiResolver}` });
+      appendRunLog(runDir, `${isoNow()} delegation_resolved taskId=${task.id} resolvedBy=ai:${aiResolver}`);
+      resolved += 1;
+    }
+  }
+  return resolved;
+}
+
 function blockerKey(ref) {
   if (!ref || typeof ref !== 'object') return 'invalid:blocker';
   switch (ref.type) {
@@ -5093,6 +5155,9 @@ export function runTaskOps(workDir, options = {}) {
   const verifyRequiredChecks = options.verifyChecks === true;
   const continueOnFailure = options.continueOnFailure === true;
   const verifyRetries = Math.max(0, Math.floor(Number(options.verifyRetries) || 0));
+  // D1 active delegation: an independent AI resolver (a runtime adapter, different from the executor) that answers
+  // escalated resolverKind:'ai' decisions so the task resumes, instead of pausing for a manual fill.
+  const aiResolver = options.aiResolver ? String(options.aiResolver) : null;
 
   let maxSteps = null;
   if (options.maxSteps != null) {
@@ -5241,6 +5306,11 @@ export function runTaskOps(workDir, options = {}) {
         taskGroupVersionId: targetTaskGroupVersionId,
       });
       if (next.kind === 'stop') {
+        // D1: actively resolve resolverKind:'ai' delegations via an independent AI resolver, then continue (resume).
+        if (next.reason === STOP_REASONS.DELEGATION_PENDING && aiResolver) {
+          const nResolved = resolveAiDelegations({ parsed, aiResolver, executor, stepTimeoutMs: taskTimeoutMs, eventsPath, runId, runDir });
+          if (nResolved > 0) continue;
+        }
         if (
           next.reason === STOP_REASONS.DELEGATION_PENDING
           && loopbackPolicy === 'self'

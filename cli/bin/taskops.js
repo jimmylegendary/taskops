@@ -40,7 +40,7 @@ Usage:
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
   taskops promote-partials <work-dir> [--dry-run|--apply] [--partial-id <id>] [--max-follow-up-depth <n>] [--repeat-threshold <n>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
-  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--verify-checks] [--verify-retries <n>] [--continue-on-failure] [--self-guide-file <path>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--verify-checks] [--verify-retries <n>] [--ai-resolver <adapter>] [--continue-on-failure] [--self-guide-file <path>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
   taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--verify-checks] [--verify-retries <n>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
   taskops queue sync <work-dir> [--json]
   taskops queue list <work-dir> [--json]
@@ -50,7 +50,7 @@ Usage:
   taskops queue reports <work-dir> [--json]
   taskops runner once <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
   taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--verify-checks] [--continue-on-failure] [--json]
-  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--verify-checks] [--verify-retries <n>] [--continue-on-failure] [--json]
+  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--verify-checks] [--verify-retries <n>] [--ai-resolver <adapter>] [--continue-on-failure] [--json]
   taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--verify-checks] [--verify-retries <n>] [--json]
   taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--verify-checks] [--verify-retries <n>] [--no-start] [--dry-run] [--json]
   taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--verify-checks] [--verify-retries <n>] [--start] [--dry-run] [--json]
@@ -518,6 +518,7 @@ try {
       verifyChecks: flags['verify-checks'] === true,
       continueOnFailure: flags['continue-on-failure'] === true,
       verifyRetries: flags['verify-retries'] != null && flags['verify-retries'] !== true ? flags['verify-retries'] : null,
+      aiResolver: flags['ai-resolver'] != null && flags['ai-resolver'] !== true ? flags['ai-resolver'] : null,
     });
     if (flags.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -616,6 +617,7 @@ try {
       verifyChecks: flags['verify-checks'] === true,
       continueOnFailure: flags['continue-on-failure'] === true,
       verifyRetries: flags['verify-retries'] != null && flags['verify-retries'] !== true ? flags['verify-retries'] : null,
+      aiResolver: flags['ai-resolver'] != null && flags['ai-resolver'] !== true ? flags['ai-resolver'] : null,
     };
     if (subcmd === 'once') {
       const result = runQueueOnce(workDir, {
