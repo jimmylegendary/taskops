@@ -112,6 +112,8 @@ export function normalizeDaemonOptions(workDir, options = {}) {
     maxStepsExplicit: normalizeMaxStepsExplicit(options),
     loopbackPolicy,
     maxLoopbacks: normalizeMaxLoopbacks(options.maxLoopbacks, loopbackPolicy),
+    verifyChecks: normalizeBool(options.verifyChecks, false),
+    verifyRetries: optionalPositiveInteger(options.verifyRetries, 'verify retries', 0),
     timeout: options.timeout == null || options.timeout === '' ? 300 : Number(options.timeout),
     reportSink: options.reportSink || 'ledger',
     masterSessionKey: options.masterSessionKey || null,
@@ -182,6 +184,8 @@ function runnerArgs(opts) {
   if (opts.maxSteps != null) args.push('--max-steps', String(opts.maxSteps));
   if (opts.maxStepsExplicit) args.push('--max-steps-explicit');
   if (opts.loopbackPolicy !== 'none') args.push('--loopback', opts.loopbackPolicy, '--max-loopbacks', String(opts.maxLoopbacks));
+  if (opts.verifyChecks) args.push('--verify-checks');
+  if (opts.verifyRetries) args.push('--verify-retries', String(opts.verifyRetries));
   if (opts.maxIdleCycles != null) args.push('--max-idle-cycles', String(opts.maxIdleCycles));
   if (opts.idleExitAfterSeconds != null) args.push('--idle-exit-after-seconds', String(opts.idleExitAfterSeconds));
   if (opts.until) args.push('--until', opts.until);
@@ -277,6 +281,8 @@ function runnerActivationConfig(rendered, queue, { started, dryRun }) {
     maxStepsExplicit: rendered.options.maxStepsExplicit,
     loopbackPolicy: rendered.options.loopbackPolicy,
     maxLoopbacks: rendered.options.maxLoopbacks,
+    verifyChecks: rendered.options.verifyChecks,
+    verifyRetries: rendered.options.verifyRetries,
     started: Boolean(started),
   };
 }
@@ -391,6 +397,8 @@ export async function runDaemon(workDir, options = {}) {
         maxStepsExplicit: opts.maxStepsExplicit,
         loopback: opts.loopbackPolicy,
         maxLoopbacks: opts.maxLoopbacks,
+        verifyChecks: opts.verifyChecks,
+        verifyRetries: opts.verifyRetries,
         timeout: opts.timeout,
         reportSink: opts.reportSink,
         masterSessionKey: opts.masterSessionKey,

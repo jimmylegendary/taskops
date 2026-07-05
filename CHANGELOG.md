@@ -1,6 +1,9 @@
 # Changelog
 
-## v0.9.0 — Honest completion, enforced and verified
+## [Unreleased] — targeting v0.9.0 (gated on the complete-delegation capability)
+
+> The v0.9.0 RELEASE is reserved for when human/other-AI DELEGATION is fully implemented + proven. The items below
+> (the honest-completion instrument + L2 external validation) are done and unreleased; delegation is the remaining gate.
 
 This release turns TaskOps' honest-completion invariant from **self-attested** into **runner-ENFORCED**, adds a
 test-time-scaling meter and a training-data engine, and ships the first **external validation**: on 81 real-agent

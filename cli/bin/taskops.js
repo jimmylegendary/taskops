@@ -41,7 +41,7 @@ Usage:
   taskops promote-partials <work-dir> [--dry-run|--apply] [--partial-id <id>] [--max-follow-up-depth <n>] [--repeat-threshold <n>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
   taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--verify-checks] [--verify-retries <n>] [--continue-on-failure] [--self-guide-file <path>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
-  taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
+  taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--verify-checks] [--verify-retries <n>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
   taskops queue sync <work-dir> [--json]
   taskops queue list <work-dir> [--json]
   taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
@@ -50,10 +50,10 @@ Usage:
   taskops queue reports <work-dir> [--json]
   taskops runner once <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
   taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <timestamp>] [--verify-checks] [--continue-on-failure] [--json]
-  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
-  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--json]
-  taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--no-start] [--dry-run] [--json]
-  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--start] [--dry-run] [--json]
+  taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--verify-checks] [--verify-retries <n>] [--continue-on-failure] [--json]
+  taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--verify-checks] [--verify-retries <n>] [--json]
+  taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--verify-checks] [--verify-retries <n>] [--no-start] [--dry-run] [--json]
+  taskops daemon install <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--verify-checks] [--verify-retries <n>] [--start] [--dry-run] [--json]
   taskops daemon start|stop|restart|status|logs|uninstall <name> [--json]
   taskops restart <work-dir> --from <task-id> [--instruction <text>] [--instruction-file <path>] [--reason <text>] [--json]
   taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
@@ -691,6 +691,8 @@ try {
       maxIdleCycles: flags['max-idle-cycles'] != null && flags['max-idle-cycles'] !== true ? flags['max-idle-cycles'] : null,
       idleExitAfterSeconds: flags['idle-exit-after-seconds'] != null && flags['idle-exit-after-seconds'] !== true ? flags['idle-exit-after-seconds'] : null,
       until: flags.until && flags.until !== true ? String(flags.until) : null,
+      verifyChecks: flags['verify-checks'] === true,
+      verifyRetries: flags['verify-retries'] != null && flags['verify-retries'] !== true ? flags['verify-retries'] : null,
       continueOnFailure: flags['continue-on-failure'] === true,
     };
     const unattended = flags.unattended === true;
@@ -762,6 +764,8 @@ try {
       maxIdleCycles: flags['max-idle-cycles'] != null && flags['max-idle-cycles'] !== true ? flags['max-idle-cycles'] : null,
       idleExitAfterSeconds: flags['idle-exit-after-seconds'] != null && flags['idle-exit-after-seconds'] !== true ? flags['idle-exit-after-seconds'] : null,
       until: flags.until && flags.until !== true ? String(flags.until) : null,
+      verifyChecks: flags['verify-checks'] === true,
+      verifyRetries: flags['verify-retries'] != null && flags['verify-retries'] !== true ? flags['verify-retries'] : null,
       continueOnFailure: flags['continue-on-failure'] === true,
     };
 

@@ -69,14 +69,15 @@ taskops next <work-dir> --json
 taskops explain <work-dir> --json
 taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]
 taskops init <dir> --id <id> --title <title> --objective <objective>
+taskops trainingdata <work-dir> [--summary]
 taskops vault-init <vault-dir> --repo-url <url> --branch <branch> --auto-sync true
 taskops git-status <vault-dir>
 taskops git-sync <vault-dir> --message <message>
 taskops watch-sync <vault-dir> --debounce-ms 5000
 taskops decompose <work-dir> --task-group-id <id> --spec <spec.json>
 taskops refactor <work-dir> --task-group-id <id> --spec <spec.json> --supersedes <version-id>
-taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--json]
-taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
+taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <iso-timestamp>] [--timeout <seconds>] [--verify-checks] [--verify-retries <n>] [--continue-on-failure] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--json]
+taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--verify-checks] [--verify-retries <n>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
 taskops queue sync <work-dir> [--json]
 taskops queue list <work-dir> [--json]
 taskops queue claim <work-dir> [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--json]
@@ -84,7 +85,7 @@ taskops queue heartbeat <work-dir> <lease-id> [--ttl-seconds <n>] [--json]
 taskops queue release <work-dir> <lease-id> [--status done|failed|cancelled] [--json]
 taskops queue reports <work-dir> [--json]
 taskops runner once <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--json]
-taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--continue-on-failure] [--json]
+taskops runner watch <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--max-waves <n>] [--max-idle-cycles <n>] [--idle-exit-after-seconds <n>] [--until <iso-timestamp>] [--verify-checks] [--continue-on-failure] [--json]
 taskops daemon run <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--ttl-seconds <n>] [--max-attempts <n>] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--timeout <seconds>] [--report-sink none|ledger|openclaw-chat-inject] [--master-session-key <key>] [--poll-interval-ms <n>] [--daemon-poll-interval-ms <n>] [--failure-backoff-ms <n>] [--max-daemon-cycles <n>] [--continue-on-failure] [--json]
 taskops daemon unit <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--json]
 taskops daemon enable <work-dir> [--name <name>] [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--max-parallel <n>] [--max-steps <n>] [--loopback none|self] [--max-loopbacks <n>] [--no-start] [--dry-run] [--json]
@@ -101,6 +102,18 @@ These commands are the small surface area that keeps long-running agents honest.
 - `taskops explain <work-dir> --json` — explains why work is or is not closed: closure summary, next honest action, and concrete open reasons (missing EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors).
 - `taskops audit <work-dir> [--strict] [--max-tasks-flat <n>] [--json]` — checks whether a work tree is safe to cite as a strong progress/completion claim. It flags shallow flat decomposition for complex objectives, manual EoW closure, structural-but-unapproved completion, stale queue projection rows, and closed markdown tasks that still have active queue rows/leases/attempts. Use `--strict` before paper, benchmark, release, or unattended-work claims.
 - `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. It refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied. It refuses to close a run node unless its status is `done`/`cancelled` or an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied. Use this rather than editing EoW files by hand.
+
+## v0.9 verify-grounded completion
+
+TaskOps v0.9 makes strong completion claims depend on runner-owned evidence, not an agent's self-report.
+
+- Use `taskops run <work-dir> --verify-checks` when a task has `acceptance.requiredChecks` and the result needs to be claim-safe. The runner executes the checks itself and records `verifiedBy: runner`.
+- Use `taskops delegate <work-dir> --verify-checks` for delegated execution that must pass `acceptance.requiredChecks`; combine with `--verify-retries <n>` for bounded repair.
+- Use `--verify-retries <n>` with `--verify-checks` when a failed check should be fed back for bounded repair/test-time-scaling. Do not use unbounded retries.
+- Use `--continue-on-failure` when a failed task should become an honest blocked/stalled branch while other runnable work continues.
+- A task with no executable `requiredChecks`, no produced required artifacts, and no semantic assertions should not be treated as `policy_approved_complete`. Empty checks are intentionally non-certifying.
+- `taskops trainingdata <work-dir> [--summary]` emits labels from runner-verified trajectories. Treat these labels as useful only when they rest on verified completion/stall evidence.
+- `policy_approved_complete` is stronger than structural EoW closure. Structural closure can mean "the graph is closed"; policy-approved closure means TaskOps has evidence that the work passed its declared acceptance policy.
 
 ## Running TaskOps work
 

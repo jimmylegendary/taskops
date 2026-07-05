@@ -5013,6 +5013,68 @@ export function closeTarget(workDir, targetId, {
   };
 }
 
+function finalizeWorkStatusForClosure(projectDir, { runId, closedAt, allowConcurrentTarget = false } = {}) {
+  const parsed = parseProjectForRunner(projectDir, { allowConcurrentTarget });
+  const closure = parsed.closure || {};
+  const closureState = closure.closureState || (closure.complete === true ? 'structurally_complete_unapproved' : 'open');
+  const previousStatus = parsed.project.status || null;
+  if (parsed.errors.length > 0 || closure.complete !== true) {
+    return {
+      complete: false,
+      updated: false,
+      previousStatus,
+      status: previousStatus,
+      closureState,
+      validationErrors: parsed.errors,
+    };
+  }
+
+  const shouldSetDone = !['done', 'cancelled'].includes(previousStatus);
+  const needsClosedAt = !parsed.project.closedAt;
+  const needsClosedBy = !parsed.project.closedBy;
+  const needsClosedByRunId = runId && !parsed.project.closedByRunId;
+  const needsClosureState = parsed.project.closureState !== closureState;
+  const needsStructuralMarker = parsed.project.structuralClosureComplete !== true;
+  const needsUpdate = shouldSetDone
+    || needsClosedAt
+    || needsClosedBy
+    || needsClosedByRunId
+    || needsClosureState
+    || needsStructuralMarker;
+
+  if (!needsUpdate) {
+    return {
+      complete: true,
+      updated: false,
+      previousStatus,
+      status: previousStatus,
+      closureState,
+      validationErrors: [],
+    };
+  }
+
+  const projectIndexPath = join(projectDir, 'index.md');
+  const nextFm = updateMarkdownFrontmatter(projectIndexPath, (fm) => {
+    if (!['done', 'cancelled'].includes(fm.status)) fm.status = 'done';
+    if (!fm.closedAt) fm.closedAt = closedAt;
+    if (!fm.closedBy) fm.closedBy = 'taskops-runner';
+    if (runId && !fm.closedByRunId) fm.closedByRunId = runId;
+    fm.closureState = closureState;
+    fm.structuralClosureComplete = true;
+    return fm;
+  });
+
+  return {
+    complete: true,
+    updated: true,
+    previousStatus,
+    status: nextFm.status,
+    closureState,
+    path: projectIndexPath,
+    validationErrors: [],
+  };
+}
+
 export function runTaskOps(workDir, options = {}) {
   if (!workDir) throw new Error('Missing TaskOps work directory');
   const workRoot = resolve(workDir);
@@ -5299,6 +5361,21 @@ export function runTaskOps(workDir, options = {}) {
       .filter(Boolean);
 
     const stoppedAt = isoNow();
+    const workStatusClosure = finalizeWorkStatusForClosure(projectDir, {
+      runId,
+      closedAt: stoppedAt,
+      allowConcurrentTarget,
+    });
+    if (workStatusClosure.updated) {
+      logEvent(eventsPath, {
+        timestamp: stoppedAt, type: 'work_status_closed', runId,
+        workId: parsed.project.id,
+        previousStatus: workStatusClosure.previousStatus,
+        status: workStatusClosure.status,
+        closureState: workStatusClosure.closureState,
+      });
+      appendRunLog(runDir, `${stoppedAt} work_status_closed status=${workStatusClosure.status} closureState=${workStatusClosure.closureState}`);
+    }
     logEvent(eventsPath, {
       timestamp: stoppedAt, type: 'runner_stopped', runId,
       workId: parsed.project.id, stopReason, stepsRun, detail: stopDetail, source: stopSource,
@@ -5313,6 +5390,7 @@ export function runTaskOps(workDir, options = {}) {
       executor,
       loopbackPolicy, maxLoopbacks, loopbacksUsed, actorName,
       partialCompletions,
+      workStatusClosure,
       eventsPath,
       tasks: actions,
       actions,

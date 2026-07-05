@@ -1848,7 +1848,7 @@ function activateVersion(workDir, versionId) {
   writeFileSync(snapshotPath, readFileSync(snapshotPath, 'utf8').replace('versionId: tgv-root-v1', `versionId: ${versionId}`));
 }
 
-function makeOneTaskWork(workDir, { id, taskId = 'task-main', blockedBy = null } = {}) {
+function makeOneTaskWork(workDir, { id, taskId = 'task-main', blockedBy = null, acceptance = null } = {}) {
   run(['init', workDir, '--id', id, '--title', id, '--objective', `Smoke ${id}`, '--language', 'en']);
   const specPath = join(tempRoot, `${id}.json`);
   const task = {
@@ -1864,6 +1864,7 @@ function makeOneTaskWork(workDir, { id, taskId = 'task-main', blockedBy = null }
     order: 1,
   };
   if (blockedBy) task.blockedBy = blockedBy;
+  if (acceptance) task.acceptance = acceptance;
   writeFileSync(specPath, JSON.stringify({
     versionId: 'tgv-root-v2',
     version: 'v2',
@@ -2116,20 +2117,57 @@ if (daemonLoopbackEnable.activation.loopbackPolicy !== 'self' || daemonLoopbackE
 }
 
 const delegatedEntrypointDir = join(tempRoot, 'delegated-entrypoint');
-makeOneTaskWork(delegatedEntrypointDir, { id: 'delegated-entrypoint' });
+const delegatedEntrypointCheckMarker = join(tempRoot, 'delegated-entrypoint-check-marker');
+const delegatedEntrypointCheck = `test -f ${delegatedEntrypointCheckMarker} || { touch ${delegatedEntrypointCheckMarker}; exit 1; }`;
+makeOneTaskWork(delegatedEntrypointDir, {
+  id: 'delegated-entrypoint',
+  acceptance: {
+    mode: 'guarded',
+    expectedOutcome: 'The delegated entrypoint worker reaches runner-verified completion.',
+    requiredChecks: [{ command: delegatedEntrypointCheck }],
+  },
+});
 writeDelegate(delegatedEntrypointDir, { id: 'run-node-delegated-entrypoint', delegateeType: 'self', delegateeRef: 'self', selfDelegate: true });
 const delegatedEntrypointOut = JSON.parse(run([
   'delegate', delegatedEntrypointDir,
   '--foreground',
   '--runtime', 'dry-run',
+  '--verify-checks',
+  '--verify-retries', '1',
   '--max-loopbacks', '1',
-  '--max-steps', '2',
+  '--max-steps', '4',
   '--max-daemon-cycles', '1',
   '--json'
 ]).stdout);
-if (delegatedEntrypointOut.cycles[0].stopReason !== 'all_closed' || delegatedEntrypointOut.cycles[0].claimedItems !== 1) {
-  console.error('high-level delegate entrypoint should reuse daemon run internals');
+const delegatedEntrypointCycle = delegatedEntrypointOut.cycles[0];
+const delegatedEntrypointWave = delegatedEntrypointCycle.waveDetails[0];
+if (delegatedEntrypointCycle.stopReason !== 'all_closed' || delegatedEntrypointCycle.claimedItems !== 1 || delegatedEntrypointWave?.releaseStatus !== 'done' || delegatedEntrypointWave?.targetCompleted !== true) {
+  console.error('high-level delegate entrypoint should reuse daemon run internals and complete the claimed task');
   console.error(delegatedEntrypointOut);
+  process.exit(1);
+}
+const delegatedEntrypointRunDir = join(delegatedEntrypointDir, 'runs', 'run-tgv-root-v2-task-main');
+const delegatedEntrypointReview = parseFrontmatterText(readFileSync(join(delegatedEntrypointRunDir, 'nodes', 'review-run-node-task-main.md'), 'utf8'));
+const delegatedEntrypointRunNode = parseFrontmatterText(readFileSync(join(delegatedEntrypointRunDir, 'nodes', 'run-node-task-main.md'), 'utf8'));
+const delegatedEntrypointTask = parseFrontmatterText(readFileSync(join(delegatedEntrypointDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-main.md'), 'utf8'));
+const delegatedEntrypointEvents = readFileSync(join(delegatedEntrypointRunDir, 'events.jsonl'), 'utf8');
+const delegatedEntrypointRunnerCheck = (delegatedEntrypointRunNode.result?.observed?.checkResults || [])
+  .find((check) => check.command === delegatedEntrypointCheck);
+if (
+  delegatedEntrypointTask.status !== 'done'
+  || delegatedEntrypointReview.reviewReport?.decision !== 'approved'
+  || delegatedEntrypointReview.reviewReport?.verified !== true
+  || delegatedEntrypointRunnerCheck?.status !== 'passed'
+  || delegatedEntrypointRunnerCheck?.verifiedBy !== 'runner'
+  || !delegatedEntrypointEvents.includes('"type":"verify_retry"')
+) {
+  console.error('taskops delegate --foreground should propagate --verify-checks/--verify-retries into the worker path and close with runner-verified evidence');
+  console.error({
+    taskStatus: delegatedEntrypointTask.status,
+    reviewReport: delegatedEntrypointReview.reviewReport,
+    checkResults: delegatedEntrypointRunNode.result?.observed?.checkResults || [],
+    events: delegatedEntrypointEvents,
+  });
   process.exit(1);
 }
 
