@@ -98,7 +98,8 @@ function projectGraph() {
 }
 function projectQueue() {
   if (!WORK) return [];
-  return [...parseProject(WORK).tasks.values()].filter((t) => t.resolverKind === 'human' && !['done', 'cancelled'].includes(t.status)).map((t) => {
+  // only surface a human gate once it is actually READY (its blockers cleared) — not while still blocked upstream
+  return [...parseProject(WORK).tasks.values()].filter((t) => t.resolverKind === 'human' && !['done', 'cancelled', 'blocked'].includes(t.status)).map((t) => {
     const body = safeBody(t.path); const st = deriveExternalResolutionStatus({ resolverKind: 'human', body });
     if (st !== 'waiting' && st !== 'invalid') return null;
     return { id: t.id, title: t.title || t.id, status: st, question: section(body, '## QUESTION'), options: section(body, '## OPTIONS'), escalationBasis: section(body, '## ESCALATION_BASIS') };
