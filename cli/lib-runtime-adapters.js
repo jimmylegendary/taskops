@@ -176,10 +176,14 @@ function normalizeSpawnResult(adapter, command, args, result, timeoutMs) {
 }
 
 function openClawArgs({ agentId, sessionKey, prompt, timeoutMs }) {
+  // openclaw routes on a CONFIGURED agent id (default 'main'), so use that for --agent (overridable via
+  // TASKOPS_OPENCLAW_AGENT); carry TaskOps's per-node id as the --session-key for session isolation.
+  const agent = process.env.TASKOPS_OPENCLAW_AGENT || 'main';
+  const key = sessionKey || agentId || 'taskops';
   const args = [
     'agent',
-    '--agent', agentId,
-    '--session-key', sessionKey,
+    '--agent', agent,
+    '--session-key', key,
     '--message', prompt,
     '--json',
   ];

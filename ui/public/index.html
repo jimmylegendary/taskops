@@ -131,6 +131,7 @@ const COLOR = (t) => {
   if (t.status === 'done') return 'var(--done)';
   if (t.status === 'blocked') return 'var(--block)';
   if (t.runReadiness === 'needs_exploration' || t.runReadiness === 'needs_decomposition' || t.runReadiness === 'needs_prototype') return 'var(--explore)';
+  if (t.status === 'active' || t.status === 'in_progress' || t.status === 'running') return 'var(--run)';
   if (t.status === 'pending' && t.hasRun) return 'var(--run)';
   return 'var(--idle)';
 };
