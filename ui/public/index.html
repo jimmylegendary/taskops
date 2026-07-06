@@ -7,48 +7,47 @@
 <style>
   :root{
     --ground:#0f1216; --panel:#161a20; --panel2:#1c222a; --line:#28303a; --ink:#e6eaf0; --muted:#8a94a3;
-    --done:#22a699; --run:#e0a020; --block:#e05561; --deleg:#d98a2b; --explore:#6f7bd6; --idle:#5a6472;
+    --done:#22a699; --run:#e0a020; --block:#e05561; --deleg:#d98a2b; --explore:#6f7bd6; --idle:#5a6472; --eow:#3fb984;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-    --sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,"Malgun Gothic","Apple SD Gothic Neo",Helvetica,Arial,sans-serif;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:14px}
   .app{display:grid;grid-template-columns:300px 1fr;grid-template-rows:48px 1fr;height:100vh}
-  header{grid-column:1/-1;display:flex;align-items:center;gap:14px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--panel)}
   header .brand{font-family:var(--mono);font-weight:650;letter-spacing:.02em}
-  header .work{font-family:var(--mono);font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40vw}
+  header .work{font-family:var(--mono);font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:26vw}
+  header .lang-pill{font-family:var(--mono);font-size:10.5px;color:var(--explore);border:1px solid #313a63;background:#171a2b;border-radius:20px;padding:2px 8px}
   header .spacer{flex:1}
   .live{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--done);box-shadow:0 0 0 0 rgba(34,166,153,.6);animation:pulse 2s infinite}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--done);animation:pulse 2s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,166,153,.5)}70%{box-shadow:0 0 0 7px rgba(34,166,153,0)}100%{box-shadow:0 0 0 0 rgba(34,166,153,0)}}
   .pill{font-family:var(--mono);font-size:11px;padding:2px 9px;border-radius:20px;border:1px solid var(--line);color:var(--muted)}
   .pill.ok{color:var(--done);border-color:#1f4b46;background:#122420}
+  .hbtn{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 11px;font-size:12.5px;cursor:pointer;font-family:var(--sans)}
+  .hbtn:hover{border-color:var(--muted)}
 
-  /* queue */
-  aside{border-right:1px solid var(--line);background:var(--panel);overflow:auto;display:flex;flex-direction:column}
+  aside{border-right:1px solid var(--line);background:var(--panel);overflow:auto}
   aside h2{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:0;padding:14px 16px 8px;display:flex;align-items:center;gap:8px}
   aside h2 .count{margin-left:auto;background:var(--deleg);color:#151515;border-radius:20px;font-size:11px;padding:0 8px;font-weight:700}
   .qempty{padding:0 16px;color:var(--idle);font-size:12.5px}
   .qcard{margin:6px 12px;padding:11px 12px;border:1px solid var(--line);border-left:3px solid var(--deleg);border-radius:8px;background:var(--panel2);cursor:pointer}
-  .qcard:hover{border-color:var(--deleg)}
-  .qcard.sel{outline:1px solid var(--deleg)}
+  .qcard:hover{border-color:var(--deleg)} .qcard.sel{outline:1px solid var(--deleg)}
   .qcard .qt{font-weight:600;font-size:13px;margin-bottom:3px}
   .qcard .qq{color:var(--muted);font-size:12px;line-height:1.4;max-height:3.2em;overflow:hidden}
   .qcard .qbadge{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--deleg)}
 
   main{position:relative;overflow:auto}
-  svg{display:block;width:100%;height:100%}
-  .node rect{rx:8;stroke-width:1.5}
+  svg#graph{display:block;width:100%;height:100%}
+  .node{cursor:pointer}
   .node text{font-family:var(--sans);font-size:12px;fill:var(--ink)}
   .node .sub{font-family:var(--mono);font-size:9px;fill:var(--muted)}
-  .node{cursor:pointer}
   .node.sel rect{stroke:#fff;stroke-width:2}
-  .edge{stroke:var(--line);stroke-width:1.5;fill:none}
-  .edge.blocks{stroke-dasharray:4 3;stroke:#4a3030}
-  .badge{font-family:var(--mono);font-size:9px}
+  .node .eowdot{}
+  .edge{fill:none} .edge.decompose{stroke:var(--line);stroke-width:1.5} .edge.blocks{stroke:#5a3a3f;stroke-width:1.5;stroke-dasharray:4 3}
+  .rootnode rect{fill:#12161c;stroke:#2f3946} .rootnode text{fill:var(--muted);font-family:var(--mono);font-size:11px}
 
-  /* detail drawer */
-  .detail{position:absolute;top:0;right:0;width:380px;height:100%;background:var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .18s ease;overflow:auto;box-shadow:-8px 0 24px rgba(0,0,0,.3)}
+  .detail{position:fixed;top:48px;right:0;width:400px;height:calc(100vh - 48px);background:var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .18s ease;overflow:auto;box-shadow:-8px 0 24px rgba(0,0,0,.3);z-index:15}
   .detail.open{transform:none}
   .detail .dh{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line)}
   .detail .dh .x{margin-left:auto;cursor:pointer;color:var(--muted);font-size:18px}
@@ -56,76 +55,92 @@
   .detail h3{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
   .detail h3:first-child{margin-top:0}
   .kv{font-size:13px;color:#c7cede;line-height:1.55;white-space:pre-wrap;word-break:break-word}
-  .rn{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--line)}
-  .rn .rtype{font-family:var(--mono);font-size:11px}
-  .rn .st{margin-left:auto;font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:20px;border:1px solid var(--line)}
+  .eowchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--eow);border:1px solid #1f4b3c;background:#0f2019;border-radius:20px;padding:3px 10px}
   textarea,input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:8px 10px;font-family:var(--sans);font-size:13px;margin-top:4px}
   textarea{min-height:56px;resize:vertical}
   .resolve{border:1px solid #4a3a20;border-radius:9px;background:#1a1610;padding:14px;margin-top:6px}
   .resolve .lab{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--deleg)}
   button.submit{margin-top:10px;background:var(--deleg);color:#151515;border:none;border-radius:7px;padding:9px 14px;font-weight:650;cursor:pointer;font-size:13px}
   button.submit:hover{filter:brightness(1.08)}
+  svg.rungraph{width:100%;background:#12161c;border:1px solid var(--line);border-radius:8px}
+  .rg-node text{font-family:var(--mono);font-size:9px;fill:var(--ink)} .rg-edge{stroke:#39424e;stroke-width:1;fill:none}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--done);color:#04140f;padding:9px 16px;border-radius:8px;font-weight:600;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
   .toast.show{opacity:1}
-  .legend{position:absolute;bottom:12px;left:12px;display:flex;gap:12px;font-size:11px;color:var(--muted);background:rgba(22,26,32,.85);border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+  .legend{position:absolute;bottom:12px;left:12px;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--muted);background:rgba(22,26,32,.85);border:1px solid var(--line);border-radius:8px;padding:7px 11px;max-width:70%}
   .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
-  /* folder open */
-  .opener{position:relative}
-  .openbtn{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 12px;font-size:12.5px;cursor:pointer;font-family:var(--sans)}
-  .openbtn:hover{border-color:var(--muted)}
-  .openpanel{display:none;position:absolute;top:36px;right:0;width:360px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;z-index:20;box-shadow:0 12px 32px rgba(0,0,0,.45)}
-  .openpanel.open{display:block}
+  /* popover (open / language) */
+  .pop{position:relative}
+  .poppanel{display:none;position:absolute;top:36px;right:0;width:340px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;z-index:20;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+  .poppanel.open{display:block}
+  .poppanel.lang{width:170px;padding:6px}
   .oplab{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:2px 0 6px}
   .oplab:not(:first-child){margin-top:14px}
-  .oprow{display:flex;gap:6px}
-  .oprow input{margin-top:0;font-family:var(--mono);font-size:12px}
+  .oprow{display:flex;gap:6px} .oprow input{margin-top:0;font-family:var(--mono);font-size:12px}
   .oprow button{background:var(--explore);color:#0c0f16;border:none;border-radius:7px;padding:0 13px;font-weight:650;cursor:pointer;font-size:12.5px}
   .opitem{display:flex;align-items:center;gap:8px;padding:7px 9px;margin-top:5px;border:1px solid var(--line);border-radius:7px;cursor:pointer;font-size:12.5px}
   .opitem:hover{border-color:var(--explore);background:var(--panel2)}
-  .opitem .op-t{font-weight:600}.opitem .op-p{color:var(--muted);font-family:var(--mono);font-size:10.5px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
+  .opitem .op-t{font-weight:600}.opitem .op-p{color:var(--muted);font-family:var(--mono);font-size:10.5px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+  .langitem{padding:8px 10px;border-radius:7px;cursor:pointer;font-size:13px} .langitem:hover{background:var(--panel2)} .langitem.sel{color:var(--explore)}
   .operr{color:var(--block);font-size:11.5px;margin-top:8px}
-  .nowork{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--muted)}
-  .nowork b{color:var(--ink);font-size:15px}
+  .nowork{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--muted)} .nowork b{color:var(--ink);font-size:15px}
 </style>
 </head>
 <body>
 <div class="app">
   <header>
     <span class="brand">TaskOps</span><span class="pill" id="closure">…</span>
-    <span class="work" id="work">no work open</span>
+    <span class="work" id="work"></span><span class="lang-pill" id="contentlang" style="display:none"></span>
     <span class="spacer"></span>
-    <div class="opener">
-      <button class="openbtn" onclick="toggleOpen(event)">📁 Open work…</button>
-      <div class="openpanel" id="openpanel">
-        <div class="oplab">Open a TaskOps work folder</div>
-        <div class="oprow"><input id="oppath" placeholder="/path/to/work" onkeydown="if(event.key==='Enter')openFolder()" /><button onclick="openFolder()">Open</button></div>
-        <div class="oplab">Discover works under a root</div>
-        <div class="oprow"><input id="oproot" placeholder="/path/to/parent" onkeydown="if(event.key==='Enter')scanWorks()" /><button onclick="scanWorks()">Scan</button></div>
+    <div class="pop">
+      <button class="hbtn" id="langbtn" onclick="togglePop(event,'langpanel')">🌐 <span id="langlabel">EN</span></button>
+      <div class="poppanel lang" id="langpanel"></div>
+    </div>
+    <div class="pop">
+      <button class="hbtn" id="openbtn" onclick="togglePop(event,'openpanel')" data-i="openWork">📁</button>
+      <div class="poppanel" id="openpanel">
+        <div class="oplab" data-i="openFolder"></div>
+        <div class="oprow"><input id="oppath" placeholder="/path/to/work" onkeydown="if(event.key==='Enter')openFolder()" /><button onclick="openFolder()" data-i="open"></button></div>
+        <div class="oplab" data-i="discoverRoot"></div>
+        <div class="oprow"><input id="oproot" placeholder="/path/to/parent" onkeydown="if(event.key==='Enter')scanWorks()" /><button onclick="scanWorks()" data-i="scan"></button></div>
         <div id="opworks"></div>
       </div>
     </div>
-    <span class="live"><span class="dot"></span><span id="livetxt">live</span></span>
+    <span class="live"><span class="dot"></span><span id="livetxt" data-i="live"></span></span>
   </header>
   <aside>
-    <h2>Human queue <span class="count" id="qcount">0</span></h2>
+    <h2><span data-i="humanQueue"></span> <span class="count" id="qcount">0</span></h2>
     <div id="queue"></div>
   </aside>
   <main>
     <svg id="graph"></svg>
-    <div class="legend">
-      <span><i style="background:var(--done)"></i>done</span>
-      <span><i style="background:var(--run)"></i>running</span>
-      <span><i style="background:var(--deleg)"></i>awaiting human</span>
-      <span><i style="background:var(--explore)"></i>explore/decompose</span>
-      <span><i style="background:var(--block)"></i>blocked</span>
-    </div>
+    <div class="legend" id="legend"></div>
     <div class="detail" id="detail"><div class="dh"><b id="dtitle"></b><span class="x" onclick="closeDetail()">×</span></div><div class="body" id="dbody"></div></div>
   </main>
 </div>
 <div class="toast" id="toast"></div>
 <script>
 const $ = (id) => document.getElementById(id);
-let selId = null;
+let selId = null, GRAPH = null;
+
+// ---- i18n (UI chrome) ----
+const I18N = {
+  en: { name:'English', live:'live', reconnecting:'reconnecting', humanQueue:'Human queue', awaitingAnswer:'awaiting answer', needsFull:'needs full answer', noQueue:'No pending human delegations.', openWork:'Open work', openFolder:'Open a TaskOps work folder', discoverRoot:'Discover works under a root', open:'Open', scan:'Scan', noWorks:'No TaskOps works found under that root.', noWorkTitle:'No work open', noWorkHint:'Open a TaskOps work folder (top-right) to watch it live.', task:'Task', state:'State', runGraph:'Run graph', decision:'Decision', answer:'Answer the delegation', decisionField:'DECISION (a concrete value)', basisField:'BASIS (why)', submit:'Submit & resume', resolved:'Resolved — task will resume', eow:'End of Work (completion proof)', contentIn:'content in', status:'status', readiness:'readiness', acceptance:'acceptance', resolver:'resolver', delegationL:'delegation', allClosed:'all closed', running:'running', errors:'errors', uiLang:'UI language', lDone:'done', lRunning:'running', lHuman:'awaiting human', lBlocked:'blocked', lDecompose:'group/subtask' },
+  ko: { name:'한국어', live:'실시간', reconnecting:'재연결 중', humanQueue:'인간 큐', awaitingAnswer:'답변 대기', needsFull:'전체 답변 필요', noQueue:'대기 중인 인간 위임이 없습니다.', openWork:'work 열기', openFolder:'TaskOps work 폴더 열기', discoverRoot:'루트 아래 work 탐색', open:'열기', scan:'스캔', noWorks:'해당 루트에 TaskOps work가 없습니다.', noWorkTitle:'열린 work 없음', noWorkHint:'우측 상단에서 TaskOps work 폴더를 열어 실시간으로 보세요.', task:'태스크', state:'상태', runGraph:'런 그래프', decision:'결정', answer:'위임에 답하기', decisionField:'DECISION (구체적 값)', basisField:'BASIS (근거)', submit:'제출하고 재개', resolved:'해결됨 — 태스크가 재개됩니다', eow:'End of Work (완료 증명)', contentIn:'콘텐츠 언어', status:'상태', readiness:'준비도', acceptance:'수용기준', resolver:'해결자', delegationL:'위임', allClosed:'전부 완료', running:'진행 중', errors:'오류', uiLang:'UI 언어', lDone:'완료', lRunning:'진행중', lHuman:'인간 대기', lBlocked:'차단', lDecompose:'그룹/하위' },
+  ja: { name:'日本語', live:'ライブ', reconnecting:'再接続中', humanQueue:'人間キュー', awaitingAnswer:'回答待ち', needsFull:'完全な回答が必要', noQueue:'保留中の人間委任はありません。', openWork:'ワークを開く', openFolder:'TaskOps ワークフォルダを開く', discoverRoot:'ルート配下のワークを探索', open:'開く', scan:'スキャン', noWorks:'そのルートに TaskOps ワークがありません。', noWorkTitle:'開いているワークなし', noWorkHint:'右上から TaskOps ワークフォルダを開いてライブ表示。', task:'タスク', state:'状態', runGraph:'ラングラフ', decision:'決定', answer:'委任に回答', decisionField:'DECISION（具体的な値）', basisField:'BASIS（理由）', submit:'送信して再開', resolved:'解決 — タスクが再開します', eow:'End of Work（完了証明）', contentIn:'コンテンツ言語', status:'状態', readiness:'準備度', acceptance:'受入基準', resolver:'解決者', delegationL:'委任', allClosed:'すべて完了', running:'実行中', errors:'エラー', uiLang:'UI 言語', lDone:'完了', lRunning:'実行中', lHuman:'人間待ち', lBlocked:'ブロック', lDecompose:'グループ/サブ' },
+};
+let LANG = new URLSearchParams(location.search).get('uilang') || localStorage.getItem('taskops-ui-lang') || 'en';
+if (!I18N[LANG]) LANG = 'en';
+const T = (k) => (I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k;
+function applyI18n() {
+  document.documentElement.lang = LANG;
+  $('langlabel').textContent = (LANG || 'en').toUpperCase();
+  document.querySelectorAll('[data-i]').forEach((el) => { const v = T(el.getAttribute('data-i')); if (v) { if (el.id === 'openbtn') el.title = v; else el.textContent = v; } });
+  $('openbtn').innerHTML = '📁';
+  $('legend').innerHTML = [['done','lDone'],['run','lRunning'],['deleg','lHuman'],['block','lBlocked'],['line','lDecompose']].map(([c,k]) => `<span><i style="background:var(--${c})"></i>${esc(T(k))}</span>`).join('');
+  $('langpanel').innerHTML = Object.keys(I18N).map((code) => `<div class="langitem${code===LANG?' sel':''}" onclick="setLang('${code}')">${esc(I18N[code].name)}</div>`).join('');
+}
+function setLang(code) { LANG = code; localStorage.setItem('taskops-ui-lang', code); $('langpanel').classList.remove('open'); applyI18n(); refresh(); }
+
 const COLOR = (t) => {
   if (t.awaitingHuman) return 'var(--deleg)';
   if (t.status === 'done') return 'var(--done)';
@@ -136,89 +151,127 @@ const COLOR = (t) => {
   return 'var(--idle)';
 };
 async function j(u, opt) { const r = await fetch(u, opt); return r.json(); }
+const byOrder = (a, b) => (a.order - b.order) || String(a.id).localeCompare(String(b.id));
 
-function layout(tasks, edges) {
-  // depth via decompose edges from roots
-  const byId = new Map(tasks.map(t => [t.id, t]));
-  const childOf = new Map(); edges.filter(e => e.type === 'decompose').forEach(e => childOf.set(e.to, e.from));
-  const depth = (id, seen = new Set()) => { let d = 0, c = id; while (childOf.has(c) && !seen.has(c)) { seen.add(c); c = childOf.get(c); d++; } return d; };
-  const cols = {};
-  tasks.forEach(t => { const d = depth(t.id); (cols[d] = cols[d] || []).push(t); });
-  Object.values(cols).forEach(col => col.sort((a, b) => (a.order - b.order) || a.id.localeCompare(b.id)));
-  const NW = 172, NH = 46, CW = 250, RH = 70, PADX = 40, PADY = 34;
-  const pos = {};
-  Object.keys(cols).forEach(d => cols[d].forEach((t, i) => { pos[t.id] = { x: PADX + d * CW, y: PADY + i * RH, w: NW, h: NH }; }));
-  const maxRows = Math.max(1, ...Object.values(cols).map(c => c.length));
-  return { pos, width: PADX * 2 + (Math.max(0, ...Object.keys(cols).map(Number)) ) * CW + NW, height: PADY * 2 + maxRows * RH };
+// ---- TREE layout: root(work) -> tasks; a task nests under its decompose-parent, else its first blocker ----
+function treeLayout(tasks, edges) {
+  const parentOf = new Map();
+  edges.filter((e) => e.type === 'decompose').forEach((e) => parentOf.set(e.to, e.from));
+  edges.filter((e) => e.type === 'blocks').forEach((e) => { if (!parentOf.has(e.to)) parentOf.set(e.to, e.from); });
+  // guard against cycles
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const rootChildren = tasks.filter((t) => !parentOf.has(t.id) || !byId.has(parentOf.get(t.id))).sort(byOrder);
+  const childrenOf = (id) => tasks.filter((t) => parentOf.get(t.id) === id).sort(byOrder);
+  const NW = 190, NH = 54, HGAP = 26, VGAP = 96, PADX = 30, PADY = 20;
+  const pos = {}; let leaf = 0;
+  const place = (id, depth, guard) => {
+    if (guard.has(id)) return leaf * (NW + HGAP);
+    guard.add(id);
+    const kids = id === '__root__' ? rootChildren : childrenOf(id);
+    let cx;
+    if (!kids.length) { cx = leaf * (NW + HGAP); leaf += 1; }
+    else { const xs = kids.map((k) => place(k.id, depth + 1, guard)); cx = (xs[0] + xs[xs.length - 1]) / 2; }
+    pos[id] = { x: PADX + cx, y: PADY + depth * VGAP, w: NW, h: NH, depth };
+    return cx;
+  };
+  place('__root__', 0, new Set());
+  const maxLeaf = Math.max(1, leaf), maxDepth = Math.max(...Object.values(pos).map((p) => p.depth));
+  return { pos, width: PADX * 2 + maxLeaf * (NW + HGAP), height: PADY * 2 + (maxDepth + 1) * VGAP };
 }
 
 async function renderGraph() {
-  const g = await j('/api/graph');
-  $('work').textContent = g.noWork ? 'no work open' : (g.workTitle || g.work || '');
+  const g = await j('/api/graph'); GRAPH = g;
+  $('work').textContent = g.noWork ? '' : (g.workTitle || g.work || '');
   $('work').title = g.work || '';
+  $('contentlang').style.display = g.language ? '' : 'none';
+  if (g.language) $('contentlang').textContent = '🖹 ' + T('contentIn') + ': ' + g.language;
   if (g.noWork) { $('closure').textContent = '—'; $('closure').className = 'pill'; $('graph').innerHTML = ''; showNoWork(true); return; }
   showNoWork(false);
-  $('closure').textContent = g.closure && g.closure.complete ? 'all closed' : (g.errors ? g.errors + ' errors' : 'running');
+  $('closure').textContent = g.closure && g.closure.complete ? T('allClosed') : (g.errors ? g.errors + ' ' + T('errors') : T('running'));
   $('closure').className = 'pill' + (g.closure && g.closure.complete ? ' ok' : '');
-  const { pos, width, height } = layout(g.tasks, g.edges);
+  const { pos, width, height } = treeLayout(g.tasks, g.edges);
   const svg = $('graph'); svg.setAttribute('viewBox', `0 0 ${Math.max(width, 600)} ${Math.max(height, 400)}`);
+  const cx = (p) => p.x + p.w / 2;
   let s = '';
-  for (const e of g.edges) { const a = pos[e.from], b = pos[e.to]; if (!a || !b) continue; const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2, mx = (x1 + x2) / 2; s += `<path class="edge ${e.type}" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`; }
-  for (const t of g.tasks) { const p = pos[t.id]; const c = COLOR(t); const sel = t.id === selId ? ' sel' : ''; const badge = t.awaitingHuman ? '<text class="badge" x="' + (p.x + p.w - 16) + '" y="' + (p.y + 15) + '" fill="#151515">👤</text>' : ''; const title = (t.title || t.id).slice(0, 24); s += `<g class="node${sel}" onclick="openTask('${t.id}')"><rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" fill="${c}22" stroke="${c}"/><text x="${p.x + 12}" y="${p.y + 20}">${esc(title)}</text><text class="sub" x="${p.x + 12}" y="${p.y + 35}">${t.status}${t.resolverKind ? ' · ' + t.resolverKind : ''}</text>${badge}</g>`; }
+  // root node
+  const rp = pos['__root__']; if (rp) s += `<g class="rootnode"><rect x="${rp.x}" y="${rp.y + 14}" width="${rp.w}" height="26" rx="7"/><text x="${cx(rp)}" y="${rp.y + 31}" text-anchor="middle">${esc((g.workTitle || 'work').slice(0, 26))}</text></g>`;
+  for (const e of g.edges) { const a = pos[e.from], b = pos[e.to]; if (!a || !b) continue; const x1 = cx(a), y1 = a.y + a.h, x2 = cx(b), y2 = b.y, my = (y1 + y2) / 2; s += `<path class="edge ${e.type}" d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}"/>`; }
+  // root -> its children edges
+  if (rp) for (const t of g.tasks) { const b = pos[t.id]; if (b && b.depth === 1) { const x1 = cx(rp), y1 = rp.y + 40, x2 = cx(b), y2 = b.y, my = (y1 + y2) / 2; s += `<path class="edge decompose" d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}"/>`; } }
+  for (const t of g.tasks) {
+    const p = pos[t.id]; if (!p) continue;
+    const c = COLOR(t); const sel = t.id === selId ? ' sel' : '';
+    const badge = t.awaitingHuman ? `<text x="${p.x + p.w - 16}" y="${p.y + 16}" font-size="12" fill="#151515">👤</text>` : '';
+    const eowMark = t.eow ? `<circle class="eowdot" cx="${p.x + p.w - 13}" cy="${p.y + p.h - 13}" r="5" fill="var(--eow)"><title>EoW: ${esc(t.eow)}</title></circle>` : '';
+    s += `<g class="node${sel}" onclick="openTask('${t.id}')"><rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="9" fill="${c}22" stroke="${c}" stroke-width="1.5"/><text x="${p.x + 12}" y="${p.y + 22}">${esc((t.title || t.id).slice(0, 26))}</text><text class="sub" x="${p.x + 12}" y="${p.y + 39}">${esc(t.status)}${t.resolverKind ? ' · ' + esc(t.resolverKind) : ''}</text>${badge}${eowMark}</g>`;
+  }
   svg.innerHTML = s;
 }
 async function renderQueue() {
   const q = await j('/api/queue');
   $('qcount').textContent = q.length;
-  $('queue').innerHTML = q.length ? q.map(x => `<div class="qcard${x.id === selId ? ' sel' : ''}" onclick="openTask('${x.id}')"><div class="qbadge">${x.status === 'invalid' ? 'needs full answer' : 'awaiting answer'}</div><div class="qt">${esc(x.title)}</div><div class="qq">${esc(x.question || '(no question)')}</div></div>`).join('') : '<div class="qempty">No pending human delegations.</div>';
+  $('queue').innerHTML = q.length ? q.map((x) => `<div class="qcard${x.id === selId ? ' sel' : ''}" onclick="openTask('${x.id}')"><div class="qbadge">${x.status === 'invalid' ? esc(T('needsFull')) : esc(T('awaitingAnswer'))}</div><div class="qt">${esc(x.title)}</div><div class="qq">${esc(x.question || '')}</div></div>`).join('') : `<div class="qempty">${esc(T('noQueue'))}</div>`;
+}
+function renderRunGraph(rg) {
+  if (!rg || !rg.nodes || !rg.nodes.length) return '';
+  const order = { implementation: 0, exploration: 0, decomposition: 0, prototype: 0, delegate: 0, review: 1, eow: 2 };
+  const cols = {}; rg.nodes.forEach((n) => { const c = order[n.type] != null ? order[n.type] : 0; (cols[c] = cols[c] || []).push(n); });
+  const CW = 120, RH = 46, NW = 104, NH = 32, PAD = 12; const pos = {};
+  Object.keys(cols).forEach((c) => cols[c].forEach((n, i) => { pos[n.id] = { x: PAD + c * CW, y: PAD + i * RH }; }));
+  const maxRows = Math.max(1, ...Object.values(cols).map((a) => a.length));
+  const w = PAD * 2 + (Math.max(...Object.keys(cols).map(Number)) ) * CW + NW, h = PAD * 2 + maxRows * RH;
+  const col = (n) => n.type === 'review' ? (n.decision === 'approved' ? 'var(--done)' : 'var(--block)') : n.type === 'eow' ? 'var(--eow)' : n.status === 'done' ? 'var(--done)' : 'var(--run)';
+  let s = '';
+  for (const e of rg.edges) { const a = pos[e.from], b = pos[e.to]; if (!a || !b) continue; s += `<path class="rg-edge" d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + 18},${a.y + NH / 2} ${b.x - 18},${b.y + NH / 2} ${b.x},${b.y + NH / 2}"/>`; }
+  for (const n of rg.nodes) { const p = pos[n.id]; const c = col(n); s += `<g class="rg-node"><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="6" fill="${c}22" stroke="${c}"/><text x="${p.x + 8}" y="${p.y + 14}">${esc(n.type)}</text><text x="${p.x + 8}" y="${p.y + 26}" fill="#8a94a3">${esc(n.decision || n.reason || n.status || '')}</text></g>`; }
+  return `<svg class="rungraph" viewBox="0 0 ${Math.max(w, 200)} ${Math.max(h, 60)}" style="height:${Math.max(h, 60)}px"></svg>`.replace('></svg>', `>${s}</svg>`);
 }
 async function openTask(id) {
   selId = id; renderGraph(); renderQueue();
-  const t = await j('/api/task/' + encodeURIComponent(id));
-  if (!t) return;
+  const t = await j('/api/task/' + encodeURIComponent(id)); if (!t) return;
   $('dtitle').textContent = t.title;
-  let html = `<h3>Task</h3><div class="kv">${esc(t.objective || '(no objective)')}</div>`;
-  html += `<h3>State</h3><div class="kv">status: ${t.status}\nreadiness: ${t.runReadiness || '—'}\nacceptance: ${t.acceptanceMode}\nresolver: ${t.resolverKind || '—'}${t.delegation && t.delegation !== 'none' ? '\ndelegation: ' + t.delegation : ''}</div>`;
-  if (t.runNodes && t.runNodes.length) { html += `<h3>Run graph</h3>` + t.runNodes.map(n => `<div class="rn"><span class="rtype">${n.type}</span><span style="color:var(--muted)">${n.role || ''}</span><span class="st">${n.status}${n.decision ? ' · ' + n.decision : ''}</span></div>`).join(''); }
+  let html = `<h3>${esc(T('task'))}</h3><div class="kv">${esc(t.objective || '')}</div>`;
+  if (t.eow) html += `<h3>${esc(T('eow'))}</h3><span class="eowchip">✓ ${esc(t.eow.reason)}${t.eow.declaredBy ? ' · ' + esc(t.eow.declaredBy) : ''}</span>`;
+  html += `<h3>${esc(T('state'))}</h3><div class="kv">${esc(T('status'))}: ${esc(t.status)}\n${esc(T('readiness'))}: ${esc(t.runReadiness || '—')}\n${esc(T('acceptance'))}: ${esc(t.acceptanceMode)}\n${esc(T('resolver'))}: ${esc(t.resolverKind || '—')}${t.delegation && t.delegation !== 'none' ? '\n' + esc(T('delegationL')) + ': ' + esc(t.delegation) : ''}</div>`;
+  if (t.runGraph && t.runGraph.nodes && t.runGraph.nodes.length) html += `<h3>${esc(T('runGraph'))}</h3>${renderRunGraph(t.runGraph)}`;
   if (t.resolverKind === 'human' && (t.delegation === 'waiting' || t.delegation === 'invalid')) {
-    html += `<h3>Answer the delegation</h3><div class="kv" style="color:var(--muted)">${esc(t.question || '')}</div>
-      <div class="resolve"><div class="lab">DECISION (a concrete value)</div><input id="rdec" placeholder="e.g. Option A" />
-      <div class="lab" style="margin-top:8px">BASIS (why)</div><textarea id="rbas" placeholder="one line"></textarea>
-      <button class="submit" onclick="submitResolve('${t.id}')">Submit &amp; resume</button></div>`;
-  } else if (t.decision) { html += `<h3>Decision</h3><div class="kv">${esc(t.decision)}</div>`; }
+    html += `<h3>${esc(T('answer'))}</h3><div class="kv" style="color:var(--muted)">${esc(t.question || '')}</div>
+      <div class="resolve"><div class="lab">${esc(T('decisionField'))}</div><input id="rdec" />
+      <div class="lab" style="margin-top:8px">${esc(T('basisField'))}</div><textarea id="rbas"></textarea>
+      <button class="submit" onclick="submitResolve('${t.id}')">${esc(T('submit'))}</button></div>`;
+  } else if (t.decision) { html += `<h3>${esc(T('decision'))}</h3><div class="kv">${esc(t.decision)}</div>`; }
   $('dbody').innerHTML = html; $('detail').classList.add('open');
 }
 async function submitResolve(id) {
-  const decision = $('rdec').value, basis = $('rbas').value;
-  const r = await j('/api/resolve/' + encodeURIComponent(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, basis }) });
-  if (r.ok) { toast('Resolved — task will resume'); closeDetail(); refresh(); } else { toast('⚠ ' + (r.error || 'failed')); }
+  const r = await j('/api/resolve/' + encodeURIComponent(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: $('rdec').value, basis: $('rbas').value }) });
+  if (r.ok) { toast(T('resolved')); closeDetail(); refresh(); } else { toast('⚠ ' + (r.error || 'failed')); }
 }
 function closeDetail() { $('detail').classList.remove('open'); selId = null; renderGraph(); renderQueue(); }
 function toast(m) { const t = $('toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2200); }
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-
-// --- open a work folder (TaskOps is file-based; point the UI at any live work — this session, a daemon, another AI) ---
-function toggleOpen(e) { if (e) e.stopPropagation(); $('openpanel').classList.toggle('open'); }
-document.addEventListener('click', (e) => { if (!e.target.closest('.opener')) $('openpanel').classList.remove('open'); });
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+// open / language popovers
+function togglePop(e, id) { if (e) e.stopPropagation(); document.querySelectorAll('.poppanel').forEach((p) => { if (p.id !== id) p.classList.remove('open'); }); $(id).classList.toggle('open'); }
+document.addEventListener('click', (e) => { if (!e.target.closest('.pop')) document.querySelectorAll('.poppanel').forEach((p) => p.classList.remove('open')); });
 async function openWorkPath(path) {
   const r = await j('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-  if (r.ok) { $('openpanel').classList.remove('open'); selId = null; toast('Opened ' + (r.title || path)); refresh(); }
+  if (r.ok) { document.querySelectorAll('.poppanel').forEach((p) => p.classList.remove('open')); selId = null; toast('✓ ' + (r.title || path)); refresh(); }
   else { $('opworks').innerHTML = `<div class="operr">⚠ ${esc(r.error || 'failed')}</div>`; }
 }
 function openFolder() { const p = $('oppath').value.trim(); if (p) openWorkPath(p); }
 async function scanWorks() {
   const root = $('oproot').value.trim(); if (!root) return;
   const works = await j('/api/works?root=' + encodeURIComponent(root));
-  $('opworks').innerHTML = works.length ? works.map(w => `<div class="opitem" onclick="openWorkPath('${w.path.replace(/'/g, "\\'")}')"><span class="op-t">${esc(w.title)}</span><span class="op-p">${esc(w.path)}</span></div>`).join('') : '<div class="operr">No TaskOps works found under that root.</div>';
+  $('opworks').innerHTML = works.length ? works.map((w) => `<div class="opitem" onclick="openWorkPath('${w.path.replace(/'/g, "\\'")}')"><span class="op-t">${esc(w.title)}</span><span class="op-p">${esc(w.path)}</span></div>`).join('') : `<div class="operr">${esc(T('noWorks'))}</div>`;
 }
 function showNoWork(on) {
   let el = $('nowork');
-  if (on && !el) { el = document.createElement('div'); el.id = 'nowork'; el.className = 'nowork'; el.innerHTML = '<b>No work open</b><br>Open a TaskOps work folder (↗ top-right) to watch it live.'; document.querySelector('main').appendChild(el); }
+  if (on && !el) { el = document.createElement('div'); el.id = 'nowork'; el.className = 'nowork'; el.innerHTML = `<b>${esc(T('noWorkTitle'))}</b><br>${esc(T('noWorkHint'))}`; document.querySelector('main').appendChild(el); }
   else if (!on && el) el.remove();
 }
 async function refresh() { await renderGraph(); await renderQueue(); if (selId) openTask(selId); }
+applyI18n();
 refresh().then(() => { const q = new URLSearchParams(location.search); const t = q.get('task'); if (t) openTask(t); const o = q.get('open'); if (o) { $('openpanel').classList.add('open'); $('oproot').value = o; scanWorks(); } });
-try { const es = new EventSource('/api/events'); es.addEventListener('update', () => refresh()); es.onerror = () => { $('livetxt').textContent = 'reconnecting'; }; es.onopen = () => { $('livetxt').textContent = 'live'; }; } catch (e) {}
+try { const es = new EventSource('/api/events'); es.addEventListener('update', () => refresh()); es.onerror = () => { $('livetxt').textContent = T('reconnecting'); }; es.onopen = () => { $('livetxt').textContent = T('live'); }; } catch (e) {}
 </script>
 </body>
 </html>

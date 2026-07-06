@@ -13,6 +13,9 @@ import { parseProject, deriveExternalResolutionStatus, readBody, parseMarkdownFi
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.argv[3] || process.env.PORT || 4317);
+// stay alive through transient fs races while a work is being written by concurrent workers
+process.on('uncaughtException', (e) => { console.error('[uncaught]', e && e.code ? e.code : e); });
+process.on('unhandledRejection', () => {});
 let WORK = process.argv[2] || process.env.TASKOPS_WORK || null;
 let watcher = null;
 
@@ -30,11 +33,40 @@ const safeBody = (p) => { try { return p ? readBody(p) : ''; } catch { return ''
 function isWork(dir) { try { return existsSync(join(dir, 'index.md')) && parseMarkdownFile(join(dir, 'index.md')).entityType === 'work'; } catch { return false; } }
 function workTitle(dir) { try { const w = parseMarkdownFile(join(dir, 'index.md')); return w.title || w.id || dir; } catch { return dir; } }
 
+// the task-level EoW ("End of Work") attesting a task's completion, with its reason (e.g. runner_verified)
+function taskEow(parsed, taskId, tgvId) {
+  for (const e of parsed.eowNodes.values()) {
+    if (e.graphType === 'task' && e.attachedToType === 'task' && e.attachedToId === taskId && (!tgvId || !e.taskGroupVersionId || e.taskGroupVersionId === tgvId)) return e;
+  }
+  return null;
+}
+// the run graph for a single task: its run node(s), their review nodes, EoWs on those nodes, and the edges among them
+function taskRunGraph(parsed, task) {
+  const nodes = [], edges = [], seen = new Set();
+  const pushNode = (n, extra) => { if (seen.has(n.id)) return; seen.add(n.id); nodes.push({ id: n.id, type: n.type, status: n.status, title: n.title || n.id, decision: (n.reviewReport && n.reviewReport.decision) || null, verified: !!(n.reviewReport && n.reviewReport.verified === true), ...extra }); };
+  for (const rr of (task.runRefs || [])) {
+    const run = parsed.runs.get(rr.runId); if (!run) continue;
+    const mine = run.nodes.filter((n) => n.sourceTaskId === task.id || n.id === rr.runNodeId);
+    const mineIds = new Set(mine.map((n) => n.id));
+    const reviews = run.nodes.filter((n) => n.type === 'review' && mineIds.has(n.reviewsRunNodeId));
+    for (const n of mine) pushNode(n, { role: rr.role || null });
+    for (const n of reviews) { pushNode(n); edges.push({ from: n.reviewsRunNodeId, to: n.id, type: 'reviews' }); }
+    for (const e of run.edges) if (seen.has(e.fromRunNodeId) && seen.has(e.toRunNodeId)) edges.push({ from: e.fromRunNodeId, to: e.toRunNodeId, type: e.edgeType });
+    for (const eow of (run.eows || [])) if (seen.has(eow.attachedToId)) { pushNode({ id: eow.id, type: 'eow', status: eow.status, title: eow.reason }, { reason: eow.reason }); edges.push({ from: eow.attachedToId, to: eow.id, type: 'eow' }); }
+  }
+  return { nodes, edges };
+}
+
 // --- SSE + watch (rebinds when the open work changes) ---
 const clients = new Set();
 let lastPing = 0;
 const broadcast = () => { const now = Date.now(); if (now - lastPing < 150) return; lastPing = now; for (const res of clients) res.write('event: update\ndata: {}\n\n'); };
-function rewatch() { try { if (watcher) watcher.close(); } catch {} watcher = null; if (WORK && existsSync(WORK)) { try { watcher = watch(WORK, { recursive: true }, () => broadcast()); } catch {} } }
+function rewatch() {
+  try { if (watcher) watcher.close(); } catch {} watcher = null;
+  if (WORK && existsSync(WORK)) {
+    try { watcher = watch(WORK, { recursive: true }, () => broadcast()); watcher.on('error', () => {}); } catch {}
+  }
+}
 function setWork(path) {
   const abs = resolve(path || '');
   if (!abs || !existsSync(abs)) return { ok: false, error: 'folder not found: ' + path };
@@ -57,11 +89,12 @@ function projectGraph() {
   const parsed = parseProject(WORK);
   const tasks = [...parsed.tasks.values()].map((t) => {
     const delegation = deriveExternalResolutionStatus({ resolverKind: t.resolverKind, body: safeBody(t.path) });
-    return { id: t.id, title: t.title || t.id, status: t.status, runReadiness: t.runReadiness || null, resolverKind: t.resolverKind || null, taskGroupId: t.taskGroupId, order: Number(t.order) || 0, childTaskGroupId: t.childTaskGroupId || null, blockedBy: (Array.isArray(t.blockedBy) ? t.blockedBy : []).map((b) => (b && typeof b === 'object' ? (b.taskId || b.id || b.ref) : b)).filter(Boolean), delegation, hasRun: (t.runRefs || []).length > 0, awaitingHuman: t.resolverKind === 'human' && (delegation === 'waiting' || delegation === 'invalid') };
+    return { id: t.id, title: t.title || t.id, status: t.status, runReadiness: t.runReadiness || null, resolverKind: t.resolverKind || null, taskGroupId: t.taskGroupId, order: Number(t.order) || 0, childTaskGroupId: t.childTaskGroupId || null, blockedBy: (Array.isArray(t.blockedBy) ? t.blockedBy : []).map((b) => (b && typeof b === 'object' ? (b.taskId || b.id || b.ref) : b)).filter(Boolean), delegation, hasRun: (t.runRefs || []).length > 0, awaitingHuman: t.resolverKind === 'human' && (delegation === 'waiting' || delegation === 'invalid'), eow: (taskEow(parsed, t.id, t.taskGroupVersionId) || {}).reason || null };
   });
   const byId = new Map(tasks.map((t) => [t.id, t])); const edges = [];
   for (const t of tasks) { if (t.childTaskGroupId) for (const c of tasks.filter((x) => x.taskGroupId === t.childTaskGroupId)) edges.push({ from: t.id, to: c.id, type: 'decompose' }); for (const b of t.blockedBy) if (byId.has(b)) edges.push({ from: b, to: t.id, type: 'blocks' }); }
-  return { tasks, edges, closure: parsed.closure ? { complete: !!parsed.closure.complete } : null, errors: (parsed.errors || []).length, work: WORK, workTitle: workTitle(WORK) };
+  const rootTgId = (parsed.project && parsed.project.activeRootTaskGroupId) || null;
+  return { tasks, edges, closure: parsed.closure ? { complete: !!parsed.closure.complete } : null, errors: (parsed.errors || []).length, work: WORK, workTitle: workTitle(WORK), language: (parsed.project && parsed.project.language) || null, rootTaskGroupId: rootTgId };
 }
 function projectQueue() {
   if (!WORK) return [];
@@ -73,10 +106,12 @@ function projectQueue() {
 }
 function projectTask(id) {
   if (!WORK) return null;
-  const t = [...parseProject(WORK).tasks.values()].find((x) => x.id === id); if (!t) return null;
+  const parsed = parseProject(WORK);
+  const t = [...parsed.tasks.values()].find((x) => x.id === id); if (!t) return null;
   const body = safeBody(t.path);
   const runNodes = (t.runRefs || []).map((rr) => { const p = join(WORK, 'runs', rr.runId, 'nodes', `${rr.runNodeId}.md`); if (!existsSync(p)) return null; let n; try { n = parseMarkdownFile(p); } catch { return null; } const rp = join(WORK, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`); let review = null; if (existsSync(rp)) { try { review = parseMarkdownFile(rp).reviewReport || null; } catch {} } return { runId: rr.runId, id: rr.runNodeId, type: n.type || 'run', status: n.status, role: rr.role || null, decision: review ? review.decision : null, verified: review ? review.verified === true : null }; }).filter(Boolean);
-  return { id: t.id, title: t.title || t.id, objective: t.objective || '', status: t.status, resolverKind: t.resolverKind || null, runReadiness: t.runReadiness || null, acceptanceMode: (t.acceptance && t.acceptance.mode) || 'informational', delegation: deriveExternalResolutionStatus({ resolverKind: t.resolverKind, body }), question: section(body, '## QUESTION'), decision: section(body, '## DECISION'), runNodes };
+  const eow = taskEow(parsed, t.id, t.taskGroupVersionId);
+  return { id: t.id, title: t.title || t.id, objective: t.objective || '', status: t.status, resolverKind: t.resolverKind || null, runReadiness: t.runReadiness || null, acceptanceMode: (t.acceptance && t.acceptance.mode) || 'informational', delegation: deriveExternalResolutionStatus({ resolverKind: t.resolverKind, body }), question: section(body, '## QUESTION'), decision: section(body, '## DECISION'), runNodes, runGraph: taskRunGraph(parsed, t), eow: eow ? { reason: eow.reason, status: eow.status, declaredBy: eow.declaredBy || null } : null };
 }
 function resolveDelegation(id, decision, basis) {
   if (!WORK) return { ok: false, error: 'no work open' };
