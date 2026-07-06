@@ -6,8 +6,9 @@
 // completion; verify-grounding still gates verified_done). Dependency-free (node + lib-taskops).
 //   usage: node ui/server.js [work-dir] [port]   (work-dir optional — open one from the UI)
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, watch, statSync, readdirSync } from 'node:fs';
-import { join, dirname, extname, resolve } from 'node:path';
+import { join, dirname, extname, resolve, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseProject, deriveExternalResolutionStatus, readBody, parseMarkdownFile } from '../cli/lib-taskops.js';
 
@@ -55,6 +56,56 @@ function taskRunGraph(parsed, task) {
     for (const eow of (run.eows || [])) if (seen.has(eow.attachedToId)) { pushNode({ id: eow.id, type: 'eow', status: eow.status, title: eow.reason }, { reason: eow.reason }); edges.push({ from: eow.attachedToId, to: eow.id, type: 'eow' }); }
   }
   return { nodes, edges };
+}
+
+// replace the content of a `## Heading` section (robust to any placeholder an agent wrote)
+function setSection(body, heading, value) {
+  const lines = String(body).split(/\r?\n/);
+  const i = lines.findIndex((l) => l.trim() === heading);
+  if (i === -1) return null;
+  let j = i + 1; while (j < lines.length && !/^##\s/.test(lines[j])) j += 1;
+  return [...lines.slice(0, i + 1), '', value, '', ...lines.slice(j)].join('\n');
+}
+// a task's produced deliverable: the agent's summary + any markdown it wrote to the run-node workspace
+function taskDeliverable(parsed, task) {
+  const out = { summary: '', files: [] };
+  const add = (abs) => { try { if (abs && existsSync(abs) && statSync(abs).isFile() && !out.files.some((x) => x.path === abs)) out.files.push({ path: abs, name: basename(abs), content: readFileSync(abs, 'utf8').slice(0, 9000) }); } catch {} };
+  for (const rr of (task.runRefs || [])) {
+    const run = parsed.runs.get(rr.runId); if (!run) continue;
+    const node = run.nodes.find((n) => n.id === rr.runNodeId) || run.nodes.find((n) => n.sourceTaskId === task.id);
+    const ap = node && node.result && node.result.artifactPath;
+    if (ap) add(isAbsolute(ap) ? ap : join(WORK, ap));
+    const artDir = join(WORK, 'runs', rr.runId, 'artifacts');
+    try { for (const f of readdirSync(artDir)) { if (f.endsWith('.md')) add(join(artDir, f)); const ws = join(artDir, f, 'workspace'); try { for (const g of readdirSync(ws)) if (g.endsWith('.md')) add(join(ws, g)); } catch {} } } catch {}
+  }
+  out.files.forEach((f) => { delete f.path; });
+  if (out.files.length) out.summary = out.files[0].content.slice(0, 600);
+  return out;
+}
+// for a human gate: its dependency tasks (with deliverables) + the rest of the plan for orientation
+function relatedContext(parsed, task) {
+  const all = [...parsed.tasks.values()];
+  const blockers = (Array.isArray(task.blockedBy) ? task.blockedBy : []).map((b) => (b && typeof b === 'object' ? (b.taskId || b.id || b.ref) : b)).filter(Boolean);
+  const related = all.filter((t) => blockers.includes(t.id)).map((t) => ({ id: t.id, title: t.title || t.id, status: t.status, deliverable: taskDeliverable(parsed, t) }));
+  const others = all.filter((t) => t.id !== task.id && !blockers.includes(t.id) && t.resolverKind !== 'human').map((t) => ({ id: t.id, title: t.title || t.id, status: t.status, done: t.status === 'done' }));
+  return { blockers, related, others };
+}
+// chat with openclaw (async spawn so it doesn't block the server); the session-key keeps per-gate conversation state
+function openclawChat(sessionKey, message) {
+  return new Promise((resolveP) => {
+    const bin = process.env.TASKOPS_OPENCLAW_BIN || 'openclaw';
+    const args = ['agent', '--agent', process.env.TASKOPS_OPENCLAW_AGENT || 'main', '--session-key', sessionKey, '--message', message, '--json', '--timeout', '150'];
+    let out = '', errbuf = ''; let child;
+    try { child = spawn(bin, args, {}); } catch (e) { resolveP('오류: ' + String(e.message || e)); return; }
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { errbuf += d; });
+    child.on('close', () => {
+      let text = '';
+      try { const j = JSON.parse(out.slice(out.indexOf('{'))); text = ((j.result && j.result.payloads) || []).map((p) => p.text).join('\n') || j.summary || ''; } catch {}
+      resolveP(text || '(빈 응답)');
+    });
+    child.on('error', (e) => resolveP('오류: ' + String(e.message || e)));
+  });
 }
 
 // --- SSE + watch (rebinds when the open work changes) ---
@@ -112,7 +163,8 @@ function projectTask(id) {
   const body = safeBody(t.path);
   const runNodes = (t.runRefs || []).map((rr) => { const p = join(WORK, 'runs', rr.runId, 'nodes', `${rr.runNodeId}.md`); if (!existsSync(p)) return null; let n; try { n = parseMarkdownFile(p); } catch { return null; } const rp = join(WORK, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`); let review = null; if (existsSync(rp)) { try { review = parseMarkdownFile(rp).reviewReport || null; } catch {} } return { runId: rr.runId, id: rr.runNodeId, type: n.type || 'run', status: n.status, role: rr.role || null, decision: review ? review.decision : null, verified: review ? review.verified === true : null }; }).filter(Boolean);
   const eow = taskEow(parsed, t.id, t.taskGroupVersionId);
-  return { id: t.id, title: t.title || t.id, objective: t.objective || '', status: t.status, resolverKind: t.resolverKind || null, runReadiness: t.runReadiness || null, acceptanceMode: (t.acceptance && t.acceptance.mode) || 'informational', delegation: deriveExternalResolutionStatus({ resolverKind: t.resolverKind, body }), question: section(body, '## QUESTION'), decision: section(body, '## DECISION'), runNodes, runGraph: taskRunGraph(parsed, t), eow: eow ? { reason: eow.reason, status: eow.status, declaredBy: eow.declaredBy || null } : null };
+  const isHuman = t.resolverKind === 'human';
+  return { id: t.id, title: t.title || t.id, objective: t.objective || '', status: t.status, resolverKind: t.resolverKind || null, runReadiness: t.runReadiness || null, acceptanceMode: (t.acceptance && t.acceptance.mode) || 'informational', delegation: deriveExternalResolutionStatus({ resolverKind: t.resolverKind, body }), ready: t.status !== 'blocked', question: section(body, '## QUESTION'), options: section(body, '## OPTIONS'), escalationBasis: section(body, '## ESCALATION_BASIS'), decision: section(body, '## DECISION'), runNodes, runGraph: taskRunGraph(parsed, t), eow: eow ? { reason: eow.reason, status: eow.status, declaredBy: eow.declaredBy || null } : null, context: isHuman ? relatedContext(parsed, t) : null };
 }
 function resolveDelegation(id, decision, basis) {
   if (!WORK) return { ok: false, error: 'no work open' };
@@ -120,10 +172,18 @@ function resolveDelegation(id, decision, basis) {
   if (!t) return { ok: false, error: 'task not found' };
   if (t.resolverKind !== 'human') return { ok: false, error: 'not a human delegation' };
   if (!String(decision || '').trim()) return { ok: false, error: 'a DECISION is required' };
+  const parsed = parseProject(WORK);
+  if (deriveExternalResolutionStatus({ resolverKind: 'human', body: safeBody(t.path) }) === 'resolved') return { ok: false, error: 'already resolved' };
   let raw; try { raw = readFileSync(t.path, 'utf8'); } catch { return { ok: false, error: 'cannot read task' }; }
-  if (!raw.includes(DECISION_PLACEHOLDER)) return { ok: false, error: 'no open decision block (already resolved?)' };
-  raw = raw.replace(DECISION_PLACEHOLDER, oneLine(decision)).replace(BASIS_PLACEHOLDER, oneLine(basis) || 'resolved via UI');
-  writeFileSync(t.path, raw); return { ok: true };
+  // fill by SECTION (robust to whatever placeholder the agent wrote — e.g. <resolver:human> or the standard one)
+  let next = setSection(raw, '## DECISION', oneLine(decision));
+  if (next == null) { // no DECISION section at all — append the resolution block
+    next = raw.replace(/\s*$/, '') + `\n\n## DECISION\n\n${oneLine(decision)}\n\n## BASIS\n\n${oneLine(basis) || 'resolved via UI'}\n`;
+  } else {
+    const withBasis = setSection(next, '## BASIS', oneLine(basis) || 'resolved via UI');
+    if (withBasis != null) next = withBasis;
+  }
+  writeFileSync(t.path, next); return { ok: true };
 }
 
 // --- HTTP ---
@@ -141,6 +201,19 @@ createServer(async (req, res) => {
     if (p.startsWith('/api/task/')) { const d = projectTask(decodeURIComponent(p.slice('/api/task/'.length))); return d ? json(res, d) : json(res, { error: 'not found' }, 404); }
     if (p === '/api/open' && req.method === 'POST') { const o = JSON.parse((await readBodyReq(req)) || '{}'); const r = setWork(o.path); return json(res, r, r.ok ? 200 : 400); }
     if (p.startsWith('/api/resolve/') && req.method === 'POST') { const o = JSON.parse((await readBodyReq(req)) || '{}'); const r = resolveDelegation(decodeURIComponent(p.slice('/api/resolve/'.length)), o.decision, o.basis); broadcast(); return json(res, r, r.ok ? 200 : 400); }
+    if (p.startsWith('/api/chat/') && req.method === 'POST') {
+      if (!WORK) return json(res, { error: 'no work open' }, 400);
+      const id = decodeURIComponent(p.slice('/api/chat/'.length));
+      const o = JSON.parse((await readBodyReq(req)) || '{}');
+      const parsed = parseProject(WORK); const t = [...parsed.tasks.values()].find((x) => x.id === id);
+      if (!t) return json(res, { error: 'task not found' }, 404);
+      const first = !o.history || o.history.length === 0;
+      let ctxText = '';
+      if (first) { const ctx = relatedContext(parsed, t); ctxText = ['=== 결정 컨텍스트 ===', `결정 태스크: ${t.title}`, `목적: ${t.objective || ''}`, ...ctx.related.map((r) => `\n[근거 산출물 · ${r.title}]\n${r.deliverable.summary || ''}\n${(r.deliverable.files || []).map((f) => f.content).join('\n')}`)].join('\n').slice(0, 9000); }
+      const prompt = `${first ? '당신은 이 인간 결정을 돕는 조언자입니다. 아래 컨텍스트에 근거해 한국어로 간결·정확히 답하고, 요청 시 추천안과 그 이유를 제시하세요.\n\n' + ctxText + '\n\n' : ''}사용자: ${o.message}`;
+      const reply = await openclawChat('taskops-chat-' + id, prompt);
+      return json(res, { reply });
+    }
     if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: update\ndata: {}\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return; }
     const file = p === '/' ? 'index.html' : p.replace(/^\/+/, ''); const fp = join(HERE, 'public', file);
     if (existsSync(fp) && statSync(fp).isFile()) { res.writeHead(200, { 'Content-Type': MIME[extname(fp)] || 'application/octet-stream' }); return res.end(readFileSync(fp)); }

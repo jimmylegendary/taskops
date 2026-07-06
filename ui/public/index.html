@@ -56,6 +56,15 @@
   .detail h3:first-child{margin-top:0}
   .kv{font-size:13px;color:#c7cede;line-height:1.55;white-space:pre-wrap;word-break:break-word}
   .eowchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--eow);border:1px solid #1f4b3c;background:#0f2019;border-radius:20px;padding:3px 10px}
+  .mdbody{font-size:12.5px;line-height:1.55;color:#c7cede;word-break:break-word}
+  .mdbody .mh1,.mdbody .mh2{font-weight:650;color:var(--ink);margin:10px 0 4px} .mdbody .mh1{font-size:14px} .mdbody .mh2{font-size:13px} .mdbody .mh3,.mdbody .mh4{font-weight:600;color:#b9c2d0;margin:8px 0 3px;font-size:12.5px}
+  .mdbody p{margin:5px 0} .mdbody ul{margin:4px 0 4px 16px;padding:0} .mdbody li{margin:2px 0} .mdbody code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-family:var(--mono);font-size:11px}
+  .mdbody .mrow{display:flex;gap:8px;border-bottom:1px solid var(--line);padding:2px 0} .mdbody .mrow span{flex:1;font-size:11.5px}
+  .ctxbox{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--panel2)} .ctxbox summary{cursor:pointer;padding:8px 10px;font-size:12.5px;font-weight:600;list-style:none} .ctxbox .cst{color:var(--done);font-family:var(--mono);font-size:10px;margin-left:6px} .ctxbox .mdbody{padding:0 12px 12px;max-height:300px;overflow:auto}
+  .planlist{display:flex;flex-wrap:wrap;gap:5px} .pchip{font-size:11px;padding:3px 8px;border:1px solid var(--line);border-radius:20px;color:var(--muted);cursor:pointer} .pchip:hover{border-color:var(--muted)} .pchip.d{color:var(--done);border-color:#1f4b46}
+  .chat{background:#12161c;border:1px solid var(--line);border-radius:8px;padding:8px;min-height:50px;max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:6px}
+  .cmsg{font-size:12.5px;line-height:1.5;padding:7px 10px;border-radius:9px;max-width:90%;word-break:break-word} .cmsg.user{align-self:flex-end;background:#22303e;color:#dbe6f2} .cmsg.ai{align-self:flex-start;background:var(--panel2);border:1px solid var(--line)}
+  .chatin{display:flex;gap:6px;margin-top:8px} .chatin input{margin-top:0} .chatin button{background:var(--explore);color:#0c0f16;border:none;border-radius:7px;padding:0 14px;font-weight:650;cursor:pointer;font-size:12.5px}
   textarea,input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:8px 10px;font-family:var(--sans);font-size:13px;margin-top:4px}
   textarea{min-height:56px;resize:vertical}
   .resolve{border:1px solid #4a3a20;border-radius:9px;background:#1a1610;padding:14px;margin-top:6px}
@@ -130,9 +139,9 @@ let notifPrimed = false;
 
 // ---- i18n (UI chrome) ----
 const I18N = {
-  en: { name:'English', live:'live', reconnecting:'reconnecting', humanQueue:'Human queue', awaitingAnswer:'awaiting answer', needsFull:'needs full answer', noQueue:'No pending human delegations.', openWork:'Open work', openFolder:'Open a TaskOps work folder', discoverRoot:'Discover works under a root', open:'Open', scan:'Scan', noWorks:'No TaskOps works found under that root.', noWorkTitle:'No work open', noWorkHint:'Open a TaskOps work folder (top-right) to watch it live.', task:'Task', state:'State', runGraph:'Run graph', decision:'Decision', answer:'Answer the delegation', decisionField:'DECISION (a concrete value)', basisField:'BASIS (why)', submit:'Submit & resume', resolved:'Resolved — task will resume', eow:'End of Work (completion proof)', contentIn:'content in', status:'status', readiness:'readiness', acceptance:'acceptance', resolver:'resolver', delegationL:'delegation', allClosed:'all closed', running:'running', errors:'errors', uiLang:'UI language', lDone:'done', lRunning:'running', lHuman:'awaiting human', lBlocked:'blocked', lDecompose:'group/subtask', readyNow:'ready to answer', upcoming:'upcoming', notifTitle:'TaskOps — human decision needed', zoomHint:'scroll: zoom · drag: pan · dbl-click: reset' },
-  ko: { name:'한국어', live:'실시간', reconnecting:'재연결 중', humanQueue:'인간 큐', awaitingAnswer:'답변 대기', needsFull:'전체 답변 필요', noQueue:'대기 중인 인간 위임이 없습니다.', openWork:'work 열기', openFolder:'TaskOps work 폴더 열기', discoverRoot:'루트 아래 work 탐색', open:'열기', scan:'스캔', noWorks:'해당 루트에 TaskOps work가 없습니다.', noWorkTitle:'열린 work 없음', noWorkHint:'우측 상단에서 TaskOps work 폴더를 열어 실시간으로 보세요.', task:'태스크', state:'상태', runGraph:'런 그래프', decision:'결정', answer:'위임에 답하기', decisionField:'DECISION (구체적 값)', basisField:'BASIS (근거)', submit:'제출하고 재개', resolved:'해결됨 — 태스크가 재개됩니다', eow:'End of Work (완료 증명)', contentIn:'콘텐츠 언어', status:'상태', readiness:'준비도', acceptance:'수용기준', resolver:'해결자', delegationL:'위임', allClosed:'전부 완료', running:'진행 중', errors:'오류', uiLang:'UI 언어', lDone:'완료', lRunning:'진행중', lHuman:'인간 대기', lBlocked:'차단', lDecompose:'그룹/하위', readyNow:'답변 가능', upcoming:'예정', notifTitle:'TaskOps — 인간 결정 필요', zoomHint:'스크롤: 확대/축소 · 드래그: 이동 · 더블클릭: 초기화' },
-  ja: { name:'日本語', live:'ライブ', reconnecting:'再接続中', humanQueue:'人間キュー', awaitingAnswer:'回答待ち', needsFull:'完全な回答が必要', noQueue:'保留中の人間委任はありません。', openWork:'ワークを開く', openFolder:'TaskOps ワークフォルダを開く', discoverRoot:'ルート配下のワークを探索', open:'開く', scan:'スキャン', noWorks:'そのルートに TaskOps ワークがありません。', noWorkTitle:'開いているワークなし', noWorkHint:'右上から TaskOps ワークフォルダを開いてライブ表示。', task:'タスク', state:'状態', runGraph:'ラングラフ', decision:'決定', answer:'委任に回答', decisionField:'DECISION（具体的な値）', basisField:'BASIS（理由）', submit:'送信して再開', resolved:'解決 — タスクが再開します', eow:'End of Work（完了証明）', contentIn:'コンテンツ言語', status:'状態', readiness:'準備度', acceptance:'受入基準', resolver:'解決者', delegationL:'委任', allClosed:'すべて完了', running:'実行中', errors:'エラー', uiLang:'UI 言語', lDone:'完了', lRunning:'実行中', lHuman:'人間待ち', lBlocked:'ブロック', lDecompose:'グループ/サブ', readyNow:'回答可能', upcoming:'予定', notifTitle:'TaskOps — 人間の決定が必要', zoomHint:'スクロール: ズーム · ドラッグ: 移動 · ダブルクリック: リセット' },
+  en: { name:'English', live:'live', reconnecting:'reconnecting', humanQueue:'Human queue', awaitingAnswer:'awaiting answer', needsFull:'needs full answer', noQueue:'No pending human delegations.', openWork:'Open work', openFolder:'Open a TaskOps work folder', discoverRoot:'Discover works under a root', open:'Open', scan:'Scan', noWorks:'No TaskOps works found under that root.', noWorkTitle:'No work open', noWorkHint:'Open a TaskOps work folder (top-right) to watch it live.', task:'Task', state:'State', runGraph:'Run graph', decision:'Decision', answer:'Answer the delegation', decisionField:'DECISION (a concrete value)', basisField:'BASIS (why)', submit:'Submit & resume', resolved:'Resolved — task will resume', eow:'End of Work (completion proof)', contentIn:'content in', status:'status', readiness:'readiness', acceptance:'acceptance', resolver:'resolver', delegationL:'delegation', allClosed:'all closed', running:'running', errors:'errors', uiLang:'UI language', lDone:'done', lRunning:'running', lHuman:'awaiting human', lBlocked:'blocked', lDecompose:'group/subtask', readyNow:'ready to answer', upcoming:'upcoming', notifTitle:'TaskOps — human decision needed', zoomHint:'scroll: zoom · drag: pan · dbl-click: reset', decisionToMake:'Decision to make', why:'Why', contextTitle:'Context — findings from prior tasks', planOverview:'Plan overview', chatTitle:'Discuss with AI', chatPlaceholder:'Ask about the findings, options, a recommendation…', send:'Send', upcomingNote:'Not answerable yet — waiting on', queued:'queued' },
+  ko: { name:'한국어', live:'실시간', reconnecting:'재연결 중', humanQueue:'인간 큐', awaitingAnswer:'답변 대기', needsFull:'전체 답변 필요', noQueue:'대기 중인 인간 위임이 없습니다.', openWork:'work 열기', openFolder:'TaskOps work 폴더 열기', discoverRoot:'루트 아래 work 탐색', open:'열기', scan:'스캔', noWorks:'해당 루트에 TaskOps work가 없습니다.', noWorkTitle:'열린 work 없음', noWorkHint:'우측 상단에서 TaskOps work 폴더를 열어 실시간으로 보세요.', task:'태스크', state:'상태', runGraph:'런 그래프', decision:'결정', answer:'위임에 답하기', decisionField:'DECISION (구체적 값)', basisField:'BASIS (근거)', submit:'제출하고 재개', resolved:'해결됨 — 태스크가 재개됩니다', eow:'End of Work (완료 증명)', contentIn:'콘텐츠 언어', status:'상태', readiness:'준비도', acceptance:'수용기준', resolver:'해결자', delegationL:'위임', allClosed:'전부 완료', running:'진행 중', errors:'오류', uiLang:'UI 언어', lDone:'완료', lRunning:'진행중', lHuman:'인간 대기', lBlocked:'차단', lDecompose:'그룹/하위', readyNow:'답변 가능', upcoming:'예정', notifTitle:'TaskOps — 인간 결정 필요', zoomHint:'스크롤: 확대/축소 · 드래그: 이동 · 더블클릭: 초기화', decisionToMake:'내려야 할 결정', why:'이유', contextTitle:'컨텍스트 — 선행 태스크 결과', planOverview:'전체 계획', chatTitle:'AI와 상의', chatPlaceholder:'결과·옵션·추천을 물어보세요…', send:'전송', upcomingNote:'아직 답변 불가 — 대기 중', queued:'대기(큐)' },
+  ja: { name:'日本語', live:'ライブ', reconnecting:'再接続中', humanQueue:'人間キュー', awaitingAnswer:'回答待ち', needsFull:'完全な回答が必要', noQueue:'保留中の人間委任はありません。', openWork:'ワークを開く', openFolder:'TaskOps ワークフォルダを開く', discoverRoot:'ルート配下のワークを探索', open:'開く', scan:'スキャン', noWorks:'そのルートに TaskOps ワークがありません。', noWorkTitle:'開いているワークなし', noWorkHint:'右上から TaskOps ワークフォルダを開いてライブ表示。', task:'タスク', state:'状態', runGraph:'ラングラフ', decision:'決定', answer:'委任に回答', decisionField:'DECISION（具体的な値）', basisField:'BASIS（理由）', submit:'送信して再開', resolved:'解決 — タスクが再開します', eow:'End of Work（完了証明）', contentIn:'コンテンツ言語', status:'状態', readiness:'準備度', acceptance:'受入基準', resolver:'解決者', delegationL:'委任', allClosed:'すべて完了', running:'実行中', errors:'エラー', uiLang:'UI 言語', lDone:'完了', lRunning:'実行中', lHuman:'人間待ち', lBlocked:'ブロック', lDecompose:'グループ/サブ', readyNow:'回答可能', upcoming:'予定', notifTitle:'TaskOps — 人間の決定が必要', zoomHint:'スクロール: ズーム · ドラッグ: 移動 · ダブルクリック: リセット', decisionToMake:'下すべき決定', why:'理由', contextTitle:'コンテキスト — 先行タスクの結果', planOverview:'計画全体', chatTitle:'AIと相談', chatPlaceholder:'結果・選択肢・推奨を質問…', send:'送信', upcomingNote:'まだ回答不可 — 待機中', queued:'キュー' },
 };
 let LANG = new URLSearchParams(location.search).get('uilang') || localStorage.getItem('taskops-ui-lang') || 'en';
 if (!I18N[LANG]) LANG = 'en';
@@ -229,7 +238,7 @@ async function renderQueue() {
   $('queue').innerHTML = all.length ? all.map(card).join('') : `<div class="qempty">${esc(T('noQueue'))}</div>`;
 }
 function beep() { try { const a = new (window.AudioContext || window.webkitAudioContext)(); const o = a.createOscillator(), g = a.createGain(); o.connect(g); g.connect(a.destination); o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.05; o.start(); o.frequency.setValueAtTime(1320, a.currentTime + 0.12); o.stop(a.currentTime + 0.28); } catch {} }
-function notifyGate(x) { try { if (window.Notification && Notification.permission === 'granted') new Notification(T('notifTitle'), { body: x.title, tag: x.id, requireInteraction: true }); } catch {} beep(); document.title = '🔔 ' + T('notifTitle'); setTimeout(() => { document.title = 'TaskOps · live'; }, 8000); }
+function notifyGate(x) { try { if (window.Notification && Notification.permission === 'granted') { const n = new Notification(T('notifTitle') + ' — ' + x.title, { body: (x.question || '').slice(0, 160) || x.title, tag: x.id, requireInteraction: true }); n.onclick = () => { window.focus(); openTask(x.id); n.close(); }; } } catch {} beep(); document.title = '🔔 ' + T('notifTitle'); setTimeout(() => { document.title = 'TaskOps · live'; }, 8000); }
 function renderRunGraph(rg) {
   if (!rg || !rg.nodes || !rg.nodes.length) return '';
   const order = { implementation: 0, exploration: 0, decomposition: 0, prototype: 0, delegate: 0, review: 1, eow: 2 };
@@ -244,21 +253,60 @@ function renderRunGraph(rg) {
   for (const n of rg.nodes) { const p = pos[n.id]; const c = col(n); s += `<g class="rg-node"><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="6" fill="${c}22" stroke="${c}"/><text x="${p.x + 8}" y="${p.y + 14}">${esc(n.type)}</text><text x="${p.x + 8}" y="${p.y + 26}" fill="#8a94a3">${esc(n.decision || n.reason || n.status || '')}</text></g>`; }
   return `<svg class="rungraph" viewBox="0 0 ${Math.max(w, 200)} ${Math.max(h, 60)}" style="height:${Math.max(h, 60)}px"></svg>`.replace('></svg>', `>${s}</svg>`);
 }
+function statusLabel(t) {
+  const s = t.status;
+  if (s === 'done') return T('lDone');
+  if (s === 'active' || s === 'running' || s === 'in_progress') return T('lRunning');
+  if (s === 'blocked') return T('lBlocked');
+  if (s === 'pending' && (t.runReadiness === 'runnable')) return T('queued');
+  return s;
+}
+// minimal markdown -> html (headings, bold, code, lists, paragraphs)
+function md2html(s) {
+  let h = esc(s || '');
+  h = h.replace(/^#{4,6}\s+(.*)$/gm, '<div class="mh4">$1</div>').replace(/^###\s+(.*)$/gm, '<div class="mh3">$1</div>').replace(/^##\s+(.*)$/gm, '<div class="mh2">$1</div>').replace(/^#\s+(.*)$/gm, '<div class="mh1">$1</div>');
+  h = h.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  h = h.replace(/^\s*[-*]\s+(.*)$/gm, '<li>$1</li>').replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
+  h = h.replace(/^\s*\|(.+)\|\s*$/gm, (m) => '<div class="mrow">' + m.split('|').filter((x) => x.trim()).map((c) => `<span>${c.trim()}</span>`).join('') + '</div>');
+  return h.split(/\n{2,}/).map((b) => /<(div|ul|li)/.test(b) ? b : '<p>' + b.replace(/\n/g, '<br>') + '</p>').join('');
+}
 async function openTask(id) {
   selId = id; renderGraph(); renderQueue();
   const t = await j('/api/task/' + encodeURIComponent(id)); if (!t) return;
   $('dtitle').textContent = t.title;
   let html = `<h3>${esc(T('task'))}</h3><div class="kv">${esc(t.objective || '')}</div>`;
   if (t.eow) html += `<h3>${esc(T('eow'))}</h3><span class="eowchip">✓ ${esc(t.eow.reason)}${t.eow.declaredBy ? ' · ' + esc(t.eow.declaredBy) : ''}</span>`;
-  html += `<h3>${esc(T('state'))}</h3><div class="kv">${esc(T('status'))}: ${esc(t.status)}\n${esc(T('readiness'))}: ${esc(t.runReadiness || '—')}\n${esc(T('acceptance'))}: ${esc(t.acceptanceMode)}\n${esc(T('resolver'))}: ${esc(t.resolverKind || '—')}${t.delegation && t.delegation !== 'none' ? '\n' + esc(T('delegationL')) + ': ' + esc(t.delegation) : ''}</div>`;
+  html += `<h3>${esc(T('state'))}</h3><div class="kv">${esc(T('status'))}: ${esc(statusLabel(t))}\n${esc(T('acceptance'))}: ${esc(t.acceptanceMode)}${t.resolverKind ? '\n' + esc(T('resolver')) + ': ' + esc(t.resolverKind) : ''}${t.delegation && t.delegation !== 'none' ? '\n' + esc(T('delegationL')) + ': ' + esc(t.delegation) : ''}</div>`;
   if (t.runGraph && t.runGraph.nodes && t.runGraph.nodes.length) html += `<h3>${esc(T('runGraph'))}</h3>${renderRunGraph(t.runGraph)}`;
-  if (t.resolverKind === 'human' && (t.delegation === 'waiting' || t.delegation === 'invalid')) {
-    html += `<h3>${esc(T('answer'))}</h3><div class="kv" style="color:var(--muted)">${esc(t.question || '')}</div>
-      <div class="resolve"><div class="lab">${esc(T('decisionField'))}</div><input id="rdec" />
-      <div class="lab" style="margin-top:8px">${esc(T('basisField'))}</div><textarea id="rbas"></textarea>
-      <button class="submit" onclick="submitResolve('${t.id}')">${esc(T('submit'))}</button></div>`;
-  } else if (t.decision) { html += `<h3>${esc(T('decision'))}</h3><div class="kv">${esc(t.decision)}</div>`; }
+  if (t.resolverKind === 'human') html += humanGateHtml(t);
+  else if (t.decision) html += `<h3>${esc(T('decision'))}</h3><div class="kv">${esc(t.decision)}</div>`;
   $('dbody').innerHTML = html; $('detail').classList.add('open');
+  if (t.resolverKind === 'human') renderChat(t.id);
+}
+function humanGateHtml(t) {
+  const ready = t.ready && (t.delegation === 'waiting' || t.delegation === 'invalid');
+  let h = `<h3>${esc(T('decisionToMake'))}</h3><div class="kv">${esc(t.question || t.objective || '')}</div>`;
+  if (t.options) h += `<div class="mdbody" style="margin-top:6px">${md2html(t.options)}</div>`;
+  if (t.escalationBasis) h += `<div class="kv" style="color:var(--muted);margin-top:6px"><b>${esc(T('why'))}:</b> ${esc(t.escalationBasis)}</div>`;
+  const rel = (t.context && t.context.related) || [];
+  h += `<h3>${esc(T('contextTitle'))}</h3>`;
+  h += rel.length ? rel.map((r) => `<details class="ctxbox" open><summary>📎 ${esc(r.title)} <span class="cst">${esc(r.status)}</span></summary><div class="mdbody">${md2html((r.deliverable.files || []).map((f) => f.content).join('\n\n') || r.deliverable.summary || '—')}</div></details>`).join('') : `<div class="kv" style="color:var(--idle)">—</div>`;
+  const others = (t.context && t.context.others) || [];
+  if (others.length) h += `<h3>${esc(T('planOverview'))}</h3><div class="planlist">${others.map((o) => `<span class="pchip${o.done ? ' d' : ''}" onclick="openTask('${o.id}')">${o.done ? '✓ ' : ''}${esc(o.title)}</span>`).join('')}</div>`;
+  h += `<h3>${esc(T('chatTitle'))}</h3><div class="chat" id="chatlog"></div><div class="chatin"><input id="chatmsg" placeholder="${esc(T('chatPlaceholder'))}" onkeydown="if(event.key==='Enter')sendChat('${t.id}')" /><button onclick="sendChat('${t.id}')">${esc(T('send'))}</button></div>`;
+  if (ready) h += `<h3>${esc(T('answer'))}</h3><div class="resolve"><div class="lab">${esc(T('decisionField'))}</div><input id="rdec" /><div class="lab" style="margin-top:8px">${esc(T('basisField'))}</div><textarea id="rbas"></textarea><button class="submit" onclick="submitResolve('${t.id}')">${esc(T('submit'))}</button></div>`;
+  else h += `<h3>${esc(T('answer'))}</h3><div class="kv" style="color:var(--deleg)">${esc(T('upcomingNote'))}${(t.context && t.context.blockers || []).length ? ' — ' + esc(t.context.blockers.join(', ')) : ''}</div>`;
+  return h;
+}
+const chatState = {};
+function renderChat(id) { const log = $('chatlog'); if (!log) return; const msgs = chatState[id] || []; log.innerHTML = msgs.map((m) => `<div class="cmsg ${m.role}">${m.role === 'ai' ? md2html(m.text) : esc(m.text)}</div>`).join(''); log.scrollTop = log.scrollHeight; }
+async function sendChat(id) {
+  const inp = $('chatmsg'); if (!inp) return; const msg = inp.value.trim(); if (!msg) return; inp.value = '';
+  chatState[id] = chatState[id] || []; const hist = chatState[id].slice();
+  chatState[id].push({ role: 'user', text: msg }); chatState[id].push({ role: 'ai', text: '…' }); renderChat(id);
+  try { const r = await j('/api/chat/' + encodeURIComponent(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg, history: hist }) }); chatState[id].pop(); chatState[id].push({ role: 'ai', text: r.reply || r.error || '(응답 없음)' }); }
+  catch (e) { chatState[id].pop(); chatState[id].push({ role: 'ai', text: '오류: ' + e.message }); }
+  renderChat(id);
 }
 async function submitResolve(id) {
   const r = await j('/api/resolve/' + encodeURIComponent(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: $('rdec').value, basis: $('rbas').value }) });
