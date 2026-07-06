@@ -2362,6 +2362,23 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
   ], budget, { actionKind: 'execute', allowPartialRequest: true });
 }
 
+// Coarse-first shape contract injected into the decompose prompt when the task carries an expectedDepth. It tells
+// the agent to split a coarse task into a few big, still-decomposable sub-goals (deepening tree), not a flat leaf fan.
+function decompositionShapeContractLines(task) {
+  const plan = normalizeExpectedPlan(task?.expectedPlan);
+  const parentDepth = plan.ok ? plan.value.expectedDepth : null;
+  if (parentDepth == null) return [];
+  const childDepth = Math.max(0, parentDepth - 1);
+  const lines = [
+    '',
+    'DECOMPOSITION SHAPE CONTRACT (enforced) — decompose COARSE-FIRST, ONE level only:',
+    `- This task is at expectedPlan.expectedDepth=${parentDepth}. Split it into a SMALL number of BIG sub-goals (2-5 children; never more than 7). Each child is a milestone-sized outcome, NOT a single runnable action.`,
+    `- Every child needs its own expectedPlan. Set expectedDepth=${childDepth} and runReadiness=needs_decomposition for a child that still contains multiple steps or unknowns (the runner decomposes it again later). Set expectedDepth=0 and runReadiness=runnable ONLY for a child that is truly atomic (one execution turn, no internal sub-steps). Every child's expectedDepth MUST be < ${parentDepth}.`,
+  ];
+  if (parentDepth >= 2) lines.push(`- This task is COARSE (depth ${parentDepth} >= 2): its children must be sub-goals, so MOST/all children should be expectedDepth>=1 needs_decomposition. Do NOT flatten it into many runnable leaves in one step; regroup into a few coarse sub-goals.`);
+  return lines;
+}
+
 export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null, blockerCatalog = [] }) {
   if (!projectDir) throw new Error('Missing projectDir for decomposition prompt');
   const workDirForPrompt = resolve(projectDir);
@@ -2388,6 +2405,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     ...childTaskUncertaintySchemaPromptLines(),
     ...childTaskExpectedPlanPromptLines(),
     ...childTaskBlockedByPromptLines(versionId, blockerCatalog),
+    ...decompositionShapeContractLines(task),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
   ], budget, { actionKind: 'decompose' });

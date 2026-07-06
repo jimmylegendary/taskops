@@ -49,8 +49,10 @@
 
   .detail{position:fixed;top:48px;right:0;width:400px;height:calc(100vh - 48px);background:var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .18s ease;overflow:auto;box-shadow:-8px 0 24px rgba(0,0,0,.3);z-index:15}
   .detail.open{transform:none}
-  .detail .dh{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line)}
+  .detail.wide{width:min(1040px,74vw)} .detail.full{width:calc(100vw - 300px)}
+  .detail .dh{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line)}
   .detail .dh .x{margin-left:auto;cursor:pointer;color:var(--muted);font-size:18px}
+  .detail .dh .exp{cursor:pointer;color:var(--muted);font-size:16px;transform:rotate(90deg)} .detail .dh .exp:hover{color:var(--ink)}
   .detail .body{padding:16px}
   .detail h3{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
   .detail h3:first-child{margin-top:0}
@@ -65,6 +67,11 @@
   .chat{background:#12161c;border:1px solid var(--line);border-radius:8px;padding:8px;min-height:50px;max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:6px}
   .cmsg{font-size:12.5px;line-height:1.5;padding:7px 10px;border-radius:9px;max-width:90%;word-break:break-word} .cmsg.user{align-self:flex-end;background:#22303e;color:#dbe6f2} .cmsg.ai{align-self:flex-start;background:var(--panel2);border:1px solid var(--line)}
   .chatin{display:flex;gap:6px;margin-top:8px} .chatin input{margin-top:0} .chatin button{background:var(--explore);color:#0c0f16;border:none;border-radius:7px;padding:0 14px;font-weight:650;cursor:pointer;font-size:12.5px}
+  .brief{border:1px solid #3a4a2a;border-radius:9px;background:#131a10;padding:12px}
+  .tldr{font-size:13.5px;color:#e6eaf0;line-height:1.5;margin-bottom:10px} .tldr .tl{font-family:var(--mono);font-size:10px;font-weight:700;color:#9bd06a;background:#1c2a12;border:1px solid #3a4a2a;border-radius:5px;padding:1px 6px;margin-right:6px}
+  .btblwrap{overflow-x:auto} .btbl{width:100%;border-collapse:collapse;font-size:11.5px} .btbl th{text-align:left;color:var(--muted);font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;padding:4px 8px;border-bottom:1px solid var(--line)} .btbl td{padding:5px 8px;border-bottom:1px solid var(--line);color:#c7cede;vertical-align:top} .btbl tr.rec td{background:#16220f;color:#dfeecd}
+  .brec{margin-top:10px;font-size:12.5px;color:#b9e08a} .brec b{color:#cdf0a0} .usebtn{background:var(--done);color:#04140f;border:none;border-radius:6px;padding:2px 9px;font-size:11px;font-weight:650;cursor:pointer;margin-left:6px}
+  .briefloading{font-size:12px;color:var(--muted);padding:8px;font-style:italic}
   textarea,input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:8px 10px;font-family:var(--sans);font-size:13px;margin-top:4px}
   textarea{min-height:56px;resize:vertical}
   .resolve{border:1px solid #4a3a20;border-radius:9px;background:#1a1610;padding:14px;margin-top:6px}
@@ -126,7 +133,7 @@
     <svg id="graph"></svg>
     <div class="zoomhint" id="zoomhint"></div>
     <div class="legend" id="legend"></div>
-    <div class="detail" id="detail"><div class="dh"><b id="dtitle"></b><span class="x" onclick="closeDetail()">×</span></div><div class="body" id="dbody"></div></div>
+    <div class="detail" id="detail"><div class="dh"><span class="exp" id="expbtn" onclick="toggleWide()" title="expand">⤢</span><b id="dtitle"></b><span class="x" onclick="closeDetail()">×</span></div><div class="body" id="dbody"></div></div>
   </main>
 </div>
 <div class="toast" id="toast"></div>
@@ -139,9 +146,9 @@ let notifPrimed = false;
 
 // ---- i18n (UI chrome) ----
 const I18N = {
-  en: { name:'English', live:'live', reconnecting:'reconnecting', humanQueue:'Human queue', awaitingAnswer:'awaiting answer', needsFull:'needs full answer', noQueue:'No pending human delegations.', openWork:'Open work', openFolder:'Open a TaskOps work folder', discoverRoot:'Discover works under a root', open:'Open', scan:'Scan', noWorks:'No TaskOps works found under that root.', noWorkTitle:'No work open', noWorkHint:'Open a TaskOps work folder (top-right) to watch it live.', task:'Task', state:'State', runGraph:'Run graph', decision:'Decision', answer:'Answer the delegation', decisionField:'DECISION (a concrete value)', basisField:'BASIS (why)', submit:'Submit & resume', resolved:'Resolved — task will resume', eow:'End of Work (completion proof)', contentIn:'content in', status:'status', readiness:'readiness', acceptance:'acceptance', resolver:'resolver', delegationL:'delegation', allClosed:'all closed', running:'running', errors:'errors', uiLang:'UI language', lDone:'done', lRunning:'running', lHuman:'awaiting human', lBlocked:'blocked', lDecompose:'group/subtask', readyNow:'ready to answer', upcoming:'upcoming', notifTitle:'TaskOps — human decision needed', zoomHint:'scroll: zoom · drag: pan · dbl-click: reset', decisionToMake:'Decision to make', why:'Why', contextTitle:'Context — findings from prior tasks', planOverview:'Plan overview', chatTitle:'Discuss with AI', chatPlaceholder:'Ask about the findings, options, a recommendation…', send:'Send', upcomingNote:'Not answerable yet — waiting on', queued:'queued' },
-  ko: { name:'한국어', live:'실시간', reconnecting:'재연결 중', humanQueue:'인간 큐', awaitingAnswer:'답변 대기', needsFull:'전체 답변 필요', noQueue:'대기 중인 인간 위임이 없습니다.', openWork:'work 열기', openFolder:'TaskOps work 폴더 열기', discoverRoot:'루트 아래 work 탐색', open:'열기', scan:'스캔', noWorks:'해당 루트에 TaskOps work가 없습니다.', noWorkTitle:'열린 work 없음', noWorkHint:'우측 상단에서 TaskOps work 폴더를 열어 실시간으로 보세요.', task:'태스크', state:'상태', runGraph:'런 그래프', decision:'결정', answer:'위임에 답하기', decisionField:'DECISION (구체적 값)', basisField:'BASIS (근거)', submit:'제출하고 재개', resolved:'해결됨 — 태스크가 재개됩니다', eow:'End of Work (완료 증명)', contentIn:'콘텐츠 언어', status:'상태', readiness:'준비도', acceptance:'수용기준', resolver:'해결자', delegationL:'위임', allClosed:'전부 완료', running:'진행 중', errors:'오류', uiLang:'UI 언어', lDone:'완료', lRunning:'진행중', lHuman:'인간 대기', lBlocked:'차단', lDecompose:'그룹/하위', readyNow:'답변 가능', upcoming:'예정', notifTitle:'TaskOps — 인간 결정 필요', zoomHint:'스크롤: 확대/축소 · 드래그: 이동 · 더블클릭: 초기화', decisionToMake:'내려야 할 결정', why:'이유', contextTitle:'컨텍스트 — 선행 태스크 결과', planOverview:'전체 계획', chatTitle:'AI와 상의', chatPlaceholder:'결과·옵션·추천을 물어보세요…', send:'전송', upcomingNote:'아직 답변 불가 — 대기 중', queued:'대기(큐)' },
-  ja: { name:'日本語', live:'ライブ', reconnecting:'再接続中', humanQueue:'人間キュー', awaitingAnswer:'回答待ち', needsFull:'完全な回答が必要', noQueue:'保留中の人間委任はありません。', openWork:'ワークを開く', openFolder:'TaskOps ワークフォルダを開く', discoverRoot:'ルート配下のワークを探索', open:'開く', scan:'スキャン', noWorks:'そのルートに TaskOps ワークがありません。', noWorkTitle:'開いているワークなし', noWorkHint:'右上から TaskOps ワークフォルダを開いてライブ表示。', task:'タスク', state:'状態', runGraph:'ラングラフ', decision:'決定', answer:'委任に回答', decisionField:'DECISION（具体的な値）', basisField:'BASIS（理由）', submit:'送信して再開', resolved:'解決 — タスクが再開します', eow:'End of Work（完了証明）', contentIn:'コンテンツ言語', status:'状態', readiness:'準備度', acceptance:'受入基準', resolver:'解決者', delegationL:'委任', allClosed:'すべて完了', running:'実行中', errors:'エラー', uiLang:'UI 言語', lDone:'完了', lRunning:'実行中', lHuman:'人間待ち', lBlocked:'ブロック', lDecompose:'グループ/サブ', readyNow:'回答可能', upcoming:'予定', notifTitle:'TaskOps — 人間の決定が必要', zoomHint:'スクロール: ズーム · ドラッグ: 移動 · ダブルクリック: リセット', decisionToMake:'下すべき決定', why:'理由', contextTitle:'コンテキスト — 先行タスクの結果', planOverview:'計画全体', chatTitle:'AIと相談', chatPlaceholder:'結果・選択肢・推奨を質問…', send:'送信', upcomingNote:'まだ回答不可 — 待機中', queued:'キュー' },
+  en: { name:'English', live:'live', reconnecting:'reconnecting', humanQueue:'Human queue', awaitingAnswer:'awaiting answer', needsFull:'needs full answer', noQueue:'No pending human delegations.', openWork:'Open work', openFolder:'Open a TaskOps work folder', discoverRoot:'Discover works under a root', open:'Open', scan:'Scan', noWorks:'No TaskOps works found under that root.', noWorkTitle:'No work open', noWorkHint:'Open a TaskOps work folder (top-right) to watch it live.', task:'Task', state:'State', runGraph:'Run graph', decision:'Decision', answer:'Answer the delegation', decisionField:'DECISION (a concrete value)', basisField:'BASIS (why)', submit:'Submit & resume', resolved:'Resolved — task will resume', eow:'End of Work (completion proof)', contentIn:'content in', status:'status', readiness:'readiness', acceptance:'acceptance', resolver:'resolver', delegationL:'delegation', allClosed:'all closed', running:'running', errors:'errors', uiLang:'UI language', lDone:'done', lRunning:'running', lHuman:'awaiting human', lBlocked:'blocked', lDecompose:'group/subtask', readyNow:'ready to answer', upcoming:'upcoming', notifTitle:'TaskOps — human decision needed', zoomHint:'scroll: zoom · drag: pan · dbl-click: reset', decisionToMake:'Decision to make', why:'Why', contextTitle:'Context — findings from prior tasks', planOverview:'Plan overview', chatTitle:'Discuss with AI', chatPlaceholder:'Ask about the findings, options, a recommendation…', send:'Send', upcomingNote:'Not answerable yet — waiting on', queued:'queued', briefLoading:'preparing a decision brief…', briefFail:'(could not build a brief — use the chat)', bOption:'Option', bPros:'Pros', bCons:'Cons / risks', bFit:'Fits when', bRecommend:'Recommended', bUse:'use' },
+  ko: { name:'한국어', live:'실시간', reconnecting:'재연결 중', humanQueue:'인간 큐', awaitingAnswer:'답변 대기', needsFull:'전체 답변 필요', noQueue:'대기 중인 인간 위임이 없습니다.', openWork:'work 열기', openFolder:'TaskOps work 폴더 열기', discoverRoot:'루트 아래 work 탐색', open:'열기', scan:'스캔', noWorks:'해당 루트에 TaskOps work가 없습니다.', noWorkTitle:'열린 work 없음', noWorkHint:'우측 상단에서 TaskOps work 폴더를 열어 실시간으로 보세요.', task:'태스크', state:'상태', runGraph:'런 그래프', decision:'결정', answer:'위임에 답하기', decisionField:'DECISION (구체적 값)', basisField:'BASIS (근거)', submit:'제출하고 재개', resolved:'해결됨 — 태스크가 재개됩니다', eow:'End of Work (완료 증명)', contentIn:'콘텐츠 언어', status:'상태', readiness:'준비도', acceptance:'수용기준', resolver:'해결자', delegationL:'위임', allClosed:'전부 완료', running:'진행 중', errors:'오류', uiLang:'UI 언어', lDone:'완료', lRunning:'진행중', lHuman:'인간 대기', lBlocked:'차단', lDecompose:'그룹/하위', readyNow:'답변 가능', upcoming:'예정', notifTitle:'TaskOps — 인간 결정 필요', zoomHint:'스크롤: 확대/축소 · 드래그: 이동 · 더블클릭: 초기화', decisionToMake:'내려야 할 결정', why:'이유', contextTitle:'컨텍스트 — 선행 태스크 결과', planOverview:'전체 계획', chatTitle:'AI와 상의', chatPlaceholder:'결과·옵션·추천을 물어보세요…', send:'전송', upcomingNote:'아직 답변 불가 — 대기 중', queued:'대기(큐)', briefLoading:'결정 브리핑 준비 중…', briefFail:'(브리핑 생성 실패 — 채팅으로 상의하세요)', bOption:'옵션', bPros:'장점', bCons:'단점/리스크', bFit:'적합 상황', bRecommend:'추천', bUse:'사용' },
+  ja: { name:'日本語', live:'ライブ', reconnecting:'再接続中', humanQueue:'人間キュー', awaitingAnswer:'回答待ち', needsFull:'完全な回答が必要', noQueue:'保留中の人間委任はありません。', openWork:'ワークを開く', openFolder:'TaskOps ワークフォルダを開く', discoverRoot:'ルート配下のワークを探索', open:'開く', scan:'スキャン', noWorks:'そのルートに TaskOps ワークがありません。', noWorkTitle:'開いているワークなし', noWorkHint:'右上から TaskOps ワークフォルダを開いてライブ表示。', task:'タスク', state:'状態', runGraph:'ラングラフ', decision:'決定', answer:'委任に回答', decisionField:'DECISION（具体的な値）', basisField:'BASIS（理由）', submit:'送信して再開', resolved:'解決 — タスクが再開します', eow:'End of Work（完了証明）', contentIn:'コンテンツ言語', status:'状態', readiness:'準備度', acceptance:'受入基準', resolver:'解決者', delegationL:'委任', allClosed:'すべて完了', running:'実行中', errors:'エラー', uiLang:'UI 言語', lDone:'完了', lRunning:'実行中', lHuman:'人間待ち', lBlocked:'ブロック', lDecompose:'グループ/サブ', readyNow:'回答可能', upcoming:'予定', notifTitle:'TaskOps — 人間の決定が必要', zoomHint:'スクロール: ズーム · ドラッグ: 移動 · ダブルクリック: リセット', decisionToMake:'下すべき決定', why:'理由', contextTitle:'コンテキスト — 先行タスクの結果', planOverview:'計画全体', chatTitle:'AIと相談', chatPlaceholder:'結果・選択肢・推奨を質問…', send:'送信', upcomingNote:'まだ回答不可 — 待機中', queued:'キュー', briefLoading:'決定ブリーフを準備中…', briefFail:'(ブリーフ生成失敗 — チャットで相談)', bOption:'選択肢', bPros:'長所', bCons:'短所/リスク', bFit:'適する状況', bRecommend:'推奨', bUse:'使用' },
 };
 let LANG = new URLSearchParams(location.search).get('uilang') || localStorage.getItem('taskops-ui-lang') || 'en';
 if (!I18N[LANG]) LANG = 'en';
@@ -281,11 +288,31 @@ async function openTask(id) {
   if (t.resolverKind === 'human') html += humanGateHtml(t);
   else if (t.decision) html += `<h3>${esc(T('decision'))}</h3><div class="kv">${esc(t.decision)}</div>`;
   $('dbody').innerHTML = html; $('detail').classList.add('open');
-  if (t.resolverKind === 'human') renderChat(t.id);
+  if (t.resolverKind === 'human') { renderChat(t.id); loadBrief(t.id); }
 }
+const briefCache = {};
+async function loadBrief(id) {
+  const box = $('briefbox'); if (!box) return;
+  if (briefCache[id]) { box.innerHTML = renderBrief(briefCache[id]); return; }
+  box.innerHTML = `<div class="briefloading">⏳ ${esc(T('briefLoading'))}</div>`;
+  try {
+    const r = await j('/api/brief/' + encodeURIComponent(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (selId !== id) return; const b = $('briefbox'); if (!b) return;
+    if (r.brief) { briefCache[id] = r.brief; b.innerHTML = renderBrief(r.brief); } else { b.innerHTML = `<div class="briefloading">${esc(T('briefFail'))}</div>`; }
+  } catch (e) { const b = $('briefbox'); if (b) b.innerHTML = ''; }
+}
+function renderBrief(b) {
+  const rows = (b.options || []).map((o) => `<tr class="${o.name === b.recommend ? 'rec' : ''}"><td>${o.name === b.recommend ? '★ ' : ''}${esc(o.name || '')}</td><td>${esc(o.pros || '')}</td><td>${esc(o.cons || '')}</td><td>${esc(o.fit || '')}</td></tr>`).join('');
+  return `<div class="brief"><div class="tldr"><span class="tl">TL;DR</span> ${esc(b.tldr || '')}</div>`
+    + `<div class="btblwrap"><table class="btbl"><thead><tr><th>${esc(T('bOption'))}</th><th>${esc(T('bPros'))}</th><th>${esc(T('bCons'))}</th><th>${esc(T('bFit'))}</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    + (b.recommend ? `<div class="brec">✅ ${esc(T('bRecommend'))}: <b>${esc(b.recommend)}</b>${b.rationale ? ' — ' + esc(b.rationale) : ''} <button class="usebtn" onclick="useRecommend('${esc(b.recommend).replace(/'/g, "\\'")}')">${esc(T('bUse'))}</button></div>` : '')
+    + `</div>`;
+}
+function useRecommend(name) { const d = $('rdec'); if (d) { d.value = name; d.focus(); } }
 function humanGateHtml(t) {
   const ready = t.ready && (t.delegation === 'waiting' || t.delegation === 'invalid');
-  let h = `<h3>${esc(T('decisionToMake'))}</h3><div class="kv">${esc(t.question || t.objective || '')}</div>`;
+  let h = `<div class="briefbox" id="briefbox"></div>`;
+  h += `<h3>${esc(T('decisionToMake'))}</h3><div class="kv">${esc(t.question || t.objective || '')}</div>`;
   if (t.options) h += `<div class="mdbody" style="margin-top:6px">${md2html(t.options)}</div>`;
   if (t.escalationBasis) h += `<div class="kv" style="color:var(--muted);margin-top:6px"><b>${esc(T('why'))}:</b> ${esc(t.escalationBasis)}</div>`;
   const rel = (t.context && t.context.related) || [];
@@ -313,6 +340,7 @@ async function submitResolve(id) {
   if (r.ok) { toast(T('resolved')); closeDetail(); refresh(); } else { toast('⚠ ' + (r.error || 'failed')); }
 }
 function closeDetail() { $('detail').classList.remove('open'); selId = null; renderGraph(); renderQueue(); }
+function toggleWide() { const d = $('detail'); d.classList.toggle('wide'); $('expbtn').textContent = d.classList.contains('wide') ? '⤡' : '⤢'; }
 function toast(m) { const t = $('toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2200); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 // open / language popovers

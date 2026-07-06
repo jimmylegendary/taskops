@@ -214,6 +214,18 @@ createServer(async (req, res) => {
       const reply = await openclawChat('taskops-chat-' + id, prompt);
       return json(res, { reply });
     }
+    if (p.startsWith('/api/brief/') && req.method === 'POST') {
+      if (!WORK) return json(res, { error: 'no work open' }, 400);
+      const id = decodeURIComponent(p.slice('/api/brief/'.length));
+      const parsed = parseProject(WORK); const t = [...parsed.tasks.values()].find((x) => x.id === id);
+      if (!t) return json(res, { error: 'task not found' }, 404);
+      const ctx = relatedContext(parsed, t);
+      const ctxText = [`결정 태스크: ${t.title}`, `목적: ${t.objective || ''}`, ...ctx.related.map((r) => `\n[근거 산출물 · ${r.title}]\n${(r.deliverable.files || []).map((f) => f.content).join('\n')}`)].join('\n').slice(0, 11000);
+      const prompt = `아래 컨텍스트를 근거로, 인간이 이 결정을 "빠르게" 내리도록 돕는 결정 브리핑을 만들어라. 반드시 아래 JSON 객체 하나만 출력하고 다른 텍스트나 코드펜스는 절대 넣지 마라:\n{"tldr":"핵심을 한 문장으로","options":[{"name":"옵션 이름","pros":"장점(짧게)","cons":"단점/리스크(짧게)","fit":"이럴 때 적합"}],"recommend":"추천 옵션 이름","rationale":"추천 이유 1~2문장"}\n옵션은 2~4개. 모든 값은 한국어. 근거에서 옵션이 불명확하면 네가 합리적으로 후보를 도출하라.\n\n=== 컨텍스트 ===\n${ctxText}`;
+      const raw = await openclawChat('taskops-brief-' + id, prompt);
+      let brief = null; try { const a = raw.indexOf('{'), b = raw.lastIndexOf('}'); if (a >= 0 && b > a) brief = JSON.parse(raw.slice(a, b + 1)); } catch {}
+      return json(res, brief ? { brief } : { error: 'brief parse failed', raw: raw.slice(0, 500) });
+    }
     if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: update\ndata: {}\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return; }
     const file = p === '/' ? 'index.html' : p.replace(/^\/+/, ''); const fp = join(HERE, 'public', file);
     if (existsSync(fp) && statSync(fp).isFile()) { res.writeHead(200, { 'Content-Type': MIME[extname(fp)] || 'application/octet-stream' }); return res.end(readFileSync(fp)); }

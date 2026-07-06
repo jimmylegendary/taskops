@@ -1398,6 +1398,13 @@ function inferTaskReadiness(task) {
   if (task.childTaskGroupId) {
     return { taskId: task.id, runReadiness: 'needs_decomposition', source: 'heuristic', reason: `Task points at child task group '${task.childTaskGroupId}'.`, nextAction: nextActionForRunReadiness('needs_decomposition') };
   }
+  // Depth contract: a task that still expects to be decomposed (expectedPlan.expectedDepth >= 1) is structurally NOT
+  // runnable — it must be decomposed further. This forces coarse-first recursive decomposition (a deepening tree).
+  // Inactive when no expectedPlan is declared (legacy behavior preserved).
+  const expDepth = task.expectedPlan && typeof task.expectedPlan === 'object' ? Number(task.expectedPlan.expectedDepth) : NaN;
+  if (Number.isInteger(expDepth) && expDepth >= 1) {
+    return { taskId: task.id, runReadiness: 'needs_decomposition', source: 'depth_contract', reason: `expectedPlan.expectedDepth=${expDepth} (>=1): decompose into coarser sub-goals before running.`, nextAction: nextActionForRunReadiness('needs_decomposition') };
+  }
   const hasObjective = typeof task.objective === 'string' && task.objective.trim().length > 0;
   const hasResponsibility = typeof task.responsibility === 'string' && task.responsibility.trim().length > 0;
   const hasCompletion = typeof task.completionCriteria === 'string' && task.completionCriteria.trim().length > 0;
