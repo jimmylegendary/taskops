@@ -2376,6 +2376,7 @@ function decompositionShapeContractLines(task) {
     `- Every child needs its own expectedPlan. Set expectedDepth=${childDepth} and runReadiness=needs_decomposition for a child that still contains multiple steps or unknowns (the runner decomposes it again later). Set expectedDepth=0 and runReadiness=runnable ONLY for a child that is truly atomic (one execution turn, no internal sub-steps). Every child's expectedDepth MUST be < ${parentDepth}.`,
   ];
   if (parentDepth >= 2) lines.push(`- This task is COARSE (depth ${parentDepth} >= 2): its children must be sub-goals, so MOST/all children should be expectedDepth>=1 needs_decomposition. Do NOT flatten it into many runnable leaves in one step; regroup into a few coarse sub-goals.`);
+  lines.push('- A resolverKind:human decision task is atomic — give it expectedPlan.expectedDepth=0 (it is answered by a human, not decomposed).');
   return lines;
 }
 
