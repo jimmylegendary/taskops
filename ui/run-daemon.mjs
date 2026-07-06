@@ -15,9 +15,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const work = process.argv[2];
 const executor = process.argv[3] || 'dry-run';
 const maxConc = Math.max(1, Number(process.argv[4]) || 4);
-if (!work) { console.error('usage: node ui/run-daemon.mjs <work-dir> [executor] [maxConcurrent]'); process.exit(2); }
+const maxSteps = Number(process.argv[5]) || Infinity;      // global cap on total task-executions
+const untilHours = Number(process.argv[6]) || Infinity;     // wall-clock deadline in hours
+if (!work) { console.error('usage: node ui/run-daemon.mjs <work-dir> [executor] [maxConcurrent] [maxSteps] [untilHours]'); process.exit(2); }
 const RUN = 'run-main';
 const verifyChecks = executor === 'dry-run';
+const deadline = untilHours === Infinity ? Infinity : Date.now() + untilHours * 3600 * 1000;
+let totalSteps = 0;
 const ts = () => new Date().toISOString().slice(11, 19);
 
 // pre-create the shared run scaffold so concurrent workers don't race on creating it
@@ -61,19 +65,23 @@ function runOne(taskId) {
 let tick = 0;
 async function loop() {
   tick += 1;
+  if (Date.now() > deadline) { console.log(`${ts()} DEADLINE reached (${untilHours}h) — stopping. ${totalSteps} steps done.`); process.exit(0); }
+  if (totalSteps >= maxSteps) { console.log(`${ts()} MAX STEPS reached (${maxSteps}) — stopping.`); process.exit(0); }
   ensureRun();
   const ids = runnableNow();
   if (ids.length === 0) {
     // nothing runnable: either all closed, or waiting on a human delegation
     let closed = false; try { closed = !!(parseProject(work).closure || {}).complete; } catch {}
-    if (closed) { console.log(`${ts()} ALL CLOSED — complete.`); process.exit(0); }
-    console.log(`${ts()} tick ${tick}: idle (waiting on a human delegation in the UI) ...`);
+    if (closed) { console.log(`${ts()} ALL CLOSED — complete. ${totalSteps} steps.`); process.exit(0); }
+    console.log(`${ts()} tick ${tick}: idle — waiting on a human delegation in the UI (${totalSteps}/${maxSteps === Infinity ? '∞' : maxSteps} steps) ...`);
     setTimeout(loop, 3000); return;
   }
-  const batch = ids.slice(0, maxConc);
+  const budget = maxSteps === Infinity ? maxConc : Math.max(1, Math.min(maxConc, maxSteps - totalSteps));
+  const batch = ids.slice(0, budget);
   console.log(`${ts()} tick ${tick}: running ${batch.length} task(s) in parallel -> ${batch.join(', ')}`);
   const results = await Promise.all(batch.map(runOne));
-  console.log(`${ts()} tick ${tick}: done -> ${results.map((r) => r.taskId + (r.error ? '!' + r.error : '')).join(', ')}`);
+  totalSteps += results.length;
+  console.log(`${ts()} tick ${tick}: done (${totalSteps} total) -> ${results.map((r) => r.taskId + (r.error ? '!' + r.error : '')).join(', ')}`);
   setTimeout(loop, 500);
 }
 console.log(`${ts()} PARALLEL daemon watching ${work} (executor=${executor}, up to ${maxConc} concurrent). Answer human delegations in the UI to unblock dependents.`);
