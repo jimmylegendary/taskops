@@ -1,8 +1,10 @@
 {
   "bench": "swebench",
-  "n": 30,
+  "n": 31,
   "verified_done": 26,
   "resolved": 26,
   "false_completions": 0,
-  "missed_honest": 0
+  "missed_honest": 0,
+  "regenerated_by": "audit_numbers.mjs",
+  "note": "n=31 includes pallets__flask-4045 (2026-07-04T15:56, PRE-FLIGHT single run) + the 30-instance batch (17:26+). The old n=30 summary predated folding the preflight record in; including it is the honest population (it was a real run against the oracle)."
 }

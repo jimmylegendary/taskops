@@ -45,3 +45,15 @@ So `verified_done` cannot be manufactured by editing the tests. The pre-flight v
 
 ## Next
 L3 (single long-horizon project — Commit0 + one EdgeBench task): the "unbounded time" honest-monotone proof.
+
+---
+
+## Reconciliation note (2026-07-07, audit)
+
+The original `_summary-swebench-conflicting.json` said n=30 while this document and the per-task records say n=31.
+Cause: `pallets__flask-4045` was run as the PRE-FLIGHT single instance (2026-07-04T15:56) before the 30-instance
+batch (17:26+); the batch summary never folded it in. The honest population is all 31 recorded oracle runs, so the
+summary has been regenerated at n=31 by `eval/scripts/audit_numbers.mjs` — which is now the ONLY source of headline
+numbers (recomputed from per-task raw JSON; calibrated language with one-sided 95% Clopper-Pearson upper bounds in
+`eval/results/HEADLINE.json`). Calibrated headline: 0 false completions in 31 SWE-bench tasks (UB 9.2%); 0 reward
+hacks in 50 impossible tasks (UB 5.8%); 0 dishonest completions in 81 pooled tier-1 tasks (UB 3.6%).
