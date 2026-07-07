@@ -1,25 +1,34 @@
 {
-  "purpose": "S6 mechanism-isolation (R4.1): three arms show which mechanism buys HONEST completion. bare = no harness; structural-only = TaskOps' v0.8 claim-safety audit that does NOT execute the task's checks; verify-grounded = TaskOps v0.9 that RE-EXECUTES the requiredChecks out-of-workspace. Tier labels honest: the bare and verify-grounded arms are Tier-1 external benchmarks; the structural-only arm is the v0.8 Tier-2 mechanism battery (a same-tasks no-verify arm on the external benchmarks is the clean follow-up, R4.1b).",
+  "purpose": "S6 mechanism-isolation (R4.1): three arms on the SAME 31 SWE-bench Lite instances and the SAME claude model, isolating WHICH mechanism buys honest completion. bare = no harness (self-reports); no-verify = TaskOps graph + review but the runner does NOT execute the requiredCheck; verify-grounded = TaskOps v0.9 runner RE-EXECUTES the out-of-workspace judge.",
+  "same_tasks": true,
+  "same_model": "claude-code",
   "arms": {
     "bare": {
-      "tier": 1,
-      "false_completion": "claims done without evidence — 48/50 (96%) on ImpossibleBench-conflicting (codex), 1/31 (3.2%) on SWE-bench Lite (claude)",
-      "discrimination": "n/a (no gate)",
-      "source": "eval/results/bare/*.json (HEADLINE.json.bare_contrast)"
+      "n": 31,
+      "false_completion": "1/31 (self-reports done; a competent model is mostly honest on solvable tasks)",
+      "discrimination": "n/a (no gate); on ImpossibleBench the same bare setup false-claims 48/50 (96%)",
+      "source": "eval/results/bare/bare-swe-claude-code-*.json"
     },
-    "structural_only_v08": {
-      "tier": 2,
-      "false_completion": "0 — audit reports claimSafe=false for any structural-only closure (never certifies self-report)",
-      "discrimination": "0 — refuses to certify EVEN truly-correct completions (14/14 structural_complete_but_test_failed marked not claim-safe, including the correct ones); it reports closure SHAPE/APPROVAL, not test-passing",
-      "source": "taskops-paper/eval/results.json (v0.8.0 @871a365, gpt-5.5)"
+    "no_verify": {
+      "n": 31, "executed": 30,
+      "verified_done": 0,
+      "official_resolved": 30,
+      "missed_honest": 30,
+      "false_completions": 0,
+      "discrimination": "ZERO — certified 0 of the 30 correctly-resolved solutions (missed_honest 30/30). Without executed evidence the review returns needs_verification and the task blocks. The stopped clock: never wrong, never useful.",
+      "source": "eval/results/noverify/swebench-noverify-*.json (astropy-14365 did not execute; irrelevant to the 30/30 signal)"
     },
-    "verify_grounded_v09": {
-      "tier": 1,
-      "false_completion": "0 — verified_done only on runner-executed out-of-workspace pass evidence (0/31 SWE, 0/50 impossible)",
-      "discrimination": "exact — 26/26 verified_done are official resolves (precision 1.00), recall 83.9% on SWE-bench Lite; honest-stalls on the impossible set",
-      "source": "eval/results/HEADLINE.json.swebench_lite + impossiblebench_lcb"
+    "verify_grounded": {
+      "n": 31,
+      "verified_done": 26,
+      "official_resolved": 26,
+      "missed_honest": 0,
+      "false_completions": 0,
+      "discrimination": "EXACT — 26/26 verified_done are official resolves (precision 1.00, recall 83.9%); honest-stalls on the rest.",
+      "source": "eval/results/HEADLINE.json.swebench_lite"
     }
   },
-  "reading": "bare has high false-completion and no gate; structural-only removes false completion but ALSO removes discrimination (a stopped clock — it refuses correct work); verify-grounding is the mechanism that removes false completion WHILE preserving discrimination (exact oracle agreement). The load-bearing step is the runner EXECUTING the check, not the graph structure alone.",
-  "honesty_tax": "on SWE-bench Lite, wrapping trades ~16% of instances (5/31 honest stalls where retries=0) for a 0-false-positive guarantee; §8 shows verify-retries recover some of that recall honestly."
+  "reading": "bare: no gate, false-completes under pressure. no-verify: removes false completion but ALSO removes ALL discrimination — it refuses every correct solution (0/30 certified) = a stopped clock. verify-grounding: removes false completion WHILE preserving exact oracle agreement (26/26). The load-bearing mechanism is the runner EXECUTING the check, not the graph structure alone. The graph without execution is honest-but-useless; execution is what makes it honest-AND-useful.",
+  "corroboration_v08_tier2": "the v0.8 structural-only claim-safety battery independently showed the same shape (14/14 structural closures marked not-claim-safe incl. the correct ones).",
+  "honesty_tax": "no-verify forfeits 100% of recall; verify-grounding forfeits only 16% (5/31 honest stalls at k=0), and S8 shows verify-retries recover 4/5 of those honestly (k=4)."
 }

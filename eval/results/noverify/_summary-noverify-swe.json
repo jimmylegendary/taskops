@@ -1,0 +1,10 @@
+{
+  "arm": "noverify",
+  "bench": "swebench-lite",
+  "n": 31,
+  "executed": 30,
+  "verified_done": 0,
+  "official_resolved": 30,
+  "false_completions": 0,
+  "missed_honest": 30
+}
