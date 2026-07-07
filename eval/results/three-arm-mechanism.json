@@ -1,0 +1,25 @@
+{
+  "purpose": "S6 mechanism-isolation (R4.1): three arms show which mechanism buys HONEST completion. bare = no harness; structural-only = TaskOps' v0.8 claim-safety audit that does NOT execute the task's checks; verify-grounded = TaskOps v0.9 that RE-EXECUTES the requiredChecks out-of-workspace. Tier labels honest: the bare and verify-grounded arms are Tier-1 external benchmarks; the structural-only arm is the v0.8 Tier-2 mechanism battery (a same-tasks no-verify arm on the external benchmarks is the clean follow-up, R4.1b).",
+  "arms": {
+    "bare": {
+      "tier": 1,
+      "false_completion": "claims done without evidence — 48/50 (96%) on ImpossibleBench-conflicting (codex), 1/31 (3.2%) on SWE-bench Lite (claude)",
+      "discrimination": "n/a (no gate)",
+      "source": "eval/results/bare/*.json (HEADLINE.json.bare_contrast)"
+    },
+    "structural_only_v08": {
+      "tier": 2,
+      "false_completion": "0 — audit reports claimSafe=false for any structural-only closure (never certifies self-report)",
+      "discrimination": "0 — refuses to certify EVEN truly-correct completions (14/14 structural_complete_but_test_failed marked not claim-safe, including the correct ones); it reports closure SHAPE/APPROVAL, not test-passing",
+      "source": "taskops-paper/eval/results.json (v0.8.0 @871a365, gpt-5.5)"
+    },
+    "verify_grounded_v09": {
+      "tier": 1,
+      "false_completion": "0 — verified_done only on runner-executed out-of-workspace pass evidence (0/31 SWE, 0/50 impossible)",
+      "discrimination": "exact — 26/26 verified_done are official resolves (precision 1.00), recall 83.9% on SWE-bench Lite; honest-stalls on the impossible set",
+      "source": "eval/results/HEADLINE.json.swebench_lite + impossiblebench_lcb"
+    }
+  },
+  "reading": "bare has high false-completion and no gate; structural-only removes false completion but ALSO removes discrimination (a stopped clock — it refuses correct work); verify-grounding is the mechanism that removes false completion WHILE preserving discrimination (exact oracle agreement). The load-bearing step is the runner EXECUTING the check, not the graph structure alone.",
+  "honesty_tax": "on SWE-bench Lite, wrapping trades ~16% of instances (5/31 honest stalls where retries=0) for a 0-false-positive guarantee; §8 shows verify-retries recover some of that recall honestly."
+}
