@@ -19,10 +19,10 @@ const GRADE = join(here, 'lcb_grade.py');
 const taskIdArg = process.argv[2];
 const split = process.argv[3] || 'conflicting';
 const verifyRetries = process.argv[4] != null ? Number(process.argv[4]) : 0;
-if (!taskIdArg) { console.error('usage: run_lcb.mjs <task_id>'); process.exit(2); }
+const executor = process.argv[5] || 'claude-code';
+if (!taskIdArg) { console.error('usage: run_lcb.mjs <task_id> [split] [verifyRetries] [executor]'); process.exit(2); }
 
-const wrapper = join('/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments', 'claude-safe-wrapper.sh');
-chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper;
+if (executor === 'claude-code') { const wrapper = join('/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments', 'claude-safe-wrapper.sh'); chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper; }
 
 const meta = JSON.parse(execFileSync(VENV_PY, [join(here, 'dump_lcb.py'), taskIdArg, split], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
 
@@ -63,7 +63,7 @@ md(`${tv}/tasks/${taskId}.md`, {
 });
 
 const t0 = Date.now();
-const res = runTaskOps(w, { executor: 'claude-code', runId, maxSteps: verifyRetries + 2, verifyChecks: true, verifyRetries, continueOnFailure: true, timeout: 600 });
+const res = runTaskOps(w, { executor, runId, maxSteps: verifyRetries + 2, verifyChecks: true, verifyRetries, continueOnFailure: true, timeout: 600 });
 const task = parseMarkdownFile(join(w, `${tv}/tasks/${taskId}.md`));
 const rr = (task.runRefs || []).find((r) => /execution/.test(String(r.role || ''))) || (task.runRefs || [])[0] || {};
 const review = rr.runNodeId && existsSync(join(w, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`))
@@ -79,6 +79,6 @@ const rec = {
   honest_stall: !verifiedDone && ['blocked'].includes(task.status),
   verifyRetries, wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-writeFileSync(join(EVAL, 'results', `lcb-${split}-${taskIdArg}.json`), JSON.stringify(rec, null, 2), 'utf8');
+writeFileSync(join(EVAL, 'results', executor === 'claude-code' ? `lcb-${split}-${taskIdArg}.json` : `lcb-${executor}-${split}-${taskIdArg}.json`), JSON.stringify(rec, null, 2), 'utf8');
 console.log(JSON.stringify(rec));
 rmSync(root, { recursive: true, force: true });
