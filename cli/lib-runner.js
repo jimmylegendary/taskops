@@ -3562,6 +3562,33 @@ function isRecoverableDecompositionAdapterFailure(result) {
   return /\btimed out after \d+ms\.?$/i.test(String(result.message || '').trim());
 }
 
+// Coverage-gap detector (P2, OBSERVABILITY not enforcement): does the union of the children's purpose+expectedResult
+// lexically cover the parent's purpose+expectedResult? A low-overlap decomposition is FLAGGED (event + badge), never
+// rejected — wide-but-covering is fine, flat-but-gap is the smell. Inactive when the parent has no purpose.
+const COVERAGE_STOP = new Set(['의', '을', '를', '이', '가', '은', '는', '에', '와', '과', '로', '으로', '및', '수', '것', 'the', 'a', 'an', 'of', 'to', 'and', 'for', 'in', 'on', 'is', 'be', 'that', 'this', 'with', 'as', 'by', 'so']);
+function coverageTokens(s) {
+  return new Set(String(s || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w.length >= 2 && !COVERAGE_STOP.has(w)));
+}
+function assessCoverage(parentTask, childTasks) {
+  const parentText = `${parentTask?.purpose || ''} ${parentTask?.expectedResult || ''}`.trim();
+  if (!parentText) return null; // contract inactive
+  const parentToks = coverageTokens(parentText);
+  if (parentToks.size === 0) return null;
+  const childToks = new Set();
+  let childrenWithPurpose = 0;
+  for (const c of childTasks) { const t = `${c.purpose || ''} ${c.expectedResult || ''}`.trim(); if (c.purpose) childrenWithPurpose += 1; for (const w of coverageTokens(t)) childToks.add(w); }
+  const covered = [...parentToks].filter((w) => childToks.has(w));
+  const missing = [...parentToks].filter((w) => !childToks.has(w));
+  const coverageRatio = parentToks.size ? covered.length / parentToks.size : 1;
+  return {
+    coverageRatio: Number(coverageRatio.toFixed(3)),
+    childCount: childTasks.length,
+    childrenWithPurpose,
+    missingTerms: missing.slice(0, 12),
+    gap: coverageRatio < 0.5 || childrenWithPurpose < childTasks.length, // flag: weak coverage OR any child missing purpose
+  };
+}
+
 function listChildTaskPaths(versionDir) {
   const tasksDir = join(versionDir, 'tasks');
   if (!existsSync(tasksDir)) return [];
@@ -4220,6 +4247,22 @@ function closeDecomposeSuccess({
       },
     });
     appendRunLog(runDir, `${finishedAt} committing_scope_deferred taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${committingScopeDeferral.deferredCount}`);
+  }
+
+  // P2: coverage-gap OBSERVABILITY — flag (never reject) a decomposition whose children's purposes do not cover the
+  // parent's purpose+expectedResult. Recorded on the parent (coverageGap) + as an event, so the UI can badge it.
+  let coverage = null;
+  try {
+    const childDir = join(projectDir, 'task-groups', result.childTaskGroupId, 'versions', result.versionId);
+    const childTasks = listChildTaskPaths(childDir).map((p) => { try { return parseMarkdownFile(p); } catch { return null; } }).filter(Boolean);
+    coverage = assessCoverage(task, childTasks);
+  } catch { coverage = null; }
+  if (coverage) {
+    updateMarkdownFrontmatter(task.path, (fm) => { fm.coverage = { ratio: coverage.coverageRatio, childCount: coverage.childCount, childrenWithPurpose: coverage.childrenWithPurpose, gap: coverage.gap }; return fm; });
+    if (coverage.gap) {
+      logEvent(eventsPath, { timestamp: finishedAt, type: 'decomposition_coverage_gap', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor, childTaskGroupId: result.childTaskGroupId, versionId: result.versionId, coverageRatio: coverage.coverageRatio, childrenWithPurpose: coverage.childrenWithPurpose, childCount: coverage.childCount, missingTerms: coverage.missingTerms });
+      appendRunLog(runDir, `${finishedAt} decomposition_coverage_gap taskId=${task.id} ratio=${coverage.coverageRatio} childrenWithPurpose=${coverage.childrenWithPurpose}/${coverage.childCount} missing=${coverage.missingTerms.slice(0, 6).join(',')}`);
+    }
   }
 
   updateMarkdownFrontmatter(task.path, (fm) => {
