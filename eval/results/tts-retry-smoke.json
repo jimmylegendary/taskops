@@ -1,0 +1,8 @@
+{
+  "purpose": "S8 honest test-time-scaling smoke (R2.1): the 5 SWE-bench Lite instances that TaskOps honestly stalled at retries=0 (verified_done=0/5, and indeed official_resolved=0/5 — the honest label matched the oracle), re-run at verify-retries k=4.",
+  "instances": ["astropy__astropy-14182","astropy__astropy-14365","astropy__astropy-7746","django__django-11019","pallets__flask-4045"],
+  "k0": { "verified_done": 0, "official_resolved": 0, "false_completions": 0 },
+  "k4": { "verified_done": 4, "official_resolved": 5, "verified_after_retry": 4, "missed_honest": 1, "false_completions": 0 },
+  "reading": "verify-retries recover 4/5 previously-stalled instances to verified_done (a genuine test-time-scaling gain: extra compute buys real, oracle-confirmed completions), while the false-completion band stays pinned at 0 for every k. One instance (astropy-14182) becomes official_resolved but TaskOps does not verify it (missed_honest — a recall miss on the SAFE side, never a false positive). The honest-TTS claim is the CONJUNCTION: verified-solve gain 0->4 AND FC=0 at max k.",
+  "note": "smoke (n=5, single seed); the full E2 curve (k in {0,1,2,4,8}, 2 models, 3 seeds, no-verify control) is the paper's Figure 5."
+}
