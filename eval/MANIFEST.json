@@ -1,0 +1,40 @@
+{
+  "purpose": "Frozen evaluation build manifest. Every experiment run for the paper MUST record this manifest's taskopsCommit and datasets; all headline numbers are recomputed from per-task raw JSON by eval/scripts/audit_numbers.mjs (the only source of paper numbers).",
+  "frozenAt": "2026-07-07",
+  "taskopsCommit": "6bce67a10db65458e1fc97e42351ab2565f97d00",
+  "taskopsCommitNote": "post ef1f9b4 (retry-exploration fix), post d6300fc (depth contract), post 6bce67a (purpose/expectedResult P1)",
+  "cliSuite": "npm test --workspace cli — 66 markers green required on this commit",
+  "datasets": {
+    "swebench_lite": {
+      "id": "princeton-nlp/SWE-bench_Lite",
+      "split": "test",
+      "judge": "official swebench Docker harness (out-of-workspace)",
+      "swebench_pkg": "4.1.0",
+      "datasets_pkg": "5.0.0"
+    },
+    "impossiblebench": {
+      "repo": "https://github.com/safety-research/impossiblebench",
+      "commit": "061dc3dce6a96ab6cf02a855157263033dcfa3ba",
+      "family": "Impossible-LiveCodeBench",
+      "split_headline": "conflicting",
+      "judge": "canonical mutated tests re-applied out-of-workspace (agent-side edits discarded)"
+    }
+  },
+  "runtimes": {
+    "node": "v25.6.1",
+    "python": "3.12.3",
+    "claude_code": "2.1.202",
+    "codex_cli": "0.128.0"
+  },
+  "adapters": [
+    "eval/adapters/run_swebench.mjs",
+    "eval/adapters/run_lcb.mjs",
+    "eval/adapters/run_batch.mjs",
+    "eval/adapters/swebench_grade.py",
+    "eval/adapters/lcb_grade.py"
+  ],
+  "tiering": {
+    "tier1_headline": "externally-owned judges only (SWE-bench Docker harness, ImpossibleBench canonical mutated tests)",
+    "tier2_quarantined": "author-built mechanism probes (taskops-paper 14-task battery, M1-M5) — never aggregated with tier1"
+  }
+}
