@@ -915,7 +915,9 @@ function normalizeAcceptance(task) {
   const mode = ACCEPTANCE_MODES.has(String(raw.mode || '').trim()) ? String(raw.mode).trim() : 'informational';
   return {
     mode,
-    expectedOutcome: raw.expectedOutcome || task?.completionCriteria || '',
+    // P3: expectedResult (the task's declared deliverable) is the verify/review target when acceptance does not
+    // name its own expectedOutcome — unifying the "what done produces" concept across the task and its acceptance.
+    expectedOutcome: raw.expectedOutcome || task?.expectedResult || task?.completionCriteria || '',
     requiredArtifacts: asArray(raw.requiredArtifacts),
     requiredChecks: asArray(raw.requiredChecks),
     semanticAssertions: semanticAssertionsFrom(raw),
