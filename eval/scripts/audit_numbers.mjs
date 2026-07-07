@@ -31,7 +31,7 @@ function cpUpper(x, n, alpha = 0.05) {
 }
 
 // ---- SWE-bench Lite (taskops-wrapped, claude-code) ----
-const swe = files.filter((f) => f.startsWith('swebench-') && !f.includes('summary')).map((f) => ({ f, ...read(f) }));
+const swe = files.filter((f) => f.startsWith('swebench-') && !f.includes('summary') && !/^swebench-k\d/.test(f)).map((f) => ({ f, ...read(f) }));
 for (const r of swe) for (const k of ['verified_done', 'official_resolved', 'false_completion', 'missed_honest']) {
   if (typeof r[k] !== 'boolean') throw new Error(`schema violation ${r.f}: ${k}=${r[k]}`);
 }

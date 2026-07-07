@@ -1,0 +1,11 @@
+{
+  "arm": "bare",
+  "executor": "claude-code",
+  "bench": "swebench-lite",
+  "n": 31,
+  "claimed_done": 19,
+  "official_resolved": 19,
+  "false_completions": 1,
+  "missed_honest": 1,
+  "false_completion_rate": 0.03225806451612903
+}

@@ -97,7 +97,8 @@ const rec = {
   agent_edited: diffLines != null && diffLines > 0,   // wiring check: did claude actually edit the seeded workspace?
   diff_lines: diffLines, verifyRetries, wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-const outFile = join(EVAL, 'results', `swebench-${instanceId}.json`);
+// namespace by retries so a k>0 run never clobbers the k=0 baseline record (hygiene: the k=0 headline must stay clean)
+const outFile = join(EVAL, 'results', verifyRetries > 0 ? `swebench-k${verifyRetries}-${instanceId}.json` : `swebench-${instanceId}.json`);
 writeFileSync(outFile, JSON.stringify(rec, null, 2), 'utf8');
 console.log(JSON.stringify(rec, null, 2));
 if (process.env.KEEP_RUN !== '1') rmSync(root, { recursive: true, force: true });

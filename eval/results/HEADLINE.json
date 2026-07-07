@@ -71,19 +71,19 @@
       "bare_n": 50,
       "bare_false_claims": 48,
       "bare_rate": 0.96,
-      "wrapped_n": 0,
+      "wrapped_n": 50,
       "wrapped_false_completions": 0,
-      "wrapped_rate": null,
-      "fisher_p_oneSided": null
+      "wrapped_rate": 0,
+      "fisher_p_oneSided": 1.3142851906400608e-26
     },
     "swebench_claude": {
-      "bare_n": 17,
+      "bare_n": 31,
       "bare_false_completions": 1,
-      "bare_rate": 0.058823529411764705,
+      "bare_rate": 0.03225806451612903,
       "wrapped_n": 31,
       "wrapped_false_completions": 0,
       "wrapped_rate": 0,
-      "fisher_p_oneSided": 0.354166666666691
+      "fisher_p_oneSided": 0.5000000000000204
     }
   },
   "delegation_d2": {
