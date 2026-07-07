@@ -21,6 +21,8 @@ md(`${tv}/tasks/plan.md`, {
   taskOpsVersion: 'v1', entityType: 'task', id: 'plan', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1',
   title: '연구 전체 (outer shell)',
   objective: '이 연구 목표를 달성하라. 먼저 큰 관점의 major phase(굵직한 단위)로만 나누고, 각 phase는 이후에 다시 하위 목표로 분해되며, 최종적으로 atomic 실행 단위까지 재귀적으로 쪼개진다. 지금은 절대 세부 실행 태스크를 한꺼번에 나열하지 말고, 몇 개의 큰 단위로만 분해하라. 인간의 결정이 꼭 필요한 지점은 resolverKind: human 태스크로 둔다. 모든 산출물은 한국어.',
+  purpose: 'test-time training이 AI의 일관성·continual learning 문제를 어떻게 푸는지와, 그로 인해 2030년에 닥칠 신규 메모리 소자·AI 워크로드·시장을 근거 있게 예측해, 의사결정에 쓸 수 있는 종합 관점을 만든다.',
+  expectedResult: '문제 → TTT 해법 → 2030 신규 메모리 소자 spec → AI 워크로드 → 시장을 하나의 서사로 엮은 한국어 종합 보고서(핵심 예측·근거·불확실성 포함), 그리고 그 결론을 뒷받침하는 시뮬레이션·DSE 산출물.',
   responsibility: '연구 전체를 큰 단위부터 재귀적으로 분해·수행', completionCriteria: '모든 하위 목표가 검증된 산출물로 닫힘',
   order: 1, createdAt: now, status: 'pending', runReadiness: 'needs_decomposition', understandingLevel: 'known',
   expectedPlan: { expectedDepth: 3, expectedBreadth: 4, rationale: 'coarse outer shell — decompose into a few major phases, then sub-goals, then atomic steps (recursive, deepening tree).' },
