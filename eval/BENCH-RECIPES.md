@@ -9,7 +9,7 @@ only when the bench's own out-of-workspace verifier passes). Executor models via
 |---|---|---|---|
 | **SWE-bench Verified** | TaskOps-native (Style A) | ✅ validated | official Docker harness (`swebench_grade.py`), gold-patch positive-controlled |
 | **ALE** (Agents' Last Exam) | ale_run + in-repo openclaw/claude_code | ✅ **validated E2E** | task `evaluate()` → run.json `{score,status}`; verify-grounding gate confirmed (score 1.0 → certified) |
-| **EdgeBench** (ByteDance Seed) | SForge (2-container work/judge) | 🔶 harness installed, 51-task dataset pulled, images pulling | `sforge eval --json` → hidden judge container → EvalReport `{score_0_100,pass_rate}` |
+| **EdgeBench** (ByteDance Seed) | SForge (2-container work/judge) | ✅ **validated E2E** | hidden judge container → `best_pass_rate=1.0`; verify-grounding gate confirmed (pass_rate 1.0 → certified) |
 | **DeepSWE** (datacurve) | Pier + mini-swe-agent | ⛔ HF gate | task `tests/test.sh` → `reward.json` (`reward==1.0`) |
 
 ### ⚠️ USER ACTION — DeepSWE HF gate
@@ -30,7 +30,13 @@ Repo `~/repos/agents-last-exam` (`uv sync` done, 153GB `agentslastexam/ale-ubunt
 - Verifier / verify-grounding: `evaluate()` in `tasks/<domain>/<task>/main.py` (staged out-of-workspace AFTER the agent stops) → run.json `{score,status}`. TaskOps requiredCheck = `taskops_verify.sh <exp.yaml> <domain/task> <thr>` (exit 0 iff status==completed ∧ score≥thr). Confirmed: score 1.0 → verified_done True @thr1.0, False @thr1.01.
 - Caveat: default `configs/agents/claude_code.yaml` is unloadable (env-substituter matches `${env:...}` inside a comment) — use `cc_fable5_or.yaml`. Task tiers: near-term / full-spectrum / last-exam.
 
-### EdgeBench (ByteDance Seed) — harness ready, images pulling
+### EdgeBench (ByteDance Seed) — VALIDATED E2E
+Smoke (validated): ad_placement_optimization (a C++ heuristic-optimization task), agent codex + `deepseek/deepseek-v4-flash` via OpenRouter, 900s bounded → 3 auto-submissions → **hidden judge container graded best_pass_rate=1.0, best_score=40244803354** (timed_out=true as expected). verify-grounding gate: pass_rate 1.0 → verified_done True @thr1.0, False @thr1.01.
+Two setup fixes required (no root needed):
+- **`--enable-internet`** — the default network-isolation path needs passwordless `sudo iptables` (not available); `--enable-internet` skips it (`run_agent.py` guards the iptables check with `if not internet:`). Judge stays a separate container.
+- **Start `sforge serve` FIRST and confirm port 8080 is LISTENing before `sforge run`** — launching serve and run together in one backgrounded script raced and produced empty logs / 0-round runs; serve-then-run works.
+
+### EdgeBench (ByteDance Seed) — original notes
 Repo `~/repos/EdgeBench`; `sforge` at `~/.local/bin/sforge`; HF `ByteDance-Seed/EdgeBench` (51 public tasks) pulled.
 - Setup: `sforge fetch-tasks edgebench` → `sforge pull --task <t> --registry seededge` (multi-GB base+work+judge images, 10-40 min first run) → `sforge serve` (judge server :8080).
 - Run one (bounded): `SFORGE_AGENT_API_KEY=$OPENROUTER_API_KEY SFORGE_AGENT_API_BASE_URL=https://openrouter.ai/api/v1 sforge run --task ad_placement_optimization --agent codex --model <or-model> --backend docker --timeout 900 --max-submissions 2 --run-id edge-smoke-001`.
