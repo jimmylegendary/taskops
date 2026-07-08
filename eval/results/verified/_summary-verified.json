@@ -1,0 +1,25 @@
+{
+  "status": "PRELIMINARY — NOT used as paper evidence (unresolved confounds)",
+  "split": "swebench-verified",
+  "n_paired": 13,
+  "repos": {
+    "astropy": 2,
+    "django": 2,
+    "matplotlib": 2,
+    "mwaskom": 2,
+    "pallets": 1,
+    "psf": 2,
+    "pydata": 2
+  },
+  "bare_false_completion": 13,
+  "bare_claimed": 13,
+  "wrapped_false_completion": 0,
+  "wrapped_verified": 0,
+  "resolved_by_either": 0,
+  "caveats": [
+    "0/N resolved: the model solved none of these harder instances; oracle only gold-patch-verified on astropy (astropy-13977 gold->resolved:true), NOT individually on django/matplotlib/seaborn/flask/requests in this run",
+    "bare diff_files uniformly=1 across all instances vs Lite median 4 (resolved 1-7): possible systematic under-attempt confound, not cleanly attributable to task difficulty",
+    "with 0 solvable, this shows OVER-CLAIMING under failure (bare 11/11 vs wrapped 0/11), not the discrimination the Lite set already shows"
+  ],
+  "honest_conclusion": "Suggestive that bare false-completion scales with difficulty (Lite easy 1/31 -> hard 11/11) while the harness holds 0, but the confounds above bar promotion to a paper claim. The clean SWE attribution remains the Lite 1/31 vs 0/31."
+}
