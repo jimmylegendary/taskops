@@ -1,0 +1,37 @@
+{
+  "instances": [
+    "astropy__astropy-14182",
+    "astropy__astropy-14365",
+    "astropy__astropy-7746",
+    "django__django-11019",
+    "pallets__flask-4045"
+  ],
+  "curve": {
+    "k0": {
+      "n": 5,
+      "v": 0,
+      "res": 0,
+      "fc": 0
+    },
+    "k1": {
+      "n": 4,
+      "v": 3,
+      "res": 4,
+      "fc": 0
+    },
+    "k2": {
+      "n": 5,
+      "v": 4,
+      "res": 5,
+      "fc": 0
+    },
+    "k4": {
+      "n": 5,
+      "v": 4,
+      "res": 5,
+      "fc": 0
+    }
+  },
+  "reading": "verified-after-retry rises monotonically with k (0/5 -> 4/5 by k=4) while false_completion stays 0 at every k. The honest-TTS meter = gain AND FC=0.",
+  "note": "k=8 omitted (recovery saturates by k=4; runs were session-fragile). k1/k2 fill the shape."
+}

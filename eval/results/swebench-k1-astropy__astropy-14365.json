@@ -1,0 +1,14 @@
+{
+  "instance_id": "astropy__astropy-14365",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "official_resolved": true,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 22,
+  "verifyRetries": 1,
+  "wallclock_s": 320
+}
