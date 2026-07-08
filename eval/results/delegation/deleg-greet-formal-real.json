@@ -1,0 +1,11 @@
+{
+  "scenario": "greet-formal",
+  "mode": "real",
+  "resolved_by": "ai:codex-cli",
+  "still_pending_placeholder": false,
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "integrity_ok": true,
+  "wallclock_s": 84
+}

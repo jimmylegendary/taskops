@@ -1,0 +1,11 @@
+{
+  "scenario": "greet-lang",
+  "mode": "decline",
+  "resolved_by": null,
+  "still_pending_placeholder": true,
+  "taskops_status": "pending",
+  "review_decision": null,
+  "verified_done": false,
+  "integrity_ok": true,
+  "wallclock_s": 0
+}

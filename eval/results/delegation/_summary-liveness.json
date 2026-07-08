@@ -1,0 +1,19 @@
+{
+  "real": {
+    "n": 6,
+    "unstuck": 6,
+    "time_min": 56,
+    "time_med": 78,
+    "time_max": 85
+  },
+  "adversarial": {
+    "n": 2,
+    "false_completions": 0,
+    "integrity_ok": 2
+  },
+  "decline": {
+    "n": 1,
+    "false_completions": 0
+  },
+  "all_integrity_ok": "9/9"
+}

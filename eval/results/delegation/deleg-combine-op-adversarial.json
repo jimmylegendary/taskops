@@ -1,0 +1,11 @@
+{
+  "scenario": "combine-op",
+  "mode": "adversarial",
+  "resolved_by": null,
+  "still_pending_placeholder": false,
+  "taskops_status": "blocked",
+  "review_decision": "rejected",
+  "verified_done": false,
+  "integrity_ok": true,
+  "wallclock_s": 46
+}
