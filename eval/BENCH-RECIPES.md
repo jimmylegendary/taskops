@@ -10,7 +10,7 @@ only when the bench's own out-of-workspace verifier passes). Executor models via
 | **SWE-bench Verified** | TaskOps-native (Style A) | ✅ validated | official Docker harness (`swebench_grade.py`), gold-patch positive-controlled |
 | **ALE** (Agents' Last Exam) | ale_run + in-repo openclaw/claude_code | ✅ **validated E2E** | task `evaluate()` → run.json `{score,status}`; verify-grounding gate confirmed (score 1.0 → certified) |
 | **EdgeBench** (ByteDance Seed) | SForge (2-container work/judge) | ✅ **validated E2E** | hidden judge container → `best_pass_rate=1.0`; verify-grounding gate confirmed (pass_rate 1.0 → certified) |
-| **DeepSWE** (datacurve) | Pier + mini-swe-agent | ⛔ HF gate | task `tests/test.sh` → `reward.json` (`reward==1.0`) |
+| **DeepSWE** (datacurve) | Pier + mini-swe-agent | ✅ **validated E2E** (oracle) | `tests/test.sh` → `reward.txt/json` (`reward==1.0`); oracle gold-patch smoke = reward 1.0 |
 
 ### ⚠️ USER ACTION — DeepSWE HF gate
 `datacurve/deep-swe` is a gated HF dataset; the token (foryou1000) can list but not download (403). Click **"Agree
@@ -43,7 +43,10 @@ Repo `~/repos/EdgeBench`; `sforge` at `~/.local/bin/sforge`; HF `ByteDance-Seed/
 - Verifier / verify-grounding: `sforge eval --task <t> --archive submission.tar.gz --json` → hidden judge container → `{score_0_100, pass_rate, valid, timed_out}`. TaskOps requiredCheck = wrapper that tars the workspace, runs `sforge eval --json`, exits 0 iff `score_0_100≥THR` (or `pass_rate==1.0`).
 - Reality: tasks are 12-72h (human avg 57h); only a BOUNDED (~30-60 min) smoke is feasible; agent won't saturate. Cost dominated by this bench.
 
-### DeepSWE (datacurve/deep-swe) — blocked on HF gate
+### DeepSWE (datacurve/deep-swe) — VALIDATED E2E (oracle)
+Gate accepted 2026-07-09. Downloaded tasks/abs-module-cache-flags; `pier run -i abs-module-cache-flags --env docker --agent oracle` → Docker image built, gold solution.patch applied, tests/test.sh ran → `verifier/reward.txt=1` (Mean 1.000). verify-grounding gate: reward 1.0 → verified_done True @thr1.0. Model arm ready: swap `--agent mini-swe-agent --model openrouter/<vendor>/<model> --ae OPENROUTER_API_KEY=$OPENROUTER_API_KEY`.
+
+### DeepSWE (datacurve/deep-swe) — original notes
 Pier at `~/.local/bin/pier` (working). Package/registry datasets disabled → must snapshot `tasks/` locally after the gate.
 - After gate: `huggingface-cli download datacurve/deep-swe --repo-type dataset --include 'tasks/*' --local-dir <dir>`.
 - Oracle smoke (free, no LLM): `pier run --path <dir>/tasks -i <task> --env docker --agent oracle --jobs-dir <jd> --job-name oracle-smoke -n 1 -k 1` → `reward.json reward==1.0`.
