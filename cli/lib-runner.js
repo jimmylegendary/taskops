@@ -3026,6 +3026,7 @@ function closeExecuteSuccess({
   artifactWorkspacePath,
   verifyMode = false,
   verifyRetries = 0,
+  escalateOnSaturation = false,
 }) {
   const surpriseHistoryEntry = surpriseReport.surpriseReported
     ? appendSurpriseHistory({
@@ -3090,6 +3091,25 @@ function closeExecuteSuccess({
     // has stalled. U5: close as SATURATION (a distinct, trajectory-grounded honest stall) recording the ledger, not
     // a plain first-attempt block. Still status=blocked (the completion is honestly NOT certified).
     const saturated = verifyMode && verifyRetries > 0 && attempts >= verifyRetries;
+    // U4 (resource-relative saturation): a fixpoint is only THIS resource's ceiling, not the system's. Before
+    // declaring gg, escalate ONE rung — re-decompose the saturated leaf into finer independently-verifiable
+    // sub-goals (attack the unknown-unknown via smaller known-unknowns; the failure is evidence the "atomic" leaf
+    // was not atomic). Gated (escalateOnSaturation) + once per task (saturationEscalated) so it never loops; when
+    // off or already escalated, saturation closes as an honest gg block (default behavior preserved).
+    if (saturated && escalateOnSaturation && !task.saturationEscalated) {
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        fm.status = 'pending';
+        fm.runReadiness = 'needs_decomposition';
+        fm.uncertaintyState = 'unknown_unknown';
+        fm.saturationEscalated = true;
+        fm.attemptLedger = nextLedger;
+        fm.lastCheckFailure = sanitizeFmScalar(`Prior atomic execution SATURATED after ${attempts} verify attempts (fixpoint). The task was not atomic — decompose it into finer, independently-verifiable sub-goals that together satisfy: ${feedback}.`, { maxLen: 1000 });
+        return fm;
+      });
+      logEvent(eventsPath, { timestamp: finishedAt, type: 'saturation_escalate', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, rung: 'decompose', afterAttempts: attempts });
+      appendRunLog(runDir, `${finishedAt} saturation_escalate taskId=${task.id} rung=decompose afterAttempts=${attempts}`);
+      return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
+    }
     return closeExecuteFailure({
       task,
       runDir,
@@ -3143,7 +3163,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0 }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0, escalateOnSaturation = false }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
@@ -3367,6 +3387,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       artifactWorkspacePath,
       verifyMode: verifyRequiredChecks,
       verifyRetries,
+      escalateOnSaturation,
     });
   }
 
@@ -5270,6 +5291,7 @@ export function runTaskOps(workDir, options = {}) {
   const verifyRequiredChecks = options.verifyChecks === true;
   const continueOnFailure = options.continueOnFailure === true;
   const verifyRetries = Math.max(0, Math.floor(Number(options.verifyRetries) || 0));
+  const escalateOnSaturation = options.escalateOnSaturation === true;
   // D1 active delegation: an independent AI resolver (a runtime adapter, different from the executor) that answers
   // escalated resolverKind:'ai' decisions so the task resumes, instead of pausing for a manual fill.
   const aiResolver = options.aiResolver ? String(options.aiResolver) : null;
@@ -5501,6 +5523,7 @@ export function runTaskOps(workDir, options = {}) {
           selfResolutionGuide,
           verifyRequiredChecks,
           verifyRetries,
+          escalateOnSaturation,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({

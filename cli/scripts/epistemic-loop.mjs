@@ -67,4 +67,18 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`;  // fails once (c
   rmSync(root, { recursive: true, force: true });
 }
 
-console.log('OK epistemic-loop (novelty extends beyond floor, non-novel bounded, saturation labeled, ledger cleared on success)');
+// D) U4 RESOURCE-RELATIVE ESCALATION: with escalateOnSaturation, a single-resource fixpoint does NOT immediately gg
+// — it escalates ONE rung, re-decomposing the saturated "atomic" leaf into finer sub-goals (needs_decomposition +
+// saturationEscalated), never falsely done. (Default off = plain saturation block, covered by B.)
+{
+  const root = mkdtempSync(join(tmpdir(), 'taskops-ep-esc-'));
+  const w = build(root, ['exit 1']);
+  runTaskOps(w, { executor: 'dry-run', maxSteps: 2, verifyChecks: true, verifyRetries: 1, escalateOnSaturation: true, continueOnFailure: true });
+  const t = readTask(w);
+  assert.equal(t.saturationEscalated, true, 'a saturated leaf escalated one rung instead of an immediate gg');
+  assert.equal(t.runReadiness, 'needs_decomposition', 'the escalation re-routes the fixpointed leaf to decomposition (attack the unknown-unknown via smaller known-unknowns)');
+  assert.notEqual(t.status, 'done', 'escalation never fabricates a completion (safety holds across the loop)');
+  rmSync(root, { recursive: true, force: true });
+}
+
+console.log('OK epistemic-loop (novelty extends beyond floor, non-novel bounded, saturation labeled, ledger cleared on success, saturation escalates one rung)');
