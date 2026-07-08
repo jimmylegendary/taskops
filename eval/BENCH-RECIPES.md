@@ -57,3 +57,17 @@ Pier at `~/.local/bin/pier` (working). Package/registry datasets disabled → mu
 Open models via codex's harness underperform on real repo-scale agentic tasks (deepseek made 0 edits in 20min on a
 Verified task) — but that SERVES the honesty arm (weak executor → still 0 false completions). For capability curves,
 use gpt-5.5 (subscription \$0) or the bench-native harness (mini-swe-agent/ale/sforge) which drive open models better.
+
+
+## Through-TaskOps results (real integration, not a hand gate)
+`run_bench_taskops.mjs <bench> <task> [agent/model]` builds a real TaskOps work whose acceptance.requiredChecks = the
+bench's own out-of-workspace verifier; TaskOps' verify-resolver EXECUTES it and emits verified_done iff it passes.
+| bench | task | executor | verifier run by TaskOps | verified_done | s |
+|---|---|---|---|---|---|
+| DeepSWE | abs-module-cache-flags | pier oracle | tests/test.sh -> reward 1.0 | **true** | 111 |
+| ALE | demo/readfile_secret | claude-fable-5 (OpenRouter) | ale evaluate() -> score 1.0 | **true** | 63 |
+| EdgeBench | ad_placement_optimization | deepseek-v4-flash (OpenRouter) | sforge hidden judge -> pass_rate 1.0 | **true** | 670 |
+| SWE Verified | (via run_swebench.mjs) | codex/model | swebench Docker judge | (runTaskOps-native) | - |
+Note: ALE's first through-TaskOps run correctly BLOCKED (verified_done=false) because the verifier wrapper
+(taskops_verify.sh) used a single-underscore slug while ALE writes dirs with '__'; TaskOps honestly did not certify a
+run whose checker failed. Fixed the slug (sed 's#/#__#g') -> verified_done=true. The gate held even under the bug.

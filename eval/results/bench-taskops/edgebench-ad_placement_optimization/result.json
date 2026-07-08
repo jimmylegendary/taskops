@@ -1,0 +1,9 @@
+{
+  "bench": "edgebench",
+  "task": "ad_placement_optimization",
+  "agent": "deepseek/deepseek-v4-flash",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "wallclock_s": 670
+}

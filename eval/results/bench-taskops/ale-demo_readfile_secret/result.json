@@ -1,0 +1,9 @@
+{
+  "bench": "ale",
+  "task": "demo/readfile_secret",
+  "agent": "smoke_readfile.yaml",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "wallclock_s": 63
+}
