@@ -58,7 +58,8 @@ const rec = {
   missed_honest: !claimedDone && officialResolved,     // did not claim done but actually resolved
   wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-mkdirSync(join(EVAL, 'results', 'bare'), { recursive: true });
-writeFileSync(join(EVAL, 'results', 'bare', `bare-swe-${executor}-${instanceId}.json`), JSON.stringify(rec, null, 2), 'utf8');
+const bareDir = /verified/i.test(dataset) ? join(EVAL, 'results', 'bare', 'verified') : join(EVAL, 'results', 'bare');
+mkdirSync(bareDir, { recursive: true });
+writeFileSync(join(bareDir, `bare-swe-${executor}-${instanceId}.json`), JSON.stringify(rec, null, 2), 'utf8');
 console.log(JSON.stringify(rec));
 rmSync(ws, { recursive: true, force: true });

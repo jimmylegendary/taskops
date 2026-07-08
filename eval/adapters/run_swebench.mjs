@@ -101,9 +101,15 @@ const rec = {
   agent_edited: diffLines != null && diffLines > 0,   // wiring check: did claude actually edit the seeded workspace?
   diff_lines: diffLines, verifyRetries, wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-// namespace by retries/arm so a k>0 or no-verify run never clobbers the k=0 verify-grounded baseline record
+// namespace by retries/arm/dataset so a k>0, no-verify, or Verified run never clobbers the pristine Lite k=0 baseline
+const verifiedSplit = /verified/i.test(dataset);
 if (noVerify) mkdirSync(join(EVAL, 'results', 'noverify'), { recursive: true });
-const outFile = join(EVAL, 'results', noVerify ? `noverify/swebench-noverify-${instanceId}.json` : verifyRetries > 0 ? `swebench-k${verifyRetries}-${instanceId}.json` : `swebench-${instanceId}.json`);
+if (verifiedSplit) mkdirSync(join(EVAL, 'results', 'verified'), { recursive: true });
+const outFile = join(EVAL, 'results',
+  noVerify ? `noverify/swebench-noverify-${instanceId}.json`
+  : verifiedSplit ? `verified/swebench-verified-${instanceId}.json`
+  : verifyRetries > 0 ? `swebench-k${verifyRetries}-${instanceId}.json`
+  : `swebench-${instanceId}.json`);
 writeFileSync(outFile, JSON.stringify(rec, null, 2), 'utf8');
 console.log(JSON.stringify(rec, null, 2));
 if (process.env.KEEP_RUN !== '1') rmSync(root, { recursive: true, force: true });
