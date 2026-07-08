@@ -464,6 +464,23 @@ function failureSignature(reviewReport) {
     .sort();
   return parts.join(' | ').slice(0, 500);
 }
+// U7 — "assume unknown-unknowns exist" quantified as a per-task PRIOR [0,1] from proxies (higher => the map is more
+// likely incomplete => surface preconditions + decompose harder). Advisory + observable; U6 gates elicitation on it.
+export function uuPrior(task) {
+  if (!task || typeof task !== 'object') return 0;
+  let p = 0;
+  const obj = String(task.objective || '');
+  if (obj.length > 400) p += 0.3; else if (obj.length > 160) p += 0.15;
+  const clauses = (obj.match(/\b(and|then|also|plus|그리고|또한|및)\b|[;,]/gi) || []).length;
+  if (clauses >= 6) p += 0.2; else if (clauses >= 3) p += 0.1;
+  const u = task.uncertaintyState || task.understandingLevel;
+  if (u === 'unknown_unknown') p += 0.35; else if (u === 'known_unknown' || u === 'unknown') p += 0.2;
+  if (Array.isArray(task.surpriseHistory) && task.surpriseHistory.length) p += 0.2;   // friction already surfaced
+  if (Array.isArray(task.attemptLedger) && task.attemptLedger.length) p += 0.15;
+  if (task.saturationEscalated === true || task.saturation === true) p += 0.25;
+  return Math.max(0, Math.min(1, p));
+}
+const UU_ELICIT_THRESHOLD = 0.5;
 const ACCEPTANCE_MODES = new Set(['informational', 'enforced', 'guarded', 'runner-managed']);
 const POLICY_APPROVING_ACCEPTANCE_MODES = new Set(['enforced', 'guarded', 'runner-managed']);
 
@@ -2356,6 +2373,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
     '',
     `Task: ${task.id} — ${task.title}`,
     `Task objective: ${task.objective || ''}`,
+    ...(uuPrior(task) >= UU_ELICIT_THRESHOLD ? ['PRECONDITIONS (U6 — this task reads as under-specified; assume you are missing something): before implementing, briefly state the assumptions/preconditions this task rests on, and FLAG any you cannot verify from the given inputs instead of proceeding on a silent guess.'] : []),
     ...(task.purpose ? [`Task purpose (WHY it exists / how it serves the goal): ${task.purpose}`] : []),
     ...(task.expectedResult ? [`Task expected result (WHAT "done" must produce): ${task.expectedResult}`] : []),
     `Task responsibility: ${task.responsibility || ''}`,

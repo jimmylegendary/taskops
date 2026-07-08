@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fmBlock, parseMarkdownFile } from '../lib-taskops.js';
-import { runTaskOps } from '../lib-runner.js';
+import { runTaskOps, uuPrior, buildAgentExecutionPrompt } from '../lib-runner.js';
 
 const now = '2026-07-09T00:00:00.000Z';
 function build(root, checks) {
@@ -81,4 +81,19 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`;  // fails once (c
   rmSync(root, { recursive: true, force: true });
 }
 
-console.log('OK epistemic-loop (novelty extends beyond floor, non-novel bounded, saturation labeled, ledger cleared on success, saturation escalates one rung)');
+// E) U7 uu-prior + U6 proactive elicitation: a simple task has a LOW prior (map ~complete) and its execution prompt
+// carries NO precondition-elicitation; a task flagged unknown-unknown / already frictioned has a HIGH prior and its
+// prompt DOES instruct it to surface + flag unverifiable preconditions (catch silent-wrong-assumptions).
+{
+  const simple = { id: 't', title: 't', objective: 'print hello', understandingLevel: 'known' };
+  const murky = { id: 't', title: 't', objective: 'print hello', uncertaintyState: 'unknown_unknown', surpriseHistory: [{ id: 's1' }] };
+  assert.ok(uuPrior(simple) < 0.5, `a simple known task has a low uu-prior (got ${uuPrior(simple)})`);
+  assert.ok(uuPrior(murky) >= 0.5, `an unknown-unknown + frictioned task has a high uu-prior (got ${uuPrior(murky)})`);
+  const project = { id: 'p', title: 'P', objective: 'o' };
+  const pSimple = buildAgentExecutionPrompt({ project, task: simple });
+  const pMurky = buildAgentExecutionPrompt({ project, task: murky });
+  assert.ok(!pSimple.includes('PRECONDITIONS (U6'), 'low uu-prior => no elicitation injected (existing prompts unchanged)');
+  assert.ok(pMurky.includes('PRECONDITIONS (U6') && pMurky.includes('FLAG any you cannot verify'), 'high uu-prior => proactive precondition elicitation is injected');
+}
+
+console.log('OK epistemic-loop (novelty extends beyond floor, non-novel bounded, saturation labeled+escalates one rung, ledger cleared on success, uu-prior gates proactive elicitation)');
