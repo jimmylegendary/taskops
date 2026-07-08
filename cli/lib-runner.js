@@ -450,6 +450,20 @@ function writeTextFileAtomic(filePath, text) {
 
 const FM_SCALAR_MAX_LEN = 500;
 const FM_SCALAR_FALLBACK = 'executor_failed';
+// Epistemic loop: beyond the verifyRetries FLOOR, keep retrying only while the verify failure is NOVEL (the model is
+// still converting unknown-unknowns into new frictions = making progress), up to this many extra rounds. A repeating
+// (non-novel) failure never extends — so a stuck task is bounded exactly at the floor and closes as saturation.
+const VERIFY_NOVEL_EXTENSION = 6;
+// A resource-relative fixpoint signature of a verify failure: the sorted, normalized set of what the checker
+// reported. Two rounds with the same signature = the model reproduced the same failed map (non-novel = fixpoint).
+function failureSignature(reviewReport) {
+  const parts = []
+    .concat(reviewReport.failedChecks || [], reviewReport.missingExpected || [], reviewReport.unsupportedObserved || [])
+    .map((s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .sort();
+  return parts.join(' | ').slice(0, 500);
+}
 const ACCEPTANCE_MODES = new Set(['informational', 'enforced', 'guarded', 'runner-managed']);
 const POLICY_APPROVING_ACCEPTANCE_MODES = new Set(['enforced', 'guarded', 'runner-managed']);
 
@@ -3041,28 +3055,41 @@ function closeExecuteSuccess({
   const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
   if (review.reviewReport.decision !== 'approved' && isGuarded) {
     const attempts = Number(task.verifyAttempts || 0);
-    // Only retry under --verify-checks: a passing retry must be RUNNER-verified. Retrying a self-reported
-    // review would just give the agent more attempts to self-report a pass, so gate on verifyMode.
-    if (verifyMode && verifyRetries > 0 && attempts < verifyRetries) {
-      // test-time-scaling: retry with the check failure fed back instead of a permanent block — more
-      // test-time may convert a stall into an honest verified completion. Bounded by verifyRetries.
-      const feedback = review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected).join('; ');
+    const feedback = review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected).join('; ');
+    // Epistemic loop (U1 ledger + U3 novelty-bounded retry): a verify-fail is friction. Signature the failure; if it
+    // is NOVEL the model surfaced a new unknown (still converging), if it REPEATS the model reproduced the same
+    // failed map (fixpoint on this resource). Retry within the verifyRetries FLOOR, then EXTEND beyond the floor ONLY
+    // while novel (bounded by a ceiling). A non-novel failure never extends — so a stuck task stays bounded exactly
+    // at the floor (preserving the deterministic budget contract) and closes as saturation, not a plain block.
+    const failureSig = failureSignature(review.reviewReport);
+    const ledger = Array.isArray(task.attemptLedger) ? task.attemptLedger : [];
+    const priorSigs = new Set(ledger.map((e) => e && e.sig).filter(Boolean));
+    const isNovel = !!failureSig && !priorSigs.has(failureSig);
+    const nextLedger = ledger.concat([{ round: attempts + 1, sig: failureSig, novel: isNovel, at: finishedAt }]).slice(-30);
+    const ceiling = verifyRetries > 0 ? verifyRetries + VERIFY_NOVEL_EXTENSION : 0;
+    const withinFloor = attempts < verifyRetries;
+    const novelExtension = attempts >= verifyRetries && isNovel && attempts < ceiling;
+    // Only retry under --verify-checks: a passing retry must be RUNNER-verified (never self-report).
+    if (verifyMode && verifyRetries > 0 && (withinFloor || novelExtension)) {
       updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'pending';
         fm.runReadiness = 'runnable';
-        // Keep the retry on the EXECUTE path. A real executor often records a surpriseHistory entry, which flips
-        // classifyTaskReadiness onto the uncertainty path; without a uncertaintyState that defaults to
-        // needs_exploration, so the retry would EXPLORE instead of re-execute. The retry premise is "re-run with
-        // the specific check failure fed back" — the completion criterion is known — so stamp uncertaintyState.
+        // Keep the retry on the EXECUTE path (stamp uncertaintyState so a surpriseHistory entry does not flip it to
+        // exploration): the retry premise is "re-run with the specific friction fed back", completion criterion known.
         fm.uncertaintyState = 'known';
         fm.verifyAttempts = attempts + 1;
-        fm.lastCheckFailure = sanitizeFmScalar(`Previous attempt failed verification: ${feedback}. Fix your implementation so the required check passes.`, { maxLen: 1000 });
+        fm.attemptLedger = nextLedger;
+        fm.lastCheckFailure = sanitizeFmScalar(`Previous attempt failed verification: ${feedback}. First state FRICTION: <what this failure reveals you did not know>, then fix your implementation so the required check passes.`, { maxLen: 1000 });
         return fm;
       });
-      logEvent(eventsPath, { timestamp: finishedAt, type: 'verify_retry', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, attempt: attempts + 1, maxRetries: verifyRetries });
-      appendRunLog(runDir, `${finishedAt} verify_retry taskId=${task.id} attempt=${attempts + 1}/${verifyRetries}`);
+      logEvent(eventsPath, { timestamp: finishedAt, type: 'verify_retry', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, attempt: attempts + 1, maxRetries: ceiling, novel: isNovel, mode: withinFloor ? 'floor' : 'novel_extension' });
+      appendRunLog(runDir, `${finishedAt} verify_retry taskId=${task.id} attempt=${attempts + 1} novel=${isNovel} ${withinFloor ? 'floor' : 'novel-extension'}`);
       return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
     }
+    // Fixpoint: the floor is exhausted and the failure is no longer novel (or the ceiling was hit) — this resource
+    // has stalled. U5: close as SATURATION (a distinct, trajectory-grounded honest stall) recording the ledger, not
+    // a plain first-attempt block. Still status=blocked (the completion is honestly NOT certified).
+    const saturated = verifyMode && verifyRetries > 0 && attempts >= verifyRetries;
     return closeExecuteFailure({
       task,
       runDir,
@@ -3070,21 +3097,24 @@ function closeExecuteSuccess({
       runNodePath,
       taskUpdater: (fm) => {
         fm.status = 'blocked';
-        fm.lastRunFailureReason = sanitizeFmScalar(`review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
+        if (saturated) { fm.saturation = true; fm.attemptLedger = nextLedger; }
+        fm.lastRunFailureReason = sanitizeFmScalar(saturated
+          ? `saturation: reached a fixpoint after ${attempts} verify attempts (the failure stopped being novel): ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`
+          : `review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
         return fm;
       },
       event: {
-        timestamp: finishedAt, type: 'task_review_failed', runId,
+        timestamp: finishedAt, type: saturated ? 'task_saturation' : 'task_review_failed', runId,
         taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
-        decision: review.reviewReport.decision,
+        decision: review.reviewReport.decision, ...(saturated ? { verifyAttempts: attempts, fixpoint: true } : {}),
       },
-      logLine: `${finishedAt} task_review_failed taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}`,
+      logLine: `${finishedAt} ${saturated ? 'task_saturation' : 'task_review_failed'} taskId=${task.id} runNodeId=${runNodeId} reviewNodeId=${review.reviewNodeId} decision=${review.reviewReport.decision}${saturated ? ` attempts=${attempts} fixpoint` : ''}`,
       actionResult: {
         taskId: task.id,
         runNodeId,
         reviewNodeId: review.reviewNodeId,
         kind: 'execute',
-        status: 'failed',
+        status: saturated ? 'saturated' : 'failed',
         executor,
         message: result.message || null,
         reviewDecision: review.reviewReport.decision,
@@ -3098,8 +3128,8 @@ function closeExecuteSuccess({
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
   // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
-  if (task.verifyAttempts != null || task.lastCheckFailure != null) {
-    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; return fm; });
+  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null) {
+    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; return fm; });
   }
 
   logEvent(eventsPath, {
