@@ -202,13 +202,25 @@ function claudeArgs({ prompt }) {
 }
 
 function codexArgs({ prompt }) {
-  return [
+  const args = [
     '--ask-for-approval', 'never',
     'exec',
     '--skip-git-repo-check',
     '--sandbox', 'danger-full-access',
-    prompt,
   ];
+  // Optional OpenAI-compatible routing (e.g. OpenRouter open models) via env — no global ~/.codex/config.toml or
+  // openclaw edit. Inactive unless TASKOPS_CODEX_MODEL is set, so default codex behavior is unchanged.
+  const orModel = trim(process.env.TASKOPS_CODEX_MODEL);
+  if (orModel) {
+    const baseUrl = trim(process.env.TASKOPS_CODEX_BASE_URL) || 'https://openrouter.ai/api/v1';
+    const envKey = trim(process.env.TASKOPS_CODEX_ENV_KEY) || 'OPENROUTER_API_KEY';
+    const provider = trim(process.env.TASKOPS_CODEX_PROVIDER) || 'openrouter';
+    args.push('-c', `model_providers.${provider}={name="${provider}",base_url="${baseUrl}",env_key="${envKey}"}`);
+    args.push('-c', `model_provider="${provider}"`);
+    args.push('-m', orModel);
+  }
+  args.push(prompt);
+  return args;
 }
 
 function opencodeArgs({ prompt }) {

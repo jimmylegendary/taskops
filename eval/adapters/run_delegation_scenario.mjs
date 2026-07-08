@@ -105,9 +105,13 @@ md(`${tv}/tasks/${taskId}.md`, {
 }, body);
 
 const t0 = Date.now();
-const opts = { executor: 'claude-code', runId, verifyChecks: true, continueOnFailure: true, maxSteps: 4, timeout: 600 };
-if (mode === 'real') opts.aiResolver = 'codex-cli';   // decline/adversarial: NO resolver provided
-console.log(`[deleg] ${scenarioId} mode=${mode} ...`);
+// executor/resolver overridable via env for the OpenRouter validation (TASKOPS_DELEG_EXECUTOR / _RESOLVER);
+// defaults preserve the original claude-code executor + codex-cli resolver.
+const executor = process.env.TASKOPS_DELEG_EXECUTOR || 'claude-code';
+const resolver = process.env.TASKOPS_DELEG_RESOLVER || 'codex-cli';
+const opts = { executor, runId, verifyChecks: true, continueOnFailure: true, maxSteps: 4, timeout: 600 };
+if (mode === 'real') opts.aiResolver = resolver;   // decline/adversarial: NO resolver provided
+console.log(`[deleg] ${scenarioId} mode=${mode} executor=${executor}${opts.aiResolver ? ' resolver=' + opts.aiResolver : ''} codexModel=${process.env.TASKOPS_CODEX_MODEL || '-'} ...`);
 runTaskOps(w, opts);
 
 const task = parseMarkdownFile(join(w, `${tv}/tasks/${taskId}.md`));
