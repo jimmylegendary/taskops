@@ -79,7 +79,10 @@ console.log(`[${instanceId}] running TaskOps (claude-code, verify-checks, retrie
 // + review but the runner does NOT execute the requiredCheck (trusts the agent's self-report) — for the clean
 // same-tasks 3-arm (bare / no-verify / verify-grounded).
 const noVerify = process.argv[5] === 'noverify';
-const res = runTaskOps(w, { executor: 'claude-code', runId, maxSteps: verifyRetries + 2, verifyChecks: !noVerify, verifyRetries, continueOnFailure: true, timeout: 1500 });
+// executor + delegation overridable via env (for OpenRouter open-model runs + delegation mode); defaults unchanged.
+const sweExecutor = process.env.TASKOPS_SWE_EXECUTOR || 'claude-code';
+const sweResolver = process.env.TASKOPS_SWE_RESOLVER || null;   // set => --delegate + independent ai-resolver
+const res = runTaskOps(w, { executor: sweExecutor, runId, maxSteps: verifyRetries + 2, verifyChecks: !noVerify, verifyRetries, continueOnFailure: true, timeout: 1500, ...(sweResolver ? { delegate: true, aiResolver: sweResolver } : {}) });
 const task = parseMarkdownFile(join(w, `${tv}/tasks/${taskId}.md`));
 const rr = (task.runRefs || [])[0] || {};
 const review = rr.runNodeId && existsSync(join(w, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`))
