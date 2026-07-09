@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fmBlock, parseMarkdownFile } from '../lib-taskops.js';
-import { runTaskOps, uuPrior, buildAgentExecutionPrompt } from '../lib-runner.js';
+import { runTaskOps, uuPrior, buildAgentExecutionPrompt, buildAgentDecompositionPrompt } from '../lib-runner.js';
 
 const now = '2026-07-09T00:00:00.000Z';
 function build(root, checks) {
@@ -96,4 +96,30 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`;  // fails once (c
   assert.ok(pMurky.includes('PRECONDITIONS (U6') && pMurky.includes('FLAG any you cannot verify'), 'high uu-prior => proactive precondition elicitation is injected');
 }
 
-console.log('OK epistemic-loop (novelty extends beyond floor, non-novel bounded, saturation labeled+escalates one rung, ledger cleared on success, uu-prior gates proactive elicitation)');
+// F) U4 CAPABILITY-DELEGATE rung: with an escalationResolvers pool, a fixpoint re-attempts the task with a
+// different/stronger resolver (executorOverride + escalatedResolvers) before any gg — saturation is resource-relative.
+{
+  const root = mkdtempSync(join(tmpdir(), 'taskops-ep-deleg-'));
+  const w = build(root, ['exit 1']);
+  runTaskOps(w, { executor: 'dry-run', maxSteps: 2, verifyChecks: true, verifyRetries: 1, escalationResolvers: ['codex-cli'], continueOnFailure: true });
+  const t = readTask(w);
+  assert.equal(t.executorOverride, 'codex-cli', 'a fixpoint re-attempts with the next resolver in the escalation pool (capability-delegate rung)');
+  assert.ok(Array.isArray(t.escalatedResolvers) && t.escalatedResolvers.includes('codex-cli'), 'the tried resolver is recorded so gg only follows a full-pool fixpoint');
+  assert.notEqual(t.status, 'done', 'capability-delegation never fabricates a completion');
+  rmSync(root, { recursive: true, force: true });
+}
+
+// G) U7 ADAPTIVE DEPTH: a high uu-prior biases the DECOMPOSE prompt toward coarser/deeper decomposition (assume more
+// hidden unknowns); a low-prior task's decompose prompt is unchanged.
+{
+  const root = mkdtempSync(join(tmpdir(), "taskops-ep-g-"));
+  const project = { id: 'p', title: 'P', objective: 'o' };
+  const simple = { id: 't', title: 't', objective: 'print hello', understandingLevel: 'known', taskGroupVersionId: 'tgv' };
+  const murky = { id: 't', title: 't', objective: 'print hello', uncertaintyState: 'unknown_unknown', surpriseHistory: [{ id: 's1' }], taskGroupVersionId: 'tgv' };
+  const dSimple = buildAgentDecompositionPrompt({ project, projectDir: root, task: simple });
+  const dMurky = buildAgentDecompositionPrompt({ project, projectDir: root, task: murky });
+  assert.ok(!dSimple.includes('HIGH uncertainty prior'), 'low uu-prior => decompose prompt unchanged');
+  assert.ok(dMurky.includes('HIGH uncertainty prior'), 'high uu-prior => decompose prompt biases toward coarser/deeper decomposition');
+}
+
+console.log('OK epistemic-loop (U1-U7: novelty-bounded retry, saturation + resource-relative escalation ladder [delegate+decompose], ledger cleared, uu-prior gates proactive elicitation + adaptive depth)');

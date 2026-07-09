@@ -40,7 +40,7 @@ Usage:
   taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--completed-summary <text>] [--incomplete-summary <text>] [--json]
   taskops promote-partials <work-dir> [--dry-run|--apply] [--partial-id <id>] [--max-follow-up-depth <n>] [--repeat-threshold <n>] [--json]
   taskops unblock-check <work-dir> [--dry-run] [--json]
-  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--verify-checks] [--verify-retries <n>] [--escalate-on-saturation] [--ai-resolver <adapter>] [--continue-on-failure] [--self-guide-file <path>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
+  taskops run <work-dir> [--run-id <id>] [--agent <agent-id>] [--executor dry-run|openclaw-agent] [--max-steps <n>] [--until <timestamp>] [--timeout <seconds>] [--delegate] [--verify-checks] [--verify-retries <n>] [--escalate-on-saturation] [--escalation-resolvers <csv>] [--ai-resolver <adapter>] [--continue-on-failure] [--self-guide-file <path>] [--loopback none|self] [--max-loopbacks <n>] [--max-parallel <n>] [--actor <name>] [--json]
   taskops delegate <work-dir> [--runtime dry-run|openclaw-cli|claude-code|codex-cli|opencode-cli] [--runner-id <id>] [--run-id <id>] [--loopback self] [--max-parallel <n>] [--max-steps <n>] [--max-loopbacks <n>] [--timeout <seconds>] [--verify-checks] [--verify-retries <n>] [--foreground] [--unattended] [--no-start] [--dry-run] [--json]
   taskops queue sync <work-dir> [--json]
   taskops queue list <work-dir> [--json]
@@ -510,6 +510,7 @@ try {
       delegate: flags.delegate,
       selfResolutionGuide,
       escalateOnSaturation: flags['escalate-on-saturation'] === true,
+      escalationResolvers: (typeof flags['escalation-resolvers'] === 'string' ? flags['escalation-resolvers'].split(',').map((x) => x.trim()).filter(Boolean) : []),
       loopback,
       maxLoopbacks: flags['max-loopbacks'] != null && flags['max-loopbacks'] !== true ? flags['max-loopbacks'] : null,
       actor: flags.actor && flags.actor !== true ? String(flags.actor) : null,

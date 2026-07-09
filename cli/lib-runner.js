@@ -2426,6 +2426,7 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     '',
     `Task to decompose: ${task.id} — ${task.title}`,
     `Task objective: ${task.objective || ''}`,
+    ...(uuPrior(task) >= UU_ELICIT_THRESHOLD ? ['HIGH uncertainty prior (U7 — this task likely harbors hidden unknowns): decompose COARSER and one level DEEPER than seems necessary; prefer needs_decomposition children (expectedDepth>=1) over runnable leaves, so hidden unknowns surface as sub-goals rather than a premature confident leaf.'] : []),
     ...(task.purpose ? [`Task purpose (WHY it exists / how it serves the goal): ${task.purpose}`] : []),
     ...(task.expectedResult ? [`Task expected result (WHAT "done" must produce): ${task.expectedResult}`] : []),
     `Task responsibility: ${task.responsibility || ''}`,
@@ -3045,6 +3046,7 @@ function closeExecuteSuccess({
   verifyMode = false,
   verifyRetries = 0,
   escalateOnSaturation = false,
+  escalationResolvers = [],
 }) {
   const surpriseHistoryEntry = surpriseReport.surpriseReported
     ? appendSurpriseHistory({
@@ -3109,11 +3111,35 @@ function closeExecuteSuccess({
     // has stalled. U5: close as SATURATION (a distinct, trajectory-grounded honest stall) recording the ledger, not
     // a plain first-attempt block. Still status=blocked (the completion is honestly NOT certified).
     const saturated = verifyMode && verifyRetries > 0 && attempts >= verifyRetries;
-    // U4 (resource-relative saturation): a fixpoint is only THIS resource's ceiling, not the system's. Before
-    // declaring gg, escalate ONE rung — re-decompose the saturated leaf into finer independently-verifiable
-    // sub-goals (attack the unknown-unknown via smaller known-unknowns; the failure is evidence the "atomic" leaf
-    // was not atomic). Gated (escalateOnSaturation) + once per task (saturationEscalated) so it never loops; when
-    // off or already escalated, saturation closes as an honest gg block (default behavior preserved).
+    // U4 (resource-relative saturation): a fixpoint is only THIS resource's ceiling, not the system's — gg only when
+    // the whole escalation ladder fixpoints. RUNG 1 — CAPABILITY-DELEGATE: re-attempt the fixpointed task with a
+    // different/stronger resolver (a different runtime may cross the friction this one cannot). Each resolver in the
+    // pool is tried once (escalatedResolvers), with a fresh attempt budget + the friction history handed over.
+    if (saturated) {
+      const tried = Array.isArray(task.escalatedResolvers) ? task.escalatedResolvers : [];
+      const current = task.executorOverride || executor;
+      const next = (escalationResolvers || []).find((r) => r && r !== current && !tried.includes(r));
+      if (next) {
+        updateMarkdownFrontmatter(task.path, (fm) => {
+          fm.status = 'pending';
+          fm.runReadiness = 'runnable';
+          fm.uncertaintyState = 'known';
+          fm.executorOverride = next;
+          fm.escalatedResolvers = tried.concat([next]);
+          fm.verifyAttempts = 0;   // fresh floor for the stronger resolver
+          fm.attemptLedger = nextLedger;
+          fm.lastCheckFailure = sanitizeFmScalar(`A prior resolver SATURATED after ${attempts} verify attempts on: ${feedback}. You are a stronger/other resolver re-attempting with that friction history — cross it.`, { maxLen: 1000 });
+          return fm;
+        });
+        logEvent(eventsPath, { timestamp: finishedAt, type: 'saturation_escalate', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, rung: 'delegate', resolver: next, afterAttempts: attempts });
+        appendRunLog(runDir, `${finishedAt} saturation_escalate taskId=${task.id} rung=delegate resolver=${next} afterAttempts=${attempts}`);
+        return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor: next, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
+      }
+    }
+    // RUNG 2 — PERTURB-DECOMPOSE: re-decompose the saturated leaf into finer independently-verifiable sub-goals
+    // (attack the unknown-unknown via smaller known-unknowns; the failure is evidence the "atomic" leaf was not
+    // atomic). Gated (escalateOnSaturation) + once per task (saturationEscalated). When the ladder is exhausted (all
+    // resolvers tried + perturbed, or escalation off), saturation closes as an honest gg block (default preserved).
     if (saturated && escalateOnSaturation && !task.saturationEscalated) {
       updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'pending';
@@ -3166,8 +3192,8 @@ function closeExecuteSuccess({
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
   // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
-  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null) {
-    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; return fm; });
+  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null || task.executorOverride != null || task.escalatedResolvers != null || task.saturationEscalated != null) {
+    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; delete fm.executorOverride; delete fm.escalatedResolvers; delete fm.saturationEscalated; return fm; });
   }
 
   logEvent(eventsPath, {
@@ -3181,7 +3207,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0, escalateOnSaturation = false }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0, escalateOnSaturation = false, escalationResolvers = [] }) {
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
@@ -3218,7 +3244,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, projectDir, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode, selfResolutionGuide });
+    result = invokeExecutor({ project, projectDir, task, executor: (task.executorOverride || executor), agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode, selfResolutionGuide });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err), executor, workspacePath: artifactWorkspacePath };
   }
@@ -3406,6 +3432,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       verifyMode: verifyRequiredChecks,
       verifyRetries,
       escalateOnSaturation,
+      escalationResolvers,
     });
   }
 
@@ -5310,6 +5337,7 @@ export function runTaskOps(workDir, options = {}) {
   const continueOnFailure = options.continueOnFailure === true;
   const verifyRetries = Math.max(0, Math.floor(Number(options.verifyRetries) || 0));
   const escalateOnSaturation = options.escalateOnSaturation === true;
+  const escalationResolvers = Array.isArray(options.escalationResolvers) ? options.escalationResolvers.filter(Boolean) : [];
   // D1 active delegation: an independent AI resolver (a runtime adapter, different from the executor) that answers
   // escalated resolverKind:'ai' decisions so the task resumes, instead of pausing for a manual fill.
   const aiResolver = options.aiResolver ? String(options.aiResolver) : null;
@@ -5542,6 +5570,7 @@ export function runTaskOps(workDir, options = {}) {
           verifyRequiredChecks,
           verifyRetries,
           escalateOnSaturation,
+          escalationResolvers,
         });
       } else if (next.kind === 'decompose') {
         stepResult = executeDecompositionTask({
