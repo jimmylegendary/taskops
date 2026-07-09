@@ -8,7 +8,7 @@
   "false_completion": false,
   "missed_honest": false,
   "agent_edited": true,
-  "diff_lines": 73,
+  "diff_lines": 49,
   "verifyRetries": 0,
-  "wallclock_s": 215
+  "wallclock_s": 169
 }
