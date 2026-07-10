@@ -259,7 +259,7 @@ Adapter boundary:
 
 - `--runtime dry-run` maps to the existing safe synthetic executor and is used by smoke tests.
 - `--runtime openclaw-cli` maps to `openclaw agent --json`.
-- `--runtime claude-code` maps to `claude --print --permission-mode bypassPermissions`.
+- `--runtime claude-code` maps to `claude --print --output-format text --permission-mode bypassPermissions`. Set `TASKOPS_CLAUDE_MODEL` to route a task to a specific Claude model (adds `--model`; unset = default), and `TASKOPS_CLAUDE_EXTRA_ARGS` for extra flags — mirrors `TASKOPS_CODEX_MODEL`, so an orchestrator can distribute work across Claude tiers.
 - `--runtime codex-cli` maps to `codex --ask-for-approval never exec --skip-git-repo-check --sandbox danger-full-access`.
 - `--runtime opencode-cli` maps to `opencode run` when an `opencode` binary is available.
 - The runtime registry reports structured success, missing binary, authentication failure, runtime failure, and timeout results so queue attempts can fail honestly without hiding why.

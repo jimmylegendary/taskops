@@ -193,12 +193,19 @@ function openClawArgs({ agentId, sessionKey, prompt, timeoutMs }) {
 }
 
 function claudeArgs({ prompt }) {
-  return [
+  const args = [
     '--print',
     '--output-format', 'text',
     '--permission-mode', 'bypassPermissions',
-    prompt,
   ];
+  // Optional per-task model routing via env (mirrors TASKOPS_CODEX_MODEL) — lets an orchestrator
+  // distribute work across Claude tiers. Inactive unless set, so default claude behavior is unchanged.
+  const model = trim(process.env.TASKOPS_CLAUDE_MODEL);
+  if (model) args.push('--model', model);
+  const extra = trim(process.env.TASKOPS_CLAUDE_EXTRA_ARGS);
+  if (extra) args.push(...extra.split(/\s+/).filter(Boolean));
+  args.push(prompt);
+  return args;
 }
 
 function codexArgs({ prompt }) {

@@ -62,6 +62,14 @@ echo "late"
   assert.equal(success.status, 'success');
   assert.match(success.stdout, /claude received/);
 
+  // TASKOPS_CLAUDE_MODEL routes to --model (env-gated; default args unchanged above).
+  const priorModel = process.env.TASKOPS_CLAUDE_MODEL;
+  process.env.TASKOPS_CLAUDE_MODEL = 'claude-test-model';
+  const modelRouted = invokeRuntimeAdapter('claude-code', { prompt: 'hi', timeoutMs: 1000, env });
+  assert.match(modelRouted.stdout, /--model claude-test-model/);
+  if (priorModel == null) delete process.env.TASKOPS_CLAUDE_MODEL;
+  else process.env.TASKOPS_CLAUDE_MODEL = priorModel;
+
   const auth = invokeRuntimeAdapter('codex-cli', {
     prompt: 'hello',
     sessionKey: 'test-session',
