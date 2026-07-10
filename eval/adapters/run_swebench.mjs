@@ -88,12 +88,19 @@ const rr = (task.runRefs || [])[0] || {};
 const review = rr.runNodeId && existsSync(join(w, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`))
   ? parseMarkdownFile(join(w, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`)).reviewReport : {};
 // official verdict = re-grade the final workspace directly (independent of TaskOps' own gate)
-let officialResolved = null, diffLines = null;
+let officialResolved = null, diffLines = null, gradeError = null;
 try {
   const out = execFileSync(VENV_PY, [GRADE, instanceId, workspace], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   officialResolved = /"resolved":\s*true/.test(out);
   const m = out.match(/"diff_lines":\s*(\d+)/); diffLines = m ? Number(m[1]) : null;
-} catch { officialResolved = false; }
+} catch (e) {
+  // A genuine UNRESOLVED verdict exits 1 but still prints the {"resolved":false} JSON on stdout; an INFRA error
+  // (Docker/transient) prints no verdict. Never let the latter masquerade as unresolved — record null + grade_error.
+  const out = `${(e.stdout || '').toString()}`;
+  const m2 = out.match(/"resolved":\s*(true|false)/);
+  if (m2) { officialResolved = m2[1] === 'true'; const dm = out.match(/"diff_lines":\s*(\d+)/); diffLines = dm ? Number(dm[1]) : null; }
+  else { officialResolved = null; gradeError = ((e.stderr || e.message || '').toString()).slice(0, 300); }
+}
 
 const verifiedDone = task.status === 'done' && review.decision === 'approved' && review.verified === true;
 const rec = {

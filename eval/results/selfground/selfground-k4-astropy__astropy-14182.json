@@ -1,0 +1,23 @@
+{
+  "instance_id": "astropy__astropy-14182",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "arm": "selfground",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "official_resolved": false,
+  "self_ground_gap": true,
+  "honest_block": false,
+  "missed_solve": false,
+  "agent_edited": true,
+  "diff_lines": 19,
+  "quiz": {
+    "note": "comprehensionVerified=true in review (my summary probe-count extraction was buggy); quiz passed"
+  },
+  "review_missingExpected": [],
+  "review_failedChecks": [],
+  "verifyRetries": 4,
+  "wallclock_s": 413,
+  "first_grade_was_transient_throw": true,
+  "gap_mechanism": "self-test scoped to WRITE + 2 header rows; hidden test requires READ round-trip + 3rd row (dtype). fix+self-test co-derived from same (write-only) reading of the issue title 'header rows in RST output'."
+}

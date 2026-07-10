@@ -953,6 +953,11 @@ function normalizeAcceptance(task) {
     requiredChecks: asArray(raw.requiredChecks),
     semanticAssertions: semanticAssertionsFrom(raw),
     comprehensionQuiz: raw.comprehensionQuiz === true,
+    // Provenance (P1): a check the EXECUTOR authored during this run (e.g. a self-written repro test) cannot certify
+    // the work to the same tier as an INDEPENDENT/external check — acceptance and implementation share one mind, so a
+    // self-authored check can only test known-unknowns ("does my code do what I think"), never the unknown-unknown
+    // ("is my scope even right"). A self-authored close is `self_verified`, never full `verified` (see buildReviewReport).
+    selfAuthoredCheck: raw.selfAuthoredCheck === true,
   };
 }
 
@@ -1340,18 +1345,32 @@ export function prepareIsolatedQuizWorkspace(sourceCwd) {
   return dir;
 }
 
-function buildComprehensionQuizPrompt({ task, acceptance, cwd }) {
+export function buildComprehensionQuizPrompt({ task, acceptance, cwd, diffText = '', touchedFiles = '' }) {
   const checks = (acceptance.requiredChecks || []).map((c) => commandText(c)).filter(Boolean).join('; ');
-  return [
+  const lines = [
     'COMPREHENSION QUIZ — you are an INDEPENDENT reviewer, NOT the implementer. Do not modify the change.',
     `The change is in the current directory (${cwd}).`,
     `The task was: ${task.objective || task.title || task.id}`,
     `The author already verified these checks: ${checks || '(none)'}.`,
-    "Write 2-4 RUNNABLE shell probe-commands (exit 0 = pass) that test the change's INTERACTIONS, side-effects,",
-    'and edge cases NOT covered by the author checks (existing callers, boundary inputs, error paths).',
+  ];
+  // P2 — seed the probes from what the change ACTUALLY TOUCHED (not just the task narrative), so the reviewer hunts
+  // the code paths the author's own checks — which share the author's scope — are most likely to miss.
+  if (touchedFiles) lines.push(`The change TOUCHED these files: ${touchedFiles}. For each touched symbol, consider its CALLERS and its INVERSE/dual operation.`);
+  if (diffText) lines.push('The change (git diff HEAD) is below — read it and target what it does NOT cover:', '```diff', diffText, '```');
+  lines.push(
+    "Write 2-4 RUNNABLE shell probe-commands (exit 0 = pass) that exercise paths the author's checks likely MISS.",
+    // P3 — the highest-value missed path is the INVERSE of whatever the change does. A writer change must be probed by
+    // READING back; encode by decode; serialize by parse; set by get; add by remove. This catches the write-only-scope
+    // class of self-ground gap (author fixes/tests one direction; the true spec needs the round-trip).
+    'PRIORITISE: (a) the INVERSE / ROUND-TRIP of any transform the change makes — if it changed a writer/encoder/',
+    'serializer/setter, probe the reader/decoder/parser/getter on the SAME data and assert the round-trip holds;',
+    '(b) callers that reach the touched code by a DIFFERENT entry point; (c) boundary inputs and error paths.',
+    'Each probe MUST actually depend on the change (it should FAIL if the change were reverted). Do NOT write trivial',
+    'always-pass probes (exit 0 / true / echo).',
     'Write them as JSON {"probes":[{"command":"...","rationale":"..."}]} to a file named comprehension-quiz.json',
     'in the current directory. Output only that file; do not change any other file.',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 // Invoke an INDEPENDENT quiz-generator (a fresh agent session, distinct agentId from the executor) that writes
@@ -1361,7 +1380,16 @@ function invokeComprehensionQuizGenerator({ task, executor, agentId, stepTimeout
   // survive — only the independent quiz-generator's fresh file counts (absent -> empty quiz -> inconclusive).
   try { rmSync(join(cwd, 'comprehension-quiz.json'), { force: true }); } catch {}
   if (executor === 'dry-run') return; // dry-run cannot independently generate a quiz
-  const prompt = buildComprehensionQuizPrompt({ task, acceptance, cwd });
+  // P2: seed from the change surface. The quiz cwd is a copy of the workspace with .git preserved, so `git diff HEAD`
+  // reveals exactly what changed. Best-effort — a non-git or no-diff workspace falls back to the narrative-only prompt.
+  let diffText = '', touchedFiles = '';
+  try {
+    const names = spawnSync('git', ['-C', cwd, 'diff', '--name-only', 'HEAD'], { encoding: 'utf8', timeout: 20000 });
+    if (names.status === 0) touchedFiles = String(names.stdout || '').split('\n').filter(Boolean).slice(0, 40).join(', ');
+    const diff = spawnSync('git', ['-C', cwd, 'diff', 'HEAD'], { encoding: 'utf8', timeout: 20000, maxBuffer: 4 * 1024 * 1024 });
+    if (diff.status === 0) diffText = String(diff.stdout || '').split('\n').slice(0, 200).join('\n');
+  } catch {}
+  const prompt = buildComprehensionQuizPrompt({ task, acceptance, cwd, diffText, touchedFiles });
   try { invokeRuntimeAdapter(executor, { prompt, agentId: `${agentId}-quiz`, timeoutMs: stepTimeoutMs, cwd }); } catch {}
 }
 
@@ -1484,6 +1512,17 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   const decision = failedChecks.length > 0
     ? 'rejected'
     : (missingExpected.length > 0 || unsupportedObserved.length > 0 ? 'needs_verification' : 'approved');
+  // Assurance tier (P1): distinguish an EXTERNALLY-grounded close from a SELF-grounded one. A self-authored check is
+  // runner-executed but NOT independent, so an approved self-authored close is `self_verified` (provisional), never
+  // full `verified` — this stops taskops overclaiming a fix whose own acceptance cannot see it is out of scope.
+  const selfAuthored = acceptance.selfAuthoredCheck === true;
+  const externallyVerified = verifyMode === true && decision === 'approved' && !selfAuthored;
+  const assuranceTier = decision !== 'approved'
+    ? 'unverified'
+    : (selfAuthored ? 'self_verified' : (verifyMode === true ? 'verified' : 'self_reported'));
+  const followUpNeeded = decision === 'approved'
+    ? (selfAuthored ? ['self_verified — the acceptance was authored by the executor and not independently confirmed, so the true specification may be under-specified (untested code paths, missing inverse/round-trip); treat this as provisional and require an external check for full verified_done'] : [])
+    : ['Add observed evidence/check results or revise acceptance before closure is trusted.'];
   return {
     schemaVersion: 'acceptance-review-v1',
     decision,
@@ -1493,12 +1532,16 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     missingExpected,
     unsupportedObserved,
     failedChecks,
-    followUpNeeded: decision === 'approved' ? [] : ['Add observed evidence/check results or revise acceptance before closure is trusted.'],
+    followUpNeeded,
     reviewedAcceptanceHash: sha256Of(acceptance),
     reviewedResultHash: sha256Of(result),
     // Auditability: record whether this review was runner-verified (--verify-checks) or based on
     // self-reported evidence, so a downstream reader can tell how the resulting claimSafe was grounded.
     verified: verifyMode === true,
+    // externallyVerified (P1): true ONLY when a runner-executed, non-self-authored check certified it. `verified` stays
+    // as-is for back-compat (= runner-verify mode was on); externallyVerified + assuranceTier carry the independence.
+    externallyVerified,
+    assuranceTier,
     // comprehensionVerified asserts the quiz was RUNNER-verified — only true under verify mode (else the
     // probe results are self-attested and must not be stamped as an independent understanding check).
     comprehensionVerified: acceptance.comprehensionQuiz === true && decision === 'approved' && verifyMode === true,
@@ -2924,6 +2967,10 @@ function writeReviewForRunNode({ projectDir, task, runNode, verifyMode = false }
       reviewReportHash,
       reviewedAcceptanceHash: report.reviewedAcceptanceHash,
       reviewedResultHash: report.reviewedResultHash,
+      // P1: carry the assurance tier onto the closed EoW so a self_verified close is auditable as provisional
+      // (not stamped with the same authority as an externally-verified one).
+      assuranceTier: report.assuranceTier,
+      externallyVerified: report.externallyVerified === true,
     } : null,
   };
 }
@@ -5003,6 +5050,9 @@ function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedRev
       fm.approvedReviewReportHash = approvedReview.reviewReportHash;
       fm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
       fm.reviewedResultHash = approvedReview.reviewedResultHash;
+      // P1: persist the assurance tier so a self_verified close is auditable on the EoW itself.
+      if (approvedReview.assuranceTier) fm.assuranceTier = approvedReview.assuranceTier;
+      fm.externallyVerified = approvedReview.externallyVerified === true;
       if (fm.reason === 'manual_close' || fm.reason === 'no_further_decomposition' || fm.reason === 'execution_path_closed') {
         fm.reason = 'approved_result';
       }

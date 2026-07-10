@@ -323,6 +323,7 @@ export function invokeRuntimeAdapter(runtimeAdapter, {
   const result = spawnSync(command, args, {
     encoding: 'utf8',
     timeout: timeoutMs == null ? undefined : timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
     env,
     cwd,
   });

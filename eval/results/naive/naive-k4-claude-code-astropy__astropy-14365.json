@@ -2,12 +2,12 @@
   "instance_id": "astropy__astropy-14365",
   "dataset": "princeton-nlp/SWE-bench_Lite",
   "executor": "claude-code",
-  "arm": "bare",
+  "arm": "naive-retry",
+  "k": 4,
   "adapter_ok": true,
-  "claimed_done": true,
   "official_resolved": true,
+  "grade_error": null,
+  "rounds_used": 1,
   "diff_files": 1,
-  "false_completion": false,
-  "missed_honest": false,
-  "wallclock_s": 199
+  "wallclock_s": 144
 }

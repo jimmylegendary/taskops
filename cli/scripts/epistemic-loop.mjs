@@ -9,10 +9,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fmBlock, parseMarkdownFile } from '../lib-taskops.js';
-import { runTaskOps, uuPrior, buildAgentExecutionPrompt, buildAgentDecompositionPrompt } from '../lib-runner.js';
+import { runTaskOps, uuPrior, buildAgentExecutionPrompt, buildAgentDecompositionPrompt, buildComprehensionQuizPrompt } from '../lib-runner.js';
 
 const now = '2026-07-09T00:00:00.000Z';
-function build(root, checks) {
+function build(root, checks, acceptanceExtra = {}) {
   const w = join(root, 'work');
   const tv = 'task-groups/tg-root/versions/tgv-root-v1';
   for (const d of [`${tv}/tasks`, 'snapshots']) mkdirSync(join(w, d), { recursive: true });
@@ -21,9 +21,14 @@ function build(root, checks) {
   md('task-groups/tg-root/index.md', { taskOpsVersion: 'v1', entityType: 'taskGroup', id: 'tg-root', objective: 'x', activeVersionId: 'tgv-root-v1', createdAt: now, status: 'active' });
   md(`${tv}/index.md`, { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: 'tgv-root-v1', taskGroupId: 'tg-root', version: 'v1', summary: 's', selected: true, createdAt: now, status: 'active' });
   md('snapshots/snapshot-root-v1.md', { taskOpsVersion: 'v1', entityType: 'versionSnapshot', id: 'snapshot-root-v1', rootTaskGroupId: 'tg-root', createdAt: now, label: 'R', status: 'active', selectedVersions: [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }] });
-  md(`${tv}/tasks/t.md`, { taskOpsVersion: 'v1', entityType: 'task', id: 't', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 't', objective: 'x', responsibility: 'own', completionCriteria: 'check', order: 1, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known', acceptance: { mode: 'guarded', expectedOutcome: 'check', requiredChecks: checks.map((command) => ({ command })) } });
+  md(`${tv}/tasks/t.md`, { taskOpsVersion: 'v1', entityType: 'task', id: 't', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 't', objective: 'x', responsibility: 'own', completionCriteria: 'check', order: 1, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known', acceptance: { mode: 'guarded', expectedOutcome: 'check', requiredChecks: checks.map((command) => ({ command })), ...acceptanceExtra } });
   return w;
 }
+const readReview = (w) => {
+  const t = readTask(w);
+  const rr = (t.runRefs || [])[0] || {};
+  return parseMarkdownFile(join(w, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`)).reviewReport;
+};
 const readTask = (w) => parseMarkdownFile(join(w, 'task-groups/tg-root/versions/tgv-root-v1/tasks/t.md'));
 const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`;  // fails once (creates m), passes thereafter
 
@@ -122,4 +127,46 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`;  // fails once (c
   assert.ok(dMurky.includes('HIGH uncertainty prior'), 'high uu-prior => decompose prompt biases toward coarser/deeper decomposition');
 }
 
-console.log('OK epistemic-loop (U1-U7: novelty-bounded retry, saturation + resource-relative escalation ladder [delegate+decompose], ledger cleared, uu-prior gates proactive elicitation + adaptive depth)');
+// H) P1 ASSURANCE TIER: a passing SELF-AUTHORED check closes done but only at the `self_verified` tier (provisional,
+// externallyVerified=false, caveat surfaced) — never the full `verified` tier an INDEPENDENT/external check earns.
+// This is the honest floor under oracle-free self-grounding: a check the executor authored can confirm "my code does
+// what I think" but not "my scope is even right" (the acceptance and the implementation share one mind).
+{
+  const root = mkdtempSync(join(tmpdir(), 'taskops-ep-p1self-'));
+  const w = build(root, ['true'], { selfAuthoredCheck: true });
+  runTaskOps(w, { executor: 'dry-run', maxSteps: 4, verifyChecks: true, verifyRetries: 0, continueOnFailure: true });
+  const t = readTask(w); const r = readReview(w);
+  assert.equal(t.status, 'done', 'a passing self-authored check still closes the task');
+  assert.equal(r.decision, 'approved');
+  assert.equal(r.assuranceTier, 'self_verified', 'a self-authored check earns only the self_verified tier');
+  assert.equal(r.externallyVerified, false, 'self-authored is NOT externally verified');
+  assert.ok((r.followUpNeeded || []).some((f) => /self_verified/.test(f)), 'the provisional caveat is surfaced');
+  rmSync(root, { recursive: true, force: true });
+}
+// control) an EXTERNAL (default) passing check earns the full `verified` tier + externallyVerified=true.
+{
+  const root = mkdtempSync(join(tmpdir(), 'taskops-ep-p1ext-'));
+  const w = build(root, ['true']);
+  runTaskOps(w, { executor: 'dry-run', maxSteps: 4, verifyChecks: true, verifyRetries: 0, continueOnFailure: true });
+  const r = readReview(w);
+  assert.equal(r.decision, 'approved');
+  assert.equal(r.assuranceTier, 'verified', 'an external runner-executed check earns the full verified tier');
+  assert.equal(r.externallyVerified, true, 'external check => externallyVerified');
+  rmSync(root, { recursive: true, force: true });
+}
+
+// I) P2/P3 QUIZ PROMPT: seeded from the DIFF surface (P2) + prioritises the INVERSE/round-trip (P3 — the write-only-
+// scope gap class that produced the astropy-14182 self_ground_gap); falls back cleanly when there is no diff.
+{
+  const task = { id: 't', title: 'T', objective: 'add a writer' };
+  const acceptance = { requiredChecks: [{ command: 'pytest' }] };
+  const withDiff = buildComprehensionQuizPrompt({ task, acceptance, cwd: '/x', diffText: '--- a/rst.py\n+++ b/rst.py\n+    def write(self, lines):', touchedFiles: 'io/ascii/rst.py' });
+  assert.ok(withDiff.includes('TOUCHED these files: io/ascii/rst.py'), 'quiz is seeded from the diff surface (P2)');
+  assert.ok(withDiff.includes('git diff HEAD'), 'the diff is shown to the reviewer (P2)');
+  assert.ok(/INVERSE \/ ROUND-TRIP/i.test(withDiff) && /reader\/decoder\/parser\/getter/.test(withDiff), 'prioritises the inverse/round-trip (P3)');
+  const noDiff = buildComprehensionQuizPrompt({ task, acceptance, cwd: '/x' });
+  assert.ok(!noDiff.includes('TOUCHED these files'), 'falls back cleanly when there is no diff');
+  assert.ok(/INVERSE \/ ROUND-TRIP/i.test(noDiff), 'the inverse/round-trip instruction is present even without a diff');
+}
+
+console.log('OK epistemic-loop (U1-U7 + P1 self_verified tier + P2/P3 diff-seeded inverse-aware quiz: novelty-bounded retry, saturation + resource-relative escalation ladder [delegate+decompose], ledger cleared, uu-prior gates proactive elicitation + adaptive depth)');
