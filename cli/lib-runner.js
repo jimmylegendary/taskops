@@ -1347,6 +1347,20 @@ export function prepareIsolatedQuizWorkspace(sourceCwd) {
 
 export function buildComprehensionQuizPrompt({ task, acceptance, cwd, diffText = '', touchedFiles = '' }) {
   const checks = (acceptance.requiredChecks || []).map((c) => commandText(c)).filter(Boolean).join('; ');
+  // A/B eval + rollback affordance: TASKOPS_QUIZ_LEGACY=1 returns the pre-P2/P3 narrative-only prompt (no diff seed,
+  // no inverse/round-trip steering) so the P2/P3 effect on gap-catch rate can be measured against a faithful baseline.
+  if (process.env.TASKOPS_QUIZ_LEGACY === '1') {
+    return [
+      'COMPREHENSION QUIZ — you are an INDEPENDENT reviewer, NOT the implementer. Do not modify the change.',
+      `The change is in the current directory (${cwd}).`,
+      `The task was: ${task.objective || task.title || task.id}`,
+      `The author already verified these checks: ${checks || '(none)'}.`,
+      "Write 2-4 RUNNABLE shell probe-commands (exit 0 = pass) that test the change's INTERACTIONS, side-effects,",
+      'and edge cases NOT covered by the author checks (existing callers, boundary inputs, error paths).',
+      'Write them as JSON {"probes":[{"command":"...","rationale":"..."}]} to a file named comprehension-quiz.json',
+      'in the current directory. Output only that file; do not change any other file.',
+    ].join('\n');
+  }
   const lines = [
     'COMPREHENSION QUIZ — you are an INDEPENDENT reviewer, NOT the implementer. Do not modify the change.',
     `The change is in the current directory (${cwd}).`,
