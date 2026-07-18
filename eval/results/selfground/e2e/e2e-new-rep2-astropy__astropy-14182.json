@@ -12,8 +12,8 @@
   "self_ground_gap": false,
   "honest_block": true,
   "missed_solve": false,
-  "agent_edited": false,
-  "diff_lines": 0,
+  "agent_edited": true,
+  "diff_lines": 19,
   "grade_error": null,
   "quiz": {
     "probes": 0,
@@ -25,5 +25,5 @@
   "review_failedChecks": null,
   "review_followUpNeeded": null,
   "verifyRetries": 4,
-  "wallclock_s": 11
+  "wallclock_s": 192
 }

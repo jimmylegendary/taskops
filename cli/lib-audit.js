@@ -304,6 +304,78 @@ function auditProjectionConsistency(parsed) {
   return issues;
 }
 
+// ---- Assurance ledger (P0-1 + failure certificates; spec: docs/specs/failure-certificate.md) --------------
+// DONE side: the P1 assuranceTier stamped on task EoWs (verified > self_verified > self_reported). FAIL side:
+// the failureCertificate stamped on blocked/failed closes (content vs infra/protocol; undetermined = F1's
+// third class). Both sides feed claimSafe through ISSUES (the single source of truth) rather than ad-hoc
+// formula edits: a self_verified closure is an ERROR (a completion claim on top of it would overclaim — the
+// Arm-D self_ground_gap hole), an uncertified blocked close is a WARNING (legacy), undetermined is INFO.
+const DONE_TIER_RANK = { verified: 3, self_verified: 2, self_reported: 1, unverified: 0 };
+
+function doneTierForTask(parsed, task) {
+  const tiers = taskEows(parsed, task).map((eow) => eow.assuranceTier).filter(Boolean);
+  if (tiers.length === 0) return null; // legacy close — tier never stamped
+  return tiers.slice().sort((a, b) => (DONE_TIER_RANK[a] ?? -1) - (DONE_TIER_RANK[b] ?? -1))[0]; // weakest wins
+}
+
+function assuranceSummary(parsed) {
+  const terminals = terminalSelectedTasks(parsed);
+  const doneTasks = terminals.filter((task) => task.status === 'done');
+  const blockedTasks = terminals.filter((task) => ['blocked', 'failed'].includes(task.status));
+  const tiers = doneTasks.map((task) => doneTierForTask(parsed, task));
+  const floor = doneTasks.length === 0
+    ? 'none'
+    : (tiers.some((tier) => tier == null)
+      ? 'unknown'
+      : tiers.slice().sort((a, b) => (DONE_TIER_RANK[a] ?? -1) - (DONE_TIER_RANK[b] ?? -1))[0]);
+  const certificates = blockedTasks.map((task) => task.failureCertificate).filter(Boolean);
+  return {
+    floor,
+    // The pure assurance dimension, orthogonal to structural claimSafe: every closed terminal task earned the
+    // full runner-verified, non-self-authored tier.
+    externallySafe: doneTasks.length > 0 && tiers.every((tier) => tier === 'verified'),
+    failureLedger: {
+      content: certificates.filter((cert) => cert.kind === 'content').length,
+      undetermined: certificates.filter((cert) => cert.failureTier === 'undetermined').length,
+      uncertified: blockedTasks.filter((task) => !task.failureCertificate).length,
+    },
+  };
+}
+
+function auditAssuranceLedger(parsed) {
+  const issues = [];
+  const terminals = terminalSelectedTasks(parsed);
+  const selfVerified = terminals.filter((task) => task.status === 'done' && doneTierForTask(parsed, task) === 'self_verified');
+  if (selfVerified.length > 0) {
+    issues.push(issue({
+      code: 'self_verified_closure_present',
+      severity: 'error',
+      message: `${selfVerified.length} closed task(s) are only self_verified (executor-authored acceptance, not independently confirmed); a completion claim on top of them would overclaim. Add an external check and re-verify to earn the verified tier.`,
+      evidence: { taskIds: selfVerified.slice(0, 5).map((task) => task.id) },
+    }));
+  }
+  const blockedTasks = terminals.filter((task) => ['blocked', 'failed'].includes(task.status));
+  const uncertified = blockedTasks.filter((task) => !task.failureCertificate);
+  if (uncertified.length > 0) {
+    issues.push(issue({
+      code: 'blocked_without_failure_certificate',
+      severity: 'warning',
+      message: `${uncertified.length} blocked/failed task(s) carry no failure certificate; the failure claim is untyped (content vs infra indistinguishable) and must not be counted as a true failure.`,
+      evidence: { taskIds: uncertified.slice(0, 5).map((task) => task.id) },
+    }));
+  }
+  const undetermined = blockedTasks.filter((task) => task.failureCertificate && task.failureCertificate.failureTier === 'undetermined');
+  if (undetermined.length > 0) {
+    issues.push(issue({
+      code: 'undetermined_failures_present',
+      severity: 'info',
+      message: `${undetermined.length} blocked task(s) closed on infra/protocol failure (undetermined): excluded from the failure ledger (F1's third class); re-queue once the harness issue is resolved.`,
+      evidence: { taskIds: undetermined.slice(0, 5).map((task) => task.id) },
+    }));
+  }
+  return issues;
+}
+
 function severityCounts(issues) {
   return issues.reduce((acc, item) => {
     acc[item.severity] = (acc[item.severity] || 0) + 1;
@@ -315,12 +387,14 @@ export function auditParsedWork(parsed, options = {}) {
   const issues = [
     ...auditDecompositionAdequacy(parsed, options),
     ...auditClosureIntegrity(parsed, options),
+    ...auditAssuranceLedger(parsed),
     ...auditProjectionConsistency(parsed, options),
   ];
   const counts = severityCounts(issues);
   const partialCount = partialMarkers(parsed).length;
   const unresolvedPartialCount = unresolvedPartialMarkers(parsed).length;
   const repeatedReviewTaskCount = repeatedPartialReviewTasks(parsed).length;
+  const assurance = assuranceSummary(parsed);
   const claimSafe = (counts.error || 0) === 0
     && parsed.errors.length === 0
     && parsed.closure?.policyApprovedComplete === true
@@ -331,6 +405,9 @@ export function auditParsedWork(parsed, options = {}) {
     projectDir: parsed.projectDir,
     claimSafe,
     strictSafe: claimSafe && (counts.warning || 0) === 0,
+    // Assurance ledger (P0-1): DONE-side tier floor + pure-assurance externallySafe + FAIL-side ledger.
+    // claimSafe itself is flipped by the self_verified ERROR issue — issues stay the single source of truth.
+    assurance,
     counts,
     metrics: {
       selectedTaskCount: selectedTasks(parsed).length,
@@ -358,6 +435,7 @@ export function renderAuditText(audit) {
     `counts error=${audit.counts.error || 0} warning=${audit.counts.warning || 0} info=${audit.counts.info || 0}`,
     `metrics selectedTasks=${audit.metrics.selectedTaskCount} terminalTasks=${audit.metrics.terminalSelectedTaskCount} selectedGroups=${audit.metrics.selectedTaskGroupCount} childGroups=${audit.metrics.selectedChildTaskGroupCount} versions=${audit.metrics.taskGroupVersionCount}`,
     `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount} partial=${audit.metrics.unresolvedPartialCount}/${audit.metrics.partialCount}`,
+    `assurance floor=${audit.assurance?.floor ?? 'unknown'} externallySafe=${audit.assurance?.externallySafe === true} failures content=${audit.assurance?.failureLedger?.content ?? 0} undetermined=${audit.assurance?.failureLedger?.undetermined ?? 0} uncertified=${audit.assurance?.failureLedger?.uncertified ?? 0}`,
   ];
   if (audit.validationErrors.length > 0) {
     lines.push('validation errors:');

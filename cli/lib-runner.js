@@ -3071,6 +3071,32 @@ function closeExecutePartial({
   };
 }
 
+// Failure certificate (the FAIL side of the assurance ledger, mirror of P1 assuranceTier): a blocked/failed
+// close carries a TYPED claim about WHY, so downstream accounting can separate "the produced work truly does
+// not satisfy the goal" (content) from "the harness could not run/parse the attempt" (infra/protocol). Only a
+// content close is a failure CLAIM about the task; infra/protocol closes are UNDETERMINED and must never be
+// counted as true failures — F1's third class, the same rule that keeps a grader-throw out of official_resolved.
+// The certificate never claims intrinsic impossibility: scope is always resource_relative (this budget, these
+// resolvers, this friction trajectory). `verified_failure` (check-validity + minimal-repro probes, F-2/F-3)
+// is NOT mintable in v0 — the tier ceiling here is runner_rejected. Spec: docs/specs/failure-certificate.md
+export function buildFailureCertificate({ kind, verifyMode = false, runnerRejected = false, saturated = false, attempts = 0, failureSig = null, resolversTried = [], reasons = [] } = {}) {
+  const failureTier = kind !== 'content'
+    ? 'undetermined'
+    : (runnerRejected ? 'runner_rejected' : 'self_reported_failure');
+  return {
+    schemaVersion: 'failure-certificate-v0',
+    kind,
+    failureTier,
+    scope: 'resource_relative',
+    verifyMode: verifyMode === true,
+    saturated: saturated === true,
+    attempts: Number(attempts) || 0,
+    ...(failureSig ? { failureSignature: failureSig } : {}),
+    ...(Array.isArray(resolversTried) && resolversTried.length ? { resolversTried } : {}),
+    ...(Array.isArray(reasons) && reasons.length ? { reasons: reasons.slice(0, 8).map((r) => sanitizeFmScalar(String(r), { maxLen: 300 })) } : {}),
+  };
+}
+
 function closeExecuteFailure({
   task,
   runDir,
@@ -3223,6 +3249,19 @@ function closeExecuteSuccess({
       taskUpdater: (fm) => {
         fm.status = 'blocked';
         if (saturated) { fm.saturation = true; fm.attemptLedger = nextLedger; }
+        // F-1/F-5: a guarded review-fail close is a CONTENT failure claim. Under --verify-checks with an
+        // affirmative rejection (failedChecks>0) it certifies as runner_rejected; a mere evidence gap
+        // (needs_verification) stays self_reported_failure — the work was not proven bad, only unproven.
+        fm.failureCertificate = buildFailureCertificate({
+          kind: 'content',
+          verifyMode,
+          runnerRejected: verifyMode === true && review.reviewReport.decision === 'rejected',
+          saturated,
+          attempts,
+          failureSig,
+          resolversTried: Array.isArray(task.escalatedResolvers) ? task.escalatedResolvers : [],
+          reasons: review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected),
+        });
         fm.lastRunFailureReason = sanitizeFmScalar(saturated
           ? `saturation: reached a fixpoint after ${attempts} verify attempts (the failure stopped being novel): ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`
           : `review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
@@ -3253,8 +3292,8 @@ function closeExecuteSuccess({
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
   // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
-  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null || task.executorOverride != null || task.escalatedResolvers != null || task.saturationEscalated != null) {
-    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; delete fm.executorOverride; delete fm.escalatedResolvers; delete fm.saturationEscalated; return fm; });
+  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null || task.executorOverride != null || task.escalatedResolvers != null || task.saturationEscalated != null || task.failureCertificate != null) {
+    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; delete fm.executorOverride; delete fm.escalatedResolvers; delete fm.saturationEscalated; delete fm.failureCertificate; return fm; });
   }
 
   logEvent(eventsPath, {
@@ -3382,6 +3421,9 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
           fm.lastRunFailureReason = reason;
           fm.needsManualReview = true;
           fm.malformedPartialRequest = true;
+          // F-1: a malformed marker is a PROTOCOL close (executor output violated the runner contract) —
+          // undetermined, never a failure claim about the task itself.
+          fm.failureCertificate = buildFailureCertificate({ kind: 'protocol', reasons: [reason] });
           return fm;
         },
         runNodeUpdater: (fm) => {
@@ -3436,6 +3478,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
           fm.lastRunFailureReason = reason;
           fm.needsManualReview = true;
           fm.malformedSurpriseReport = true;
+          fm.failureCertificate = buildFailureCertificate({ kind: 'protocol', reasons: [reason] });
           return fm;
         },
         runNodeUpdater: (fm) => {
@@ -3505,6 +3548,9 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     taskUpdater: (fm) => {
       fm.status = 'blocked';
       fm.lastRunFailureReason = sanitizeFmScalar(result.message);
+      // F-1: the executor/adapter did not produce a successful run — an INFRA close (undetermined), not a
+      // claim that the task's goal is unmet.
+      fm.failureCertificate = buildFailureCertificate({ kind: 'infra', reasons: [result.message || 'executor failure'] });
       return fm;
     },
     runNodeUpdater: (fm) => { fm.status = 'blocked'; return fm; },

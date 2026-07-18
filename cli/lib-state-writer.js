@@ -109,6 +109,11 @@ function applyApprovedReviewToEow(fm, approvedReview) {
   fm.approvedReviewReportHash = approvedReview.reviewReportHash;
   fm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
   fm.reviewedResultHash = approvedReview.reviewedResultHash;
+  // P1: persist the assurance tier on the freshly-created EoW too — the reviewTarget path already stamps
+  // existing EoWs (attachApprovedReviewToExistingEows); without this a runner close loses the tier and the
+  // audit assurance ledger cannot tell a self_verified close from a verified one.
+  if (approvedReview.assuranceTier) fm.assuranceTier = approvedReview.assuranceTier;
+  if (approvedReview.externallyVerified != null) fm.externallyVerified = approvedReview.externallyVerified === true;
 }
 
 export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }, io) {
