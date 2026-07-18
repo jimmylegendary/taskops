@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TaskOps Flow Map — 시나리오별 실행 경로 (v0.9.0 + P1/P2/P3)</title>
+<style>
+  :root{
+    --bg:#0e1217; --panel:#151b23; --panel2:#1a222c; --line:#26303c;
+    --ink:#e7edf4; --mut:#93a0b0; --dim:#5d6b7c;
+    --fn:#2dd4bf;      /* 기능(함수) */
+    --state:#6aabfa;   /* 상태 */
+    --gate:#b096f8;    /* 게이트/판정 */
+    --exc:#f87171;     /* 예외/실패 */
+    --ok:#4ade80;      /* 성공/verified */
+    --warn:#fbbf24;    /* 주의/self_verified */
+    --mono:ui-monospace,'JetBrains Mono','Cascadia Code',Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:'Pretendard Variable',Pretendard,-apple-system,'Noto Sans KR','Malgun Gothic',sans-serif;
+    font-size:15px;line-height:1.55;
+  }
+  a{color:var(--fn);text-decoration:none}
+
+  header{
+    position:sticky;top:0;z-index:30;background:linear-gradient(180deg,rgba(14,18,23,.97),rgba(14,18,23,.92));
+    backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:14px 22px 12px;
+  }
+  header h1{font-size:18px;font-weight:800;letter-spacing:-.01em}
+  header h1 .v{color:var(--mut);font-weight:600;font-size:13px;margin-left:8px}
+  .statusline{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;
+    padding:2px 10px;font-size:12px;color:var(--mut);background:var(--panel)}
+  .chip b{color:var(--ink);font-weight:700}
+  .chip.ok{border-color:rgba(74,222,128,.35)} .chip.ok b{color:var(--ok)}
+  .chip.warn{border-color:rgba(251,191,36,.35)} .chip.warn b{color:var(--warn)}
+  .chip.exc{border-color:rgba(248,113,113,.35)} .chip.exc b{color:var(--exc)}
+
+  .wrap{display:grid;grid-template-columns:250px 1fr;min-height:100vh}
+  nav{
+    border-right:1px solid var(--line);padding:16px 12px 40px;position:sticky;top:64px;
+    height:calc(100vh - 64px);overflow-y:auto;background:var(--bg);
+  }
+  nav .g{font-size:11px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;margin:16px 8px 6px;font-weight:700}
+  nav .g:first-child{margin-top:2px}
+  nav a{display:block;padding:6px 10px;border-radius:8px;color:var(--mut);font-size:13.5px;border:1px solid transparent}
+  nav a:hover{background:var(--panel);color:var(--ink)}
+  nav a.on{background:var(--panel2);color:var(--ink);border-color:var(--line)}
+  nav a .n{font-family:var(--mono);font-size:11px;color:var(--dim);margin-right:6px}
+
+  main{padding:26px 34px 120px;max-width:940px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:22px}
+  .lg{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--mut)}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  section.sc{margin-bottom:64px;scroll-margin-top:130px}
+  .sc h2{font-size:20px;font-weight:800;letter-spacing:-.01em;margin-bottom:4px}
+  .sc h2 .sid{font-family:var(--mono);font-size:13px;color:var(--dim);margin-right:8px}
+  .sc .sum{color:var(--mut);font-size:14px;max-width:72ch;margin-bottom:18px}
+  .sc .sum code, .card code, .edge code, .brh code{font-family:var(--mono);font-size:.92em;color:var(--fn);background:rgba(45,212,191,.07);padding:1px 5px;border-radius:5px}
+
+  .flow{position:relative}
+  .card{
+    position:relative;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:11px 15px;max-width:680px;
+  }
+  .card .k{font-size:10.5px;letter-spacing:.1em;font-weight:800;text-transform:uppercase;margin-bottom:2px}
+  .card .lb{font-weight:700;font-size:15px}
+  .card .sb{color:var(--mut);font-size:13px;margin-top:3px;max-width:64ch}
+  .card .meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+  .ref{font-family:var(--mono);font-size:11px;color:var(--dim);border:1px dashed var(--line);border-radius:6px;padding:1px 7px}
+  .tag{font-family:var(--mono);font-size:11px;border-radius:6px;padding:1px 7px;font-weight:600}
+  .tag.u{color:#c9b8ff;background:rgba(176,150,248,.12)}
+  .tag.ev{color:#8fd0ff;background:rgba(106,171,250,.12)}
+  .tag.fl{color:#7fe0d2;background:rgba(45,212,191,.10)}
+  .tag.bad{color:#ffb4b4;background:rgba(248,113,113,.13)}
+  .tag.good{color:#a9edc4;background:rgba(74,222,128,.12)}
+  .tag.warn2{color:#ffe2a1;background:rgba(251,191,36,.13)}
+
+  .card.fn{border-left:3px solid var(--fn)} .card.fn .k{color:var(--fn)}
+  .card.state{border-left:3px solid var(--state)} .card.state .k{color:var(--state)}
+  .card.gate{border-left:3px solid var(--gate)} .card.gate .k{color:var(--gate)}
+  .card.exc{border-left:3px solid var(--exc)} .card.exc .k{color:var(--exc)}
+  .card.end{border-left:3px solid var(--ok)} .card.end .k{color:var(--ok)}
+  .card.warn{border-left:3px solid var(--warn)} .card.warn .k{color:var(--warn)}
+
+  .edge{display:flex;align-items:center;gap:8px;margin:2px 0 2px 26px;min-height:34px}
+  .edge .stem{width:2px;align-self:stretch;background:var(--line);position:relative;border-radius:2px}
+  .edge .stem:after{content:'';position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);
+    border:5px solid transparent;border-top:7px solid var(--line)}
+  .edge .el{font-size:12px;color:var(--mut);background:var(--bg);border:1px solid var(--line);
+    border-radius:999px;padding:1px 10px}
+
+  .branches{margin:10px 0 10px 26px;display:flex;flex-direction:column;gap:10px}
+  .branch{border-left:2px solid var(--line);padding:2px 0 2px 18px;position:relative}
+  .branch:before{content:'';position:absolute;left:-2px;top:16px;width:14px;height:2px;background:var(--line)}
+  .branch.exc{border-left-color:rgba(248,113,113,.5)} .branch.exc:before{background:rgba(248,113,113,.5)}
+  .branch.alt{border-left-color:rgba(176,150,248,.5)} .branch.alt:before{background:rgba(176,150,248,.5)}
+  .branch.loop{border-left-color:rgba(251,191,36,.5)} .branch.loop:before{background:rgba(251,191,36,.5)}
+  .brh{font-size:12.5px;font-weight:700;margin-bottom:8px}
+  .branch.exc .brh{color:var(--exc)} .branch.alt .brh{color:var(--gate)} .branch.loop .brh{color:var(--warn)}
+  .branch .card{max-width:600px}
+
+  .loopback{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--warn);
+    border:1px dashed rgba(251,191,36,.45);border-radius:999px;padding:3px 12px;margin:4px 0}
+
+  .callout{border:1px solid rgba(248,113,113,.4);background:rgba(248,113,113,.07);border-radius:12px;
+    padding:10px 15px;max-width:680px;font-size:13.5px;margin-top:6px}
+  .callout.warn{border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.06)}
+  .callout b{color:var(--warn)}
+  .callout.red b{color:var(--exc)}
+
+  svg text{font-family:'Pretendard Variable',Pretendard,-apple-system,'Noto Sans KR',sans-serif}
+  .svgbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px;overflow-x:auto}
+  footer{color:var(--dim);font-size:12px;padding:0 34px 40px;max-width:940px}
+  @media (max-width:900px){.wrap{grid-template-columns:1fr}nav{display:none}main{padding:20px 16px 80px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>TaskOps Flow Map <span class="v">v0.9.0 (epistemic loop U1–U7) + P1 assurance tiers + P2/P3 quiz · HEAD d1a4d3f</span></h1>
+  <div class="statusline">
+    <span class="chip ok"><b>구현됨</b> P1 assuranceTier (verified / self_verified / self_reported / unverified)</span>
+    <span class="chip warn"><b>무효과 판정</b> P2/P3 quiz — 분포실험에서 catch-rate 이득 없음 (기능은 코드에 유지)</span>
+    <span class="chip exc"><b>P0 백로그(보류)</b> assuranceTier→claimSafe 미전파 · oracle 3-tier 분리 · budget vector</span>
+    <span class="chip"><b>실험</b> 4-arm 정직 결과 A 4/5 · B 5/5 · C 5/5 (쉬운 과제군에선 루프 ≤ 재시도) · Arm D → self_ground_gap 실증</span>
+  </div>
+</header>
+
+<div class="wrap">
+<nav id="nav"></nav>
+<main id="main">
+  <div class="legend">
+    <span class="lg"><span class="sw" style="background:var(--state)"></span>상태 (task/frontmatter)</span>
+    <span class="lg"><span class="sw" style="background:var(--fn)"></span>기능 (함수 실행)</span>
+    <span class="lg"><span class="sw" style="background:var(--gate)"></span>게이트/판정</span>
+    <span class="lg"><span class="sw" style="background:var(--exc)"></span>예외/실패 경로</span>
+    <span class="lg"><span class="sw" style="background:var(--ok)"></span>종결</span>
+    <span class="lg"><span class="tag u">U1–U7</span>epistemic-loop 유닛</span>
+    <span class="lg"><span class="tag ev">event</span>이벤트 로그</span>
+    <span class="lg"><span class="tag fl">flag</span>실행 플래그/env</span>
+  </div>
+  <div id="scenarios"></div>
+</main>
+</div>
+
+<footer>
+  근거: <code style="font-family:var(--mono)">cli/lib-runner.js</code> · <code style="font-family:var(--mono)">cli/lib-audit.js</code> 실코드 라인 (카드의 점선 칩). 2026-07-19 작성 — 세션 실험 판정(4-arm, self_ground_gap, P2/P3 무효과) 반영.
+</footer>
+
+<script>
+const S=[
+
+{id:'s0',group:'지도',title:'Task 생명주기 전체 상태도',
+sum:'한 task가 지나는 모든 상태와 전이. 아래 시나리오들은 이 지도 위의 개별 경로다. 상태는 전부 markdown frontmatter에 기록된다(file-as-truth).',
+svg:true},
+
+{id:'s1',group:'정상 종결',title:'외부 check 정상 통과 → verified',
+sum:'--verify-checks 모드에서 runner가 직접 requiredChecks를 실행해 전부 통과하는 가장 강한 종결. taskops가 유일하게 "verified"를 주장할 수 있는 경로.',
+steps:[
+{t:'state',lb:'pending (runReadiness: runnable)',sb:'acceptance에 requiredChecks / requiredArtifacts / semanticAssertions 정의됨',code:'task .md frontmatter'},
+{t:'fn',lb:'executeRunnableTask',sb:'executor(claude-code 등) 스폰, stepTimeoutMs·budget 적용. 프롬프트에 acceptance + FRICTION 보고 지시 포함',code:'lib-runner.js:3271',tags:[['fl','--verify-checks'],['fl','stepTimeoutMs']],next:'실행 종료'},
+{t:'state',lb:'done (잠정)',sb:'fm.status=done — 아직 인증 아님. run node에 result 기록',code:'lib-runner.js:3123'},
+{t:'fn',lb:'writeReviewForRunNode → buildReviewReport',sb:'runner가 requiredChecks 재실행(verifiedBy=runner), requiredArtifacts는 disk 존재 + 이 run이 생성했는지(producedThisRun) 확인, semanticAssertions 적용',code:'lib-runner.js:2930 · 1410',tags:[['fl','sanitizedCheckEnv :1188']],next:'전부 통과'},
+{t:'gate',lb:'decision = approved',sb:'failedChecks=0, missingExpected=0, unsupportedObserved=0',code:'lib-runner.js:1526-1528'},
+{t:'gate',lb:'assuranceTier = verified · externallyVerified = true',sb:'verifyMode ∧ approved ∧ ¬selfAuthored — 셋 다 만족할 때만',code:'lib-runner.js:1533-1536'},
+{t:'fn',lb:'closeTaskWithEow + attachApprovedReviewToExistingEows',sb:'EoW(Evidence of Work)에 approvedReview 부착, fm.assuranceTier·fm.externallyVerified 스탬프',code:'lib-runner.js:2826 · 5054 · 5068'},
+{t:'end',lb:'closed — verified',sb:'이후 auditParsedWork에서 claimSafe 판정으로 이어짐 (S11)',code:'lib-audit.js:314'},
+]},
+
+{id:'s2',group:'정상 종결',title:'verify 모드 없이 종결 → self_reported',
+sum:'--verify-checks가 꺼져 있으면 checkResults는 executor의 자기보고다. 승인돼도 tier는 self_reported — "runner가 실행하지 않은 결과는 인증이 아니다".',
+steps:[
+{t:'state',lb:'pending → 실행 → done (잠정)',sb:'S1과 동일하되 verifyMode=false',code:'lib-runner.js:3271'},
+{t:'fn',lb:'buildReviewReport (verifyMode=false)',sb:'observed.checkResults를 그대로 대조 — 단, 명시적 pass 상태가 없으면 통과로 치지 않음("unverified check ≠ passed check")',code:'lib-runner.js:1440-1459',br:[
+  {tone:'exc',lb:'check 결과가 아예 미보고',steps:[{t:'exc',lb:'missingExpected: required check not observed',sb:'→ decision=needs_verification',code:'lib-runner.js:1444-1446'}]},
+]},
+{t:'gate',lb:'decision = approved → assuranceTier = self_reported',sb:'verifyMode=false라서 verified가 될 수 없음. verified 필드도 false로 기록되어 downstream이 근거 수준을 구분 가능',code:'lib-runner.js:1536 · 1552-1554'},
+{t:'end',lb:'closed — self_reported',sb:'감사 관점에서 가장 약한 종결. 정직성은 유지되지만 인증은 아님'},
+]},
+
+{id:'s3',group:'실패·재시도',title:'check 실패 → novelty-bounded retry (U1·U3)',
+sum:'verify 실패는 friction이다. 실패 시그니처를 원장(ledger)에 기록하고, verifyRetries FLOOR까지는 무조건 재시도, 그 너머는 실패가 "새로울(novel) 때만" ceiling까지 연장한다. 같은 실패의 반복은 연장을 얻지 못한다.',
+steps:[
+{t:'fn',lb:'buildReviewReport → decision ≠ approved',sb:'failedChecks>0 → rejected / 증거 부족 → needs_verification',code:'lib-runner.js:1526-1528'},
+{t:'gate',lb:'mode ∈ {enforced, guarded, runner-managed}?',sb:'guarded 모드가 아니면 재시도 없이 실패 종결로 직행',code:'lib-runner.js:3137-3138'},
+{t:'fn',lb:'failureSignature + attemptLedger',sb:'실패 문자열들을 정규화·정렬해 시그니처화(500자 캡). 원장(최근 30개)에 없던 시그니처면 novel',code:'lib-runner.js:459 · 3146-3150',tags:[['u','U1 ledger']]},
+{t:'gate',lb:'withinFloor ∨ novelExtension ?',sb:'withinFloor: attempts < verifyRetries · novelExtension: floor 소진 후에도 novel이면 ceiling(=verifyRetries+VERIFY_NOVEL_EXTENSION)까지',code:'lib-runner.js:3151-3155',tags:[['u','U3 novelty-bounded']],br:[
+  {tone:'loop',lb:'YES → 재시도',steps:[
+    {t:'state',lb:'pending 복귀 (verifyAttempts+1)',sb:'fm.lastCheckFailure에 실패 피드백 + "First state FRICTION: 이 실패가 드러낸 너의 무지" 지시. uncertaintyState=known 고정(탐색 모드로 새지 않게)',code:'lib-runner.js:3156-3166',tags:[['ev','verify_retry (floor | novel_extension)']]},
+    {t:'loopback',lb:'↺ executeRunnableTask로 — 통과하면 S1 경로에 합류'},
+  ]},
+  {tone:'exc',lb:'NO → fixpoint (saturation)',steps:[
+    {t:'exc',lb:'S4 escalation ladder로',sb:'floor 소진 + 실패가 더 이상 novel하지 않음 = 이 리소스는 같은 실패 지도를 재생산 중',code:'lib-runner.js:3171-3174',tags:[['u','U5 saturation']]},
+  ]},
+]},
+]},
+
+{id:'s4',group:'실패·재시도',title:'saturation → escalation ladder (U4·U5)',
+sum:'fixpoint는 "이 리소스의 천장"이지 시스템의 천장이 아니다. RUNG 1: 다른/더 강한 resolver에게 friction 이력과 함께 위임. RUNG 2: leaf가 원자적이지 않았다는 증거로 보고 재분해. 사다리가 다 소진되면 정직한 gg(blocked).',
+steps:[
+{t:'gate',lb:'saturated = attempts ≥ verifyRetries',sb:'S3에서 novel 연장까지 소진된 상태',code:'lib-runner.js:3174'},
+{t:'gate',lb:'RUNG 1 — capability-delegate 가능?',sb:'escalationResolvers 풀에서 아직 안 써본 resolver가 있는가 (각 1회)',code:'lib-runner.js:3179-3183',tags:[['u','U4 resource-relative'],['fl','escalationResolvers']],br:[
+  {tone:'loop',lb:'YES → 위임 재시도',steps:[
+    {t:'state',lb:'pending 복귀 · executorOverride=next · verifyAttempts=0',sb:'새 resolver에게 fresh floor + friction 이력 인계: "이전 resolver가 N회 만에 SATURATED — 너는 이걸 넘어라"',code:'lib-runner.js:3184-3194',tags:[['ev','saturation_escalate rung=delegate']]},
+    {t:'loopback',lb:'↺ 새 executor로 S3 루프 재진입'},
+  ]},
+  {tone:'alt',lb:'NO → RUNG 2 시도',steps:[
+    {t:'gate',lb:'escalateOnSaturation ∧ ¬saturationEscalated ?',sb:'perturb-decompose는 옵트인 + task당 1회',code:'lib-runner.js:3204',tags:[['fl','escalateOnSaturation']],br:[
+      {tone:'loop',lb:'YES → 재분해',steps:[
+        {t:'state',lb:'pending · runReadiness=needs_decomposition · uncertaintyState=unknown_unknown',sb:'"원자적 실행이 fixpoint했다 = 이 leaf는 원자가 아니었다. 독립 검증 가능한 하위목표로 쪼개라"',code:'lib-runner.js:3205-3213',tags:[['ev','saturation_escalate rung=decompose'],['u','U7 unknown-unknown']]},
+        {t:'loopback',lb:'↺ 분해 후 하위 task들이 각자 S1~S3 경로를 탄다'},
+      ]},
+      {tone:'exc',lb:'NO → 사다리 소진',steps:[
+        {t:'exc',lb:'blocked · fm.saturation=true',sb:'lastRunFailureReason="saturation: fixpoint after N attempts". 완료를 절대 자칭하지 않는 정직한 정지',code:'lib-runner.js:3218-3236',tags:[['ev','task_saturation']]},
+      ]},
+    ]},
+  ]},
+]},
+]},
+
+{id:'s5',group:'자기근거·퀴즈',title:'selfAuthoredCheck → self_verified (Arm D 경로)',
+sum:'외부 oracle 없이 taskops 스스로 acceptance를 작성해 통과하는 자기근거(self-grounding) 경로. runner가 실행했어도 "독립"은 아니므로 승인되어도 self_verified(잠정)까지만 — 절대 verified가 아니다.',
+steps:[
+{t:'state',lb:'acceptance.selfAuthoredCheck = true',sb:'executor 자신이 check를 작성했음을 명시 (Arm D 어댑터가 세팅)',code:'normalizeAcceptance · lib-runner.js:944'},
+{t:'fn',lb:'runner가 self-authored check 실행 → 전부 통과',sb:'실행 주체는 runner지만 스펙 작성자가 executor',code:'lib-runner.js:1440-1459'},
+{t:'gate',lb:'assuranceTier = self_verified (잠정)',sb:'approved ∧ selfAuthored → verified 승격 차단. externallyVerified=false',code:'lib-runner.js:1529-1536'},
+{t:'warn',lb:'followUpNeeded 캐비앳 자동 부착',sb:'"acceptance를 executor가 작성했고 독립 확인이 없다 — 진짜 스펙은 under-specified일 수 있다(미검증 경로, missing inverse/round-trip). 외부 check가 있어야 verified_done"',code:'lib-runner.js:1537-1538 (콜론 대신 em-dash — YAML key 파싱 버그 회피)'},
+{t:'end',lb:'closed — self_verified',sb:'EoW에 tier 스탬프됨',code:'lib-runner.js:5068'},
+{t:'callout',red:true,lb:'실증된 구멍: self_ground_gap',sb:'astropy-14182에서 자기작성 테스트(write-only)는 통과했지만 숨은 judge(read round-trip + dtype)는 거부 — 작성자와 검증자가 같은 오개념을 공유하면 자기검증은 그 오개념을 못 본다. 게다가 <b>audit의 claimSafe는 assuranceTier를 반영하지 않아(P0 백로그) self_verified 종결도 claimSafe=true가 될 수 있다</b> (S11 참고).'},
+]},
+
+{id:'s6',group:'자기근거·퀴즈',title:'comprehension quiz (P2/P3) — 이해 검증',
+sum:'출력이 아니라 "이해"를 검증하려는 장치: 독립 생성된 행동 probe를 runner가 실행. 빈 퀴즈는 무죄가 아니라 무결론(inconclusive)이다. 단, 분포실험 결과 catch-rate 이득이 측정되지 않음(정직한 무효과 판정).',
+steps:[
+{t:'state',lb:'acceptance.comprehensionQuiz = true',sb:'quiz 요구 선언',code:'lib-runner.js:1497'},
+{t:'fn',lb:'invokeComprehensionQuizGenerator',sb:'P2: git diff HEAD + 변경 파일을 시드로 / P3: 역방향(inverse·round-trip) probe 지시 포함해 생성',code:'lib-runner.js:1392 · buildComprehensionQuizPrompt :1343',tags:[['fl','TASKOPS_QUIZ_LEGACY=1 → P2/P3 이전 서사형 프롬프트']],br:[
+  {tone:'exc',lb:'생성 실패/타임아웃 → probe 0개',steps:[
+    {t:'exc',lb:'INCONCLUSIVE — 자유 통과 금지',sb:'missingExpected: "quiz produced no probes; cannot certify understanding" → needs_verification',code:'lib-runner.js:1499-1500'},
+  ]},
+]},
+{t:'fn',lb:'runner가 probe 실행 + differential 판정',sb:'각 probe를 변경 유/무 기준선과 비교 — 변경을 제거해도 통과하는 probe(differential:false)는 "그 변경을 판별하지 못함"',code:'lib-runner.js:1502-1517',br:[
+  {tone:'exc',lb:'verifyMode인데 probe가 runner 실행이 아님',steps:[{t:'exc',lb:'missingExpected: probe not runner-verified',sb:'requiredCheck과 동일 규칙',code:'lib-runner.js:1505-1507'}]},
+  {tone:'exc',lb:'probe 실패',steps:[{t:'exc',lb:'failedChecks → decision=rejected',sb:'S3 재시도 루프로',code:'lib-runner.js:1509-1512'}]},
+  {tone:'exc',lb:'전부 통과했지만 판별 probe 0개',steps:[{t:'exc',lb:'INCONCLUSIVE',sb:'"모든 통과 probe가 변경 없이도 통과 = 이해 입증 없음"',code:'lib-runner.js:1518-1522'}]},
+]},
+{t:'gate',lb:'판별 probe ≥1 통과 → comprehensionVerified',sb:'quiz ∧ approved ∧ verifyMode일 때만 true 스탬프',code:'lib-runner.js:1561'},
+{t:'callout',lb:'정직 판정 (2026-07-17 분포실험)',sb:'P2/P3(diff-seeded+inverse)가 legacy 대비 gap-catch를 늘리지 못함 — OLD 5/6 vs NEW 3/6, E2E 양쪽 1/4. 앞선 2×2 "성공"은 n=1 요행. <b>기능은 유지하되 효과 주장은 철회됨.</b> 잘 설계된 논증도 측정 이득 0일 수 있다는 세션 교훈의 표본.'},
+]},
+
+{id:'s7',group:'방어·예외',title:'부정직 acceptance 방어 — vacuous check 차단',
+sum:'"검증 신호가 0개인데 승인 모드"를 차단하는 honest floor. 빈 명령 requiredCheck 같은 껍데기로 claimSafe를 찍어내는 것을 막는다.',
+steps:[
+{t:'fn',lb:'executableChecks / concreteArtifacts 집계',sb:'command가 빈 requiredCheck, ref가 빈 requiredArtifact는 위 루프에서 SKIP되므로 "검증 가능 신호"로 세지 않음 — requiredChecks:[{command:\'\'}] 같은 vacuous 껍데기 무력화',code:'lib-runner.js:1470-1479'},
+{t:'gate',lb:'policy-approving 모드 ∧ 신호 0개?',sb:'mode ∈ {enforced, guarded, runner-managed}인데 machine-checkable 신호가 없으면',code:'lib-runner.js:1480-1482',br:[
+  {tone:'exc',lb:'YES',steps:[{t:'exc',lb:'missingExpected: "self-reported summary cannot certify completion"',sb:'→ needs_verification. 자기서사만으로 claimSafe 발행 금지',code:'lib-runner.js:1481'}]},
+]},
+{t:'gate',lb:'(verifyMode 추가 강화) semanticAssertions만으로는 불충분',sb:'semanticAssertions는 agent 자신의 출력과 대조되므로 독립 검증이 아님 — runner-실행 check 또는 runner-검증 artifact가 반드시 하나는 있어야 인증',code:'lib-runner.js:1484-1491'},
+{t:'end',lb:'통과 시에만 정상 판정 계속',sb:'executorSummary만 있고 관측 증거가 없으면 unsupportedObserved로도 걸림 (:1463-1465)'},
+]},
+
+{id:'s8',group:'방어·예외',title:'artifact 위조·재사용 방어 — provenance 검사',
+sum:'verify 모드에서 requiredArtifact는 "존재한다"로 부족하다. 이 run이 생성/수정했어야 한다 — 이전 run의 산출물이나 자기보고 ref로는 통과 불가.',
+steps:[
+{t:'fn',lb:'runner가 artifact를 disk에서 직접 확인',sb:'verifiedArtifacts에서 ref 매칭',code:'lib-runner.js:1421-1434',br:[
+  {tone:'exc',lb:'disk에 없음 (자기보고뿐)',steps:[{t:'exc',lb:'missingExpected: "runner found it absent"',code:'lib-runner.js:1428-1429'}]},
+  {tone:'exc',lb:'있지만 이 run이 만들지 않음 (stale pre-existing)',steps:[{t:'exc',lb:'failedChecks: "pre-existing, unchanged"',sb:'producedThisRun=false → 거부. 과거 산출물 재제출 차단',code:'lib-runner.js:1430-1431'}]},
+]},
+{t:'end',lb:'존재 ∧ producedThisRun일 때만 인정'},
+]},
+
+{id:'s9',group:'방어·예외',title:'인프라 예외 — executor·파싱·projection 불일치',
+sum:'검증 대상의 실패(S3)와 검증 인프라의 실패는 다른 종류다. taskops는 이를 구분해 기록한다 — 세션 교훈: eval 어댑터도 grade-throw를 fail이 아닌 null+grade_error로 기록하도록 고쳤다(가짜 미해결 방지).',
+steps:[
+{t:'exc',lb:'executor 스폰 실패 / stepTimeoutMs 초과',sb:'closeExecuteFailure → fm.status=blocked, lastRunFailureReason 기록. 재시도 아님(검증 실패가 아니라 실행 실패)',code:'executeRunnableTask :3271'},
+{t:'exc',lb:'동시 실행 중 transient 파싱 오류',sb:'runs/ 밑 Missing YAML frontmatter·ENOENT는 다른 run이 쓰는 중일 수 있음 → transient로 분류해 관용 처리 (경합을 오류로 승격하지 않음)',code:'isTransientConcurrentParseError :1592 · filterConcurrentTargetValidationErrors :1573'},
+{t:'exc',lb:'SQLite projection ↔ markdown 불일치',sb:'markdown에선 닫힌 task에 projection의 active lease/running attempt가 남아 있으면 severity=error → claimSafe 즉시 false',code:'lib-audit.js:295-301'},
+{t:'warn',lb:'frontmatter YAML 함정 (실제 겪은 버그)',sb:'followUpNeeded 문구의 "self_verified: ..." 콜론이 YAML map key로 재파싱되던 버그 → em-dash로 교체. 문자열 스칼라는 sanitizeFmScalar로 방어',code:'lib-runner.js:1538'},
+]},
+
+{id:'s10',group:'방어·예외',title:'사전 게이트 — U6·U7 unknown-unknown prior + surprise 원장',
+sum:'실행 전에 "모르는 것이 있다고 가정하라"를 정량화: task 프록시들로 uuPrior∈[0,1]을 계산해 높으면 전제조건 진술을 강제하고 더 깊게 분해시킨다. 실행 중 surprise 보고는 원장에 쌓여 탐색 모드 전환의 근거가 된다.',
+steps:[
+{t:'fn',lb:'uuPrior(task) 계산',sb:'per-task PRIOR — 높을수록 "지도가 불완전할 가능성" ↑',code:'lib-runner.js:467-468',tags:[['u','U7 prior']]},
+{t:'gate',lb:'uuPrior ≥ UU_ELICIT_THRESHOLD ?',sb:'',code:'lib-runner.js:2433 · 2486',br:[
+  {tone:'alt',lb:'YES — 실행 프롬프트에 주입',steps:[
+    {t:'fn',lb:'PRECONDITIONS 강제 (U6)',sb:'"구현 전에 이 task가 전제하는 가정을 진술하고, 입력에서 검증 불가한 가정은 조용히 추측하지 말고 FLAG하라"',code:'lib-runner.js:2433',tags:[['u','U6 elicitation']]},
+    {t:'fn',lb:'분해 프롬프트에도 (U7)',sb:'"보이는 것보다 한 단계 더 깊게 분해 — 숨은 unknown이 하위목표로 표면화되도록 needs_decomposition 자식 선호"',code:'lib-runner.js:2486'},
+  ]},
+]},
+{t:'fn',lb:'실행 중: surprise 보고 → 원장',sb:'executor가 FRICTION/surprise를 구조화 보고 → parseSurpriseReportText → appendSurpriseHistory (task별 누적)',code:'lib-runner.js:314 · 519 · surpriseLevel :824',br:[
+  {tone:'exc',lb:'보고 형식 불량',steps:[{t:'exc',lb:'malformedSurpriseReason으로 사유 기록',sb:'조용히 버리지 않음',code:'lib-runner.js:777'}]},
+]},
+{t:'gate',lb:'surprise 이력 → uncertaintyState 전환 판단',sb:'놀라움이 쌓이면 task가 exploration으로 전환될 수 있음 — 단 verify-retry는 uncertaintyState=known을 고정해 "재실행" 전제를 유지 (S3)',code:'lib-runner.js:3159-3161'},
+]},
+
+{id:'s11',group:'감사',title:'audit → claimSafe / strictSafe 판정',
+sum:'세 감사기가 낸 issue를 집계해 "이 작업 전체를 완료라고 주장해도 안전한가"를 판정. 정직한 한계: 이 판정은 구조적(structural)이지 의미적(semantic)이 아니며, assuranceTier가 식에 없다(P0 백로그).',
+steps:[
+{t:'fn',lb:'auditParsedWork = 3 감사기 합산',sb:'auditDecompositionAdequacy(분해 적정성) + auditClosureIntegrity(종결 무결성) + auditProjectionConsistency(projection 일치)',code:'lib-audit.js:314-319'},
+{t:'gate',lb:'claimSafe 식 (5조건 AND)',sb:'error issue 0 ∧ 파싱 오류 0 ∧ closure.policyApprovedComplete ∧ 미해결 partial 마커 0 ∧ 반복 partial-review task 0',code:'lib-audit.js:324-328'},
+{t:'gate',lb:'strictSafe = claimSafe ∧ warning 0',code:'lib-audit.js:333'},
+{t:'callout',red:true,lb:'알려진 두 한계 (정직 고지)',sb:'① <b>구조적이지 의미적이 아님</b> — 게이트는 "증거·종결 형식이 갖춰졌는가"를 보지 "그 해가 진짜 맞는가"를 보지 않는다(CAW-03 파일럿 발견). ② <b>assuranceTier 미전파</b> — self_verified 종결도 위 5조건만 맞으면 claimSafe=true. externallyVerified를 식에 넣는 것이 P0 1순위 (GPT-5.6 비평 통합 결론, 구현 보류 중).'},
+]},
+
+];
+
+/* ---------- 렌더러 ---------- */
+const kindName={state:'상태',fn:'기능',gate:'게이트',exc:'예외',end:'종결',warn:'주의'};
+function esc(s){return String(s).replace(/&(?!lt;|gt;|amp;|#)/g,'&amp;')}
+function card(st){
+  if(st.t==='loopback')return `<div class="loopback">${esc(st.lb)}</div>`;
+  if(st.t==='callout')return `<div class="callout ${st.red?'red':'warn'}"><b style="display:block;margin-bottom:3px">${esc(st.lb)}</b>${st.sb||''}</div>`;
+  const tags=(st.tags||[]).map(([c,txt])=>`<span class="tag ${c==='u'?'u':c==='ev'?'ev':'fl'}">${esc(txt)}</span>`).join('');
+  const ref=st.code?`<span class="ref">${esc(st.code)}</span>`:'';
+  const meta=(ref||tags)?`<div class="meta">${ref}${tags}</div>`:'';
+  return `<div class="card ${st.t}"><div class="k">${kindName[st.t]||st.t}</div><div class="lb">${st.lb}</div>${st.sb?`<div class="sb">${st.sb}</div>`:''}${meta}</div>`;
+}
+function renderSteps(steps){
+  let h='';
+  steps.forEach((st,i)=>{
+    h+=card(st);
+    if(st.br&&st.br.length){
+      h+=`<div class="branches">`+st.br.map(b=>`<div class="branch ${b.tone}"><div class="brh">${b.lb}</div>${renderSteps(b.steps)}</div>`).join('')+`</div>`;
+    }
+    const last=i===steps.length-1;
+    if(!last){
+      const nx=st.next?`<span class="el">${esc(st.next)}</span>`:'';
+      h+=`<div class="edge"><div class="stem"></div>${nx}</div>`;
+    }
+  });
+  return h;
+}
+const stateSVG=`
+<div class="svgbox"><svg width="880" height="470" viewBox="0 0 880 470" fill="none">
+<defs><marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#5d6b7c"/></marker>
+<marker id="ao" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#4ade80"/></marker>
+<marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#f87171"/></marker>
+<marker id="aw" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#fbbf24"/></marker></defs>
+<style>.b{fill:#1a222c;stroke:#26303c;rx:10}.t{fill:#e7edf4;font-size:13px;font-weight:700}.s{fill:#93a0b0;font-size:10.5px}.e{fill:#93a0b0;font-size:10.5px}</style>
+
+<rect class="b" x="20" y="30" width="120" height="44" rx="10" style="stroke:#6aabfa"/>
+<text class="t" x="80" y="49" text-anchor="middle">pending</text><text class="s" x="80" y="63" text-anchor="middle">runnable</text>
+<rect class="b" x="215" y="30" width="150" height="44" rx="10" style="stroke:#2dd4bf"/>
+<text class="t" x="290" y="49" text-anchor="middle">execute</text><text class="s" x="290" y="63" text-anchor="middle">executeRunnableTask</text>
+<rect class="b" x="440" y="30" width="120" height="44" rx="10" style="stroke:#6aabfa"/>
+<text class="t" x="500" y="49" text-anchor="middle">done (잠정)</text><text class="s" x="500" y="63" text-anchor="middle">아직 인증 아님</text>
+<rect class="b" x="640" y="30" width="150" height="44" rx="10" style="stroke:#b096f8"/>
+<text class="t" x="715" y="49" text-anchor="middle">review</text><text class="s" x="715" y="63" text-anchor="middle">buildReviewReport</text>
+
+<rect class="b" x="640" y="150" width="190" height="56" rx="10" style="stroke:#4ade80"/>
+<text class="t" x="735" y="171" text-anchor="middle">closed + EoW</text>
+<text class="s" x="735" y="186" text-anchor="middle">tier: verified | self_verified |</text>
+<text class="s" x="735" y="198" text-anchor="middle">self_reported</text>
+
+<rect class="b" x="640" y="280" width="190" height="44" rx="10" style="stroke:#4ade80"/>
+<text class="t" x="735" y="299" text-anchor="middle">audit</text><text class="s" x="735" y="313" text-anchor="middle">claimSafe / strictSafe</text>
+
+<rect class="b" x="215" y="150" width="190" height="56" rx="10" style="stroke:#fbbf24"/>
+<text class="t" x="310" y="171" text-anchor="middle">verify-retry 루프</text>
+<text class="s" x="310" y="186" text-anchor="middle">U1 ledger · U3 novelty-bounded</text>
+<text class="s" x="310" y="198" text-anchor="middle">floor → novel-ext → ceiling</text>
+
+<rect class="b" x="215" y="280" width="190" height="56" rx="10" style="stroke:#b096f8"/>
+<text class="t" x="310" y="301" text-anchor="middle">escalation ladder</text>
+<text class="s" x="310" y="316" text-anchor="middle">R1 delegate · R2 decompose</text>
+<text class="s" x="310" y="328" text-anchor="middle">U4 resource-relative</text>
+
+<rect class="b" x="20" y="395" width="180" height="44" rx="10" style="stroke:#f87171"/>
+<text class="t" x="110" y="414" text-anchor="middle">blocked</text><text class="s" x="110" y="428" text-anchor="middle">saturation=true (정직한 gg)</text>
+<rect class="b" x="255" y="395" width="150" height="44" rx="10" style="stroke:#f87171"/>
+<text class="t" x="330" y="414" text-anchor="middle">blocked</text><text class="s" x="330" y="428" text-anchor="middle">실행/인프라 실패</text>
+<rect class="b" x="460" y="395" width="170" height="44" rx="10" style="stroke:#5d6b7c"/>
+<text class="t" x="545" y="414" text-anchor="middle">cancelled / failed</text><text class="s" x="545" y="428" text-anchor="middle">수동/기타 종결</text>
+
+<path d="M140 52 H210" stroke="#5d6b7c" marker-end="url(#a)"/>
+<path d="M365 52 H435" stroke="#5d6b7c" marker-end="url(#a)"/><text class="e" x="400" y="44" text-anchor="middle">완료</text>
+<path d="M560 52 H635" stroke="#5d6b7c" marker-end="url(#a)"/>
+<path d="M715 74 V145" stroke="#4ade80" marker-end="url(#ao)"/><text class="e" x="726" y="110" >approved</text>
+<path d="M735 206 V275" stroke="#4ade80" marker-end="url(#ao)"/><text class="e" x="746" y="245">EoW 스탬프</text>
+<path d="M640 60 C 500 90, 400 110, 340 147" stroke="#fbbf24" fill="none" marker-end="url(#aw)"/>
+<text class="e" x="470" y="122">rejected/needs_verification ∧ guarded</text>
+<path d="M240 150 C 150 120, 110 100, 90 78" stroke="#fbbf24" fill="none" marker-end="url(#aw)"/>
+<text class="e" x="90" y="120">재시도(pending 복귀)</text>
+<path d="M310 206 V275" stroke="#f87171" marker-end="url(#ar)"/><text class="e" x="320" y="245">fixpoint(U5)</text>
+<path d="M240 280 C 150 250, 110 110, 85 78" stroke="#b096f8" fill="none" marker-end="url(#a)"/>
+<text class="e" x="60" y="220">R1/R2 → pending</text>
+<path d="M250 336 C 190 360, 150 375, 125 392" stroke="#f87171" fill="none" marker-end="url(#ar)"/>
+<text class="e" x="140" y="370">사다리 소진</text>
+<path d="M290 74 C 300 200, 320 320, 330 392" stroke="#f87171" fill="none" stroke-dasharray="4 4" marker-end="url(#ar)"/>
+<text class="e" x="255" y="250" >spawn/timeout</text>
+</svg></div>
+<p class="sum" style="margin-top:12px">읽는 법: 파란 상태는 frontmatter의 <code>fm.status</code>·<code>runReadiness</code>로 존재하고, 보라 review가 유일한 판정 지점이다. approved의 세 tier(verified/self_verified/self_reported)는 같은 "closed"라도 근거 수준이 다르다는 뜻 — 세부는 S1·S2·S5. 노란 루프와 사다리는 S3·S4, 최종 감사는 S11.</p>`;
+
+const nav=document.getElementById('nav'),box=document.getElementById('scenarios');
+let curGroup=null,navH='';
+S.forEach((sc,i)=>{
+  if(sc.group!==curGroup){curGroup=sc.group;navH+=`<div class="g">${curGroup}</div>`}
+  navH+=`<a href="#${sc.id}" data-id="${sc.id}"><span class="n">S${i}</span>${sc.title}</a>`;
+  const body=sc.svg?stateSVG:`<div class="flow">${renderSteps(sc.steps)}</div>`;
+  box.insertAdjacentHTML('beforeend',
+    `<section class="sc" id="${sc.id}"><h2><span class="sid">S${i}</span>${sc.title}</h2><p class="sum">${sc.sum}</p>${body}</section>`);
+});
+nav.innerHTML=navH;
+const links=[...nav.querySelectorAll('a')];
+const obs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){links.forEach(l=>l.classList.toggle('on',l.dataset.id===e.target.id))}})},{rootMargin:'-20% 0px -70% 0px'});
+document.querySelectorAll('section.sc').forEach(s=>obs.observe(s));
+</script>
+</body>
+</html>
