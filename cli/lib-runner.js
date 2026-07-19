@@ -1300,6 +1300,34 @@ export function probeRejectedChecks({ cwd, commands, timeoutMs, runsPerCommand =
   return { probes, minimalRepro, quarantinedChecks };
 }
 
+// SUCCESS-side flaky re-check — the exact dual of probeRejectedChecks (spec docs/specs/failure-certificate.md §F-2
+// symmetric). At an APPROVED verify close, re-execute the PASSING requiredChecks under the same conditions the
+// verify exec used (cwd + sanitized env + timeout, isolate:true). Any rerun that FAILS means the pass was a flaky
+// oracle's accident (a network/timing-sensitive test, a nondeterministic grader) — the command is quarantined and
+// the caller REFUSES verified_done, closing UNDETERMINED. All reruns passing => 'stable': the pass is trustworthy
+// and verified_done stands. Where probeRejectedChecks demotes a FAILURE claim when a rejection won't reproduce,
+// this demotes a SUCCESS claim when a pass won't reproduce — closing the hole stage-3smoke measured (requests
+// C-arm FP: verify grade passed, final grade failed). Same cost bound: <=2 commands x runsPerCommand reruns, at the
+// approved close only. No minimal repro (a flaky PASS is not a reproducible failure to capture).
+export function probePassedChecks({ cwd, commands, timeoutMs, runsPerCommand = 2 }) {
+  const probed = (commands || []).map((c) => String(c || '').trim()).filter(Boolean).slice(0, 2);
+  const outcomes = [];
+  const quarantinedChecks = [];
+  for (const command of probed) {
+    const runs = [];
+    let anyFailed = false;
+    for (let i = 0; i < runsPerCommand; i += 1) {
+      const [r] = executeRequiredChecks({ cwd, requiredChecks: [{ command }], timeoutMs, isolate: true });
+      runs.push({ exitCode: r?.exitCode ?? null, status: r?.status || 'failed' });
+      if (r?.status !== 'passed') anyFailed = true;
+    }
+    if (anyFailed) quarantinedChecks.push(command);
+    outcomes.push({ command: sanitizeFmScalar(command), runs });
+  }
+  const verdict = quarantinedChecks.length > 0 ? 'flaky' : 'stable';
+  return { verdict, quarantinedChecks, probes: { passFlaky: { commandsProbed: probed.map((c) => sanitizeFmScalar(c)), runsPerCommand, outcomes, verdict } } };
+}
+
 // verify-resolver provenance: resolve a required-artifact ref to an on-disk path (workspace first, then project).
 function resolveArtifactPath(ref, cwd, projectDir) {
   const needle = String(ref || '').trim();
@@ -3257,6 +3285,54 @@ function closeExecuteSuccess({
   const reviewedRunNode = parseMarkdownFile(runNodePath);
   const review = writeReviewForRunNode({ projectDir, task, runNode: reviewedRunNode, verifyMode });
   const isGuarded = ['enforced', 'guarded', 'runner-managed'].includes(review.reviewReport.mode);
+  // SUCCESS-side flaky re-check (F-2's dual): before crediting an approved verify close as verified_done, re-execute
+  // the runner-PASSING requiredChecks. If any rerun FAILS, the pass was a flaky oracle's accident (stage-3smoke's
+  // requests C-arm FP: verify grade passed, final grade failed) — refuse verified_done and close UNDETERMINED
+  // (kind:'oracle_flaky' → tier undetermined, out of the F1 denominator). This is the only window to catch it: an
+  // approved close has no retry, so the pass is certified the instant it is seen unless re-checked here.
+  if (verifyMode && isGuarded && review.reviewReport.decision === 'approved') {
+    const passedCommands = (executionResult.observed?.checkResults || [])
+      .filter((row) => row && row.verifiedBy === 'runner' && String(row.status) === 'passed' && row.command)
+      .map((row) => row.command);
+    if (passedCommands.length > 0) {
+      const passProbe = probePassedChecks({ cwd: artifactWorkspacePath, commands: passedCommands, timeoutMs: stepTimeoutMs });
+      if (passProbe.verdict === 'flaky') {
+        return closeExecuteFailure({
+          task,
+          runDir,
+          eventsPath,
+          runNodePath,
+          taskUpdater: (fm) => {
+            fm.status = 'blocked';
+            fm.failureCertificate = buildFailureCertificate({
+              kind: 'oracle_flaky',
+              verifyMode,
+              reasons: ['verify PASSED but re-execution was unstable (flaky oracle): completion cannot be certified — refusing verified_done'],
+              probes: passProbe.probes,
+              oracleAccess: review.reviewReport.oracleAccess,
+            });
+            // Quarantine the unstable command(s) on the task (visible to re-planners; cleared only by a later
+            // honest, stable success close), mirroring the reject-side quarantine.
+            fm.quarantinedChecks = passProbe.quarantinedChecks.map((c) => sanitizeFmScalar(c));
+            fm.lastRunFailureReason = sanitizeFmScalar('verify pass did not reproduce on re-execution (flaky oracle); refusing verified_done — undetermined');
+            return fm;
+          },
+          runNodeUpdater: (fm) => { fm.status = 'blocked'; return fm; },
+          event: {
+            timestamp: finishedAt, type: 'verify_pass_flaky', runId,
+            taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, reviewNodeId: review.reviewNodeId,
+            quarantined: passProbe.quarantinedChecks.length,
+          },
+          logLine: `${finishedAt} verify_pass_flaky taskId=${task.id} runNodeId=${runNodeId} quarantined=${passProbe.quarantinedChecks.length}`,
+          actionResult: {
+            taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'blocked',
+            failureKind: 'verify_pass_flaky', executor, message: result.message || null, budget,
+            executionWorkspacePath: result.workspacePath || artifactWorkspacePath,
+          },
+        });
+      }
+    }
+  }
   if (review.reviewReport.decision !== 'approved' && isGuarded) {
     const attempts = Number(task.verifyAttempts || 0);
     const feedback = review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected).join('; ');
