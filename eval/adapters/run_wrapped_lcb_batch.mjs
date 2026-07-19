@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const EVAL = dirname(here);
 const VENV_PY = join(EVAL, '.venv', 'bin', 'python');
-const executor = process.argv[2] || 'codex-cli';
+const executor = process.argv[2] || process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';   // argv wins, then env override, then codex-cli policy default (mirrors run_swebench_bare.mjs L21)
 const N = Number(process.argv[3]) || 50;
 const split = process.argv[4] || 'conflicting';
 const conc = Number(process.argv[5]) || 3;

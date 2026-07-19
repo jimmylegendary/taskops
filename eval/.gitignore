@@ -7,3 +7,8 @@ preflight/*.log
 logs/
 __pycache__/
 impossiblebench/
+# vendored SWE-bench Pro harness (scaleapi/SWE-bench_Pro-os, ~98MB incl. run_scripts/ + dockerfiles/ + its own .git);
+# a runtime dependency like .venv/, not source we own — swebench_pro_grade.py references it by path.
+swebench_pro_os/
+# per-grade Pro output dirs (image logs + parsed output.json), PID-namespaced by swebench_pro_grade.py
+preflight/pro-grade-*/

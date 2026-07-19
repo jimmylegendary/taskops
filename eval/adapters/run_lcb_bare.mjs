@@ -18,7 +18,7 @@ const EVAL = dirname(here);
 const VENV_PY = join(EVAL, '.venv', 'bin', 'python');
 const GRADE = join(here, 'lcb_grade.py');
 const taskId = process.argv[2];
-const executor = process.argv[3] || 'codex-cli';
+const executor = process.argv[3] || process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';   // default codex: quota separate from the chat session; env override honored (mirrors run_swebench_bare.mjs L21)
 const split = process.argv[4] || 'conflicting';
 if (!taskId) { console.error('usage: run_lcb_bare.mjs <task_id> <executor> [split]'); process.exit(2); }
 
