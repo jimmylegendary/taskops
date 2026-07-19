@@ -25,8 +25,11 @@ const dataset = process.argv[3] || 'princeton-nlp/SWE-bench_Lite';
 const verifyRetries = process.argv[4] != null ? Number(process.argv[4]) : 4;
 if (!instanceId) { console.error('usage: run_swebench_selfground.mjs <instance_id> [dataset] [k]'); process.exit(2); }
 
-const wrapper = join('/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments', 'claude-safe-wrapper.sh');
-chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper;
+const sgExecutor = process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';   // default codex: quota separate from the chat session
+if (sgExecutor === 'claude-code') {
+  const wrapper = join('/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments', 'claude-safe-wrapper.sh');
+  chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper;
+}
 
 const meta = JSON.parse(execFileSync(VENV_PY, [join(here, 'dump_instance.py'), instanceId, dataset], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
 const CO = `/tmp/swebench-co-selfground/${instanceId}`;
@@ -85,7 +88,6 @@ md(`${tv}/tasks/${taskId}.md`, {
 
 const t0 = Date.now();
 console.log(`[${instanceId}] ARM D — TaskOps self-grounded (NO oracle in the loop), retries=${verifyRetries} ...`);
-const sgExecutor = process.env.TASKOPS_SWE_EXECUTOR || 'claude-code';
 const res = runTaskOps(w, { executor: sgExecutor, runId, maxSteps: verifyRetries + 2, verifyChecks: true, verifyRetries, continueOnFailure: true, timeout: 1500 });
 const task = parseMarkdownFile(join(w, `${tv}/tasks/${taskId}.md`));
 const rr = (task.runRefs || [])[0] || {};

@@ -20,9 +20,14 @@ const dataset = process.argv[3] || 'princeton-nlp/SWE-bench_Lite';
 const verifyRetries = process.argv[4] != null ? Number(process.argv[4]) : 0;
 if (!instanceId) { console.error('usage: run_swebench.mjs <instance_id>'); process.exit(2); }
 
-// real claude via the MCP-safe wrapper used in the experiments
-const wrapper = join('/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments', 'claude-safe-wrapper.sh');
-chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper;
+// executor default = codex-cli (its quota is separate from the interactive claude session, so bench runs are not
+// starved by concurrent chat activity — the rate-limit contamination seen in stage-6h). Override via env.
+const sweExecutor = process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';
+// claude-code goes through the MCP-safe wrapper (nested-agent hang + 3s stdin wait); codex needs no wrapper.
+if (sweExecutor === 'claude-code') {
+  const wrapper = join('/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments', 'claude-safe-wrapper.sh');
+  chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper;
+}
 
 const meta = JSON.parse(execFileSync(VENV_PY, [join(here, 'dump_instance.py'), instanceId, dataset], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
 const CO = `/tmp/swebench-co/${instanceId}`;
@@ -81,9 +86,11 @@ console.log(`[${instanceId}] running TaskOps (claude-code, verify-checks, retrie
 // same-tasks 3-arm (bare / no-verify / verify-grounded).
 const noVerify = process.argv[5] === 'noverify';
 // executor + delegation overridable via env (for OpenRouter open-model runs + delegation mode); defaults unchanged.
-const sweExecutor = process.env.TASKOPS_SWE_EXECUTOR || 'claude-code';
 const sweResolver = process.env.TASKOPS_SWE_RESOLVER || null;   // set => --delegate + independent ai-resolver
-const res = runTaskOps(w, { executor: sweExecutor, runId, maxSteps: verifyRetries + 2, verifyChecks: !noVerify, verifyRetries, continueOnFailure: true, timeout: 1500, ...(sweResolver ? { delegate: true, aiResolver: sweResolver } : {}) });
+// gpt-5.6 reasoning-tier escalation ladder (weak→strong): TASKOPS_SWE_ESCALATION="codex-cli:medium,codex-cli:high".
+// On saturation the runner re-attempts on the next stronger tier of the same model (RUNG-1 capability-delegate).
+const escalationResolvers = (process.env.TASKOPS_SWE_ESCALATION || '').split(',').map((s) => s.trim()).filter(Boolean);
+const res = runTaskOps(w, { executor: sweExecutor, runId, maxSteps: verifyRetries + 2, verifyChecks: !noVerify, verifyRetries, continueOnFailure: true, timeout: 1500, ...(escalationResolvers.length ? { escalationResolvers, escalateOnSaturation: true } : {}), ...(sweResolver ? { delegate: true, aiResolver: sweResolver } : {}) });
 const task = parseMarkdownFile(join(w, `${tv}/tasks/${taskId}.md`));
 const rr = (task.runRefs || [])[0] || {};
 const review = rr.runNodeId && existsSync(join(w, 'runs', rr.runId, 'nodes', `review-${rr.runNodeId}.md`))

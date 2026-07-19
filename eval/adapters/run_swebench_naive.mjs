@@ -21,7 +21,7 @@ const GRADE = join(here, 'swebench_grade.py');
 const instanceId = process.argv[2];
 const dataset = process.argv[3] || 'princeton-nlp/SWE-bench_Lite';
 const k = process.argv[4] != null ? Number(process.argv[4]) : 4;   // total rounds (matches Arm C verifyRetries)
-const executor = process.env.TASKOPS_SWE_EXECUTOR || 'claude-code';
+const executor = process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';   // default codex: quota separate from the chat session
 if (!instanceId) { console.error('usage: run_swebench_naive.mjs <instance_id> [dataset] [k]'); process.exit(2); }
 
 if (executor === 'claude-code') { const wrapper = '/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments/claude-safe-wrapper.sh'; chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper; }

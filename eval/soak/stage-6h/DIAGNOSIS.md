@@ -30,5 +30,23 @@
 
 권장: **옵션 1(별도 executor)** — 오염의 근본을 제거. codex-cli 쿼터/비용 산출 후 결정.
 
-## 다음 스테이지로 넘기기 전 조사거리
-- **astropy-14365 C-arm FN**: official=resolved인데 taskops verified=false(blocked, 929s 정상 작동). rate-limit 무관한 진짜 recall 손실 — verify check가 official judge와 다른 것을 봤을 가능성. minimal-repro/verify-resolver 정합성 조사.
+## verify-resolver 정합성 조사 — 완료 (2026-07-19)
+
+**대상**: astropy-14365 C-arm FN (official=resolved, taskops verify=rejected/blocked, 929s 정상 작동).
+
+**결론 1 — taskops 로직은 정합적**: `run_swebench.mjs`에서 taskops의 requiredCheck(라인 74)와 최종 official 채점(라인 94)은 **완전히 동일한 명령·동일한 workspace 경로**(`swebench_grade.py <instance> <workspace>`). taskops는 grade를 조작하지 않고 그대로 실행한다. 버그 없음.
+
+**결론 2 — grader core는 결정적**: `probe-grader-determinism.mjs`로 gold patch 적용 workspace를 5회 grade → **5/5 resolved, infra 0** (각 ~56s). astropy-14365에서 grader는 명확한 fix에 안정적이다.
+
+**결론 3 — FN의 진짜 원인 = 무거운 빌드의 자원 민감성**: grader가 gold에 결정적이므로 순수 비결정성은 아니다. 남는 설명은 **경계선 fix + 자원 부하**: `swebench_grade.py`는 매 호출이 PID-run_id 기반 fresh Docker 실행(라인 20)이라, astropy의 C-확장 빌드가 6h의 rate-limit + 동시성2 피크(08:02 실행 시점)에서 타임아웃/자원부족으로 간헐 실패 → verify는 rejected, 부하 완화된 최종 grade는 resolved.
+
+**대응** (구현/설계 완료):
+- **F-2 flaky probe가 정확히 이 케이스를 위해 존재** — saturated content close에서 실패 check를 K회 재실행, 흔들리면 undetermined로 강등(FN이 아니라 판정보류). 이미 구현됨.
+- **codex executor 전환** — 4개 어댑터 default를 codex-cli로. 이 대화 세션과 쿼터 분리 → rate-limit 오염 근본 제거. 재실행 시 부하 피크가 사라져 대부분 해소 예상.
+- **재사용 도구화**: `probe-grader-determinism.mjs` = 앞으로 어떤 인스턴스든 grader 결정성을 gold로 검사하는 상비 도구 (F-2 positive-control의 bench측).
+- **남은 관찰**: 재실행에서도 이 인스턴스가 FN이면, verify check(grade) 자체에 격리+K회 다수결을 추가하는 것을 검토 (현재는 F-2가 close 시점에만 재확인).
+
+## 다음 스테이지 재실행 설정 (확정)
+- **executor**: codex-cli (default). 이 세션 쿼터와 분리.
+- **tier ladder** (선택): `TASKOPS_SWE_ESCALATION="codex-cli:medium,codex-cli:high"` → saturation 시 gpt-5.6 reasoning tier 약→강 승급.
+- 나머지(인스턴스/게이트)는 STAGE-PLAN.md 그대로.

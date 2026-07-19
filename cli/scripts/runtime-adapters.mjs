@@ -7,6 +7,8 @@ import {
   executorForRuntime,
   invokeRuntimeAdapter,
   normalizeRuntimeAdapter,
+  parseExecutorSpec,
+  runtimeAdapterForExecutor,
 } from '../lib-runtime-adapters.js';
 
 function makeBin(dir, name, body) {
@@ -46,6 +48,12 @@ echo "late"
 
   assert.equal(normalizeRuntimeAdapter('claude-code'), 'claude-code');
   assert.equal(executorForRuntime('codex-cli'), 'codex-cli');
+
+  // Executor spec parsing: a `:variant` suffix (gpt-5.6 reasoning tier) selects a build-args variant; the base
+  // still resolves the adapter, and a bare name parses to variant=null (existing callers unaffected).
+  assert.deepEqual(parseExecutorSpec('codex-cli:high'), { base: 'codex-cli', variant: 'high' });
+  assert.deepEqual(parseExecutorSpec('codex-cli'), { base: 'codex-cli', variant: null });
+  assert.equal(runtimeAdapterForExecutor('codex-cli:high').name, 'codex-cli', 'a tier spec resolves the base adapter');
 
   const missing = detectRuntimeAdapter('openclaw-cli', { env });
   assert.equal(missing.ok, false);
@@ -101,6 +109,15 @@ exit 2
   assert.equal(codexSuccess.ok, true);
   assert.equal(codexSuccess.status, 'success');
   assert.match(codexSuccess.stdout, /--ask-for-approval never exec/);
+
+  // gpt-5.6 reasoning-effort tier: `codex-cli:<effort>` injects `-c model_reasoning_effort="<effort>"` so a
+  // saturation-escalation ladder can re-attempt on a stronger tier of the same model (RUNG-1 capability-delegate).
+  const codexTier = invokeRuntimeAdapter('codex-cli:high', { prompt: 'hi', timeoutMs: 1000, env });
+  assert.equal(codexTier.ok, true, 'a codex-cli:<effort> spec resolves to the codex adapter');
+  assert.match(codexTier.stdout, /model_reasoning_effort="high"/, 'the effort tier is injected as a -c config');
+  // a bare codex-cli spec injects no effort (default behavior unchanged) — guards against a silent global shift
+  const codexBare = invokeRuntimeAdapter('codex-cli', { prompt: 'hi', timeoutMs: 1000, env });
+  assert.doesNotMatch(codexBare.stdout, /model_reasoning_effort/, 'bare codex-cli injects no effort override');
 
   const timeout = invokeRuntimeAdapter('opencode-cli', {
     prompt: 'hello',

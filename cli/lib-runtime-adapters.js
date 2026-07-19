@@ -208,13 +208,19 @@ function claudeArgs({ prompt }) {
   return args;
 }
 
-function codexArgs({ prompt }) {
+export function codexArgs({ prompt, variant = null }) {
   const args = [
     '--ask-for-approval', 'never',
     'exec',
     '--skip-git-repo-check',
     '--sandbox', 'danger-full-access',
   ];
+  // gpt-5.6 reasoning-effort tier: from a `codex-cli:<effort>` executor spec (an escalation-ladder step) or the
+  // TASKOPS_CODEX_EFFORT env. Lets a SATURATED task re-attempt on a STRONGER reasoning tier of the SAME model
+  // (RUNG-1 capability-delegate) — the honest "try a better model" without switching providers. Quote the value so
+  // an unexpected token can't inject extra -c config.
+  const effort = trim(variant) || trim(process.env.TASKOPS_CODEX_EFFORT);
+  if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
   // Optional OpenAI-compatible routing (e.g. OpenRouter open models) via env — no global ~/.codex/config.toml or
   // openclaw edit. Inactive unless TASKOPS_CODEX_MODEL is set, so default codex behavior is unchanged.
   const orModel = trim(process.env.TASKOPS_CODEX_MODEL);
@@ -283,8 +289,18 @@ export function normalizeRuntimeAdapter(value) {
   return runtime;
 }
 
+// An executor spec may carry a `:variant` suffix (e.g. `codex-cli:high`) selecting a build-args variant such as a
+// reasoning-effort tier. The base (before the first `:`) selects the adapter; the variant is threaded to buildArgs.
+// A bare name (no `:`) parses to variant=null, so every existing caller is unaffected.
+export function parseExecutorSpec(executor) {
+  const raw = executor == null ? '' : String(executor).trim();
+  const idx = raw.indexOf(':');
+  if (idx === -1) return { base: raw, variant: null };
+  return { base: raw.slice(0, idx), variant: raw.slice(idx + 1).trim() || null };
+}
+
 export function runtimeAdapterForExecutor(executor) {
-  const runtime = normalizeRuntimeAdapter(executor);
+  const runtime = normalizeRuntimeAdapter(parseExecutorSpec(executor).base);
   return ADAPTERS[runtime];
 }
 
@@ -326,7 +342,8 @@ export function invokeRuntimeAdapter(runtimeAdapter, {
     };
   }
   const command = adapterCommand(adapter, env);
-  const args = adapter.buildArgs({ prompt, agentId, sessionKey, timeoutMs });
+  const { variant } = parseExecutorSpec(runtimeAdapter);
+  const args = adapter.buildArgs({ prompt, agentId, sessionKey, timeoutMs, variant });
   const result = spawnSync(command, args, {
     encoding: 'utf8',
     timeout: timeoutMs == null ? undefined : timeoutMs,

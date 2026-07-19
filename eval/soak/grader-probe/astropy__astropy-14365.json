@@ -1,0 +1,40 @@
+{
+  "instance_id": "astropy__astropy-14365",
+  "N": 5,
+  "resolvedCount": 5,
+  "infra": 0,
+  "flaky": false,
+  "verdict": "STABLE (gold workspace가 N회 모두 resolved → grader는 이 인스턴스에서 결정적)",
+  "outcomes": [
+    {
+      "run": 1,
+      "resolved": true,
+      "elapsedS": 57,
+      "err": null
+    },
+    {
+      "run": 2,
+      "resolved": true,
+      "elapsedS": 56,
+      "err": null
+    },
+    {
+      "run": 3,
+      "resolved": true,
+      "elapsedS": 56,
+      "err": null
+    },
+    {
+      "run": 4,
+      "resolved": true,
+      "elapsedS": 55,
+      "err": null
+    },
+    {
+      "run": 5,
+      "resolved": true,
+      "elapsedS": 54,
+      "err": null
+    }
+  ]
+}
