@@ -80,7 +80,7 @@ md(`${tv}/tasks/${taskId}.md`, {
 });
 
 const t0 = Date.now();
-console.log(`[${instanceId}] running TaskOps (claude-code, verify-checks, retries=${verifyRetries}) ...`);
+console.log(`[${instanceId}] running TaskOps (${process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli'}, verify-checks, retries=${verifyRetries}) ...`);
 // verifyChecks defaults on (verify-grounded, full TaskOps). argv[5]='noverify' runs the ABLATION arm: TaskOps graph
 // + review but the runner does NOT execute the requiredCheck (trusts the agent's self-report) — for the clean
 // same-tasks 3-arm (bare / no-verify / verify-grounded).

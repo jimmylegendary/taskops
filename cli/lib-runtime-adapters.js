@@ -350,6 +350,10 @@ export function invokeRuntimeAdapter(runtimeAdapter, {
     maxBuffer: 64 * 1024 * 1024,
     env,
     cwd,
+    // Close stdin with an immediate EOF: `codex exec` (and others) otherwise print "Reading additional input from
+    // stdin..." and BLOCK on a pipe that never closes — the prompt is passed as an arg, so stdin is never needed.
+    // (claude-code went through a wrapper that redirected </dev/null; this makes every adapter stdin-safe.)
+    input: '',
   });
   return normalizeSpawnResult(adapter.name, command, args, result, timeoutMs);
 }

@@ -26,5 +26,5 @@
   "perRunTimeoutMin": 30,
   "maxAttemptsPerJob": 2,
   "haltOnConsecutiveFailures": 4,
-  "env": { "TASKOPS_MAX_WALL_MS": "1500000" }
+  "env": { "TASKOPS_MAX_WALL_MS": "1500000", "TASKOPS_CODEX_EFFORT": "medium" }
 }
