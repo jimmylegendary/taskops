@@ -3,7 +3,8 @@
 // side already carries the P1 assuranceTier; this locks the FAIL side (typed failure certificates) and the
 // audit propagation — a self_verified closure must flip claimSafe (the Arm-D self_ground_gap hole), an
 // infra/protocol close must stay OUT of the failure ledger (undetermined = F1's third class), and a guarded
-// verify-rejection must certify as runner_rejected content with the fixpoint trajectory attached.
+// verify-rejection must certify as content with the fixpoint trajectory attached (since s3-probes a SATURATED
+// stable rejection carries F-2/F-3 probe evidence and mints verified_failure; see failure-probes.mjs).
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,7 +65,12 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails once, pa
   rmSync(root, { recursive: true, force: true });
 }
 
-// T3 — content certificate: a guarded verify-rejection closes with runner_rejected + the fixpoint trajectory.
+// T3 — content certificate: a guarded verify-rejection closes certified with the fixpoint trajectory.
+// SPEC-DRIVEN UPDATE (s3-probes): the v0 tier ceiling is lifted — a SATURATED runner-rejection now carries
+// measured rerun-stability (F-2, K=2 in the same cwd) + a captured minimal repro (F-3), so this stable
+// 'exit 1' close mints verified_failure instead of the old runner_rejected ceiling. Assertions strengthened
+// (tier raised + probe/repro presence added), none deleted; the runner_rejected ceiling without probe
+// evidence is still locked by T6 and by failure-probes.mjs P4/P5.
 {
   const root = mkdtempSync(join(tmpdir(), 'taskops-fc-t3-'));
   const w = build(root, ['exit 1']);
@@ -74,7 +80,9 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails once, pa
   const c = t.failureCertificate;
   assert.ok(c, 'a guarded review-fail close carries a failure certificate');
   assert.equal(c.kind, 'content');
-  assert.equal(c.failureTier, 'runner_rejected', 'an affirmative runner-executed rejection certifies as runner_rejected');
+  assert.equal(c.failureTier, 'verified_failure', 'a stable, reproduced runner-rejection certifies at the measured top tier (F-2/F-3)');
+  assert.equal(c.probes.flaky.verdict, 'stable', 'the K-run rerun reproduced every rejection');
+  assert.ok(c.minimalRepro, 'the promotion carries a captured minimal repro');
   assert.equal(c.saturated, true);
   assert.equal(c.scope, 'resource_relative', 'the certificate never claims intrinsic impossibility');
   assert.ok(c.failureSignature, 'the fixpoint signature is attached (F-4)');
@@ -111,7 +119,8 @@ const once = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails once, pa
   rmSync(root, { recursive: true, force: true });
 }
 
-// T6 — helper contract: tier ladder + invariant scope (verified_failure is NOT mintable in v0).
+// T6 — helper contract: tier ladder + invariant scope (WITHOUT probe evidence the ceiling stays
+// runner_rejected — verified_failure is mintable only from F-2 stable probes + an F-3 repro, see failure-probes.mjs).
 {
   assert.equal(buildFailureCertificate({ kind: 'infra' }).failureTier, 'undetermined');
   assert.equal(buildFailureCertificate({ kind: 'protocol' }).failureTier, 'undetermined');

@@ -54,6 +54,7 @@ export const STOP_REASONS = Object.freeze({
   MAX_STEPS: 'max_steps',
   MAX_LOOPBACKS: 'max_loopbacks',
   DEADLINE_REACHED: 'deadline_reached',
+  BUDGET_EXHAUSTED: 'budget_exhausted',
   TASK_FAILED: 'task_failed',
   VALIDATION_FAILED: 'validation_failed',
   ERROR: 'error',
@@ -1202,7 +1203,7 @@ function sanitizedCheckEnv() {
 // FORM of npm_config_* / LD_*/DYLD_* preload / TASKOPS_* leak); it does NOT strip agent-planted CWD config (a
 // ./.npmrc still applies) nor sandbox a check whose target the agent authored (the comprehension-quiz /
 // differential-probe axis covers that) — full process sandboxing (containers) is documented future work.
-export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000, isolate = false }) {
+export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000, isolate = false, captureRaw = false }) {
   const runCwd = cwd && existsSync(cwd) ? cwd : process.cwd();
   const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : 120_000;
   const env = isolate ? sanitizedCheckEnv() : null;
@@ -1214,11 +1215,17 @@ export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000
     let exitCode = null;
     let detail = '';
     let outputHash = null;
+    let rawOutput = '';
     try {
       const out = spawnSync(command, {
         cwd: runCwd, shell: true, encoding: 'utf8', timeout: limit, maxBuffer: 8 * 1024 * 1024,
         ...(env ? { env } : {}),
       });
+      // captureRaw is OPT-IN (the F-3 minimal-repro path only): persisted observed.checkResults stay lean —
+      // the raw capture exists to be HASHED into a repro, never stored on the task/run graph. Normalized
+      // (\r stripped, first 4096 chars) so the repro sha is platform-stable and bounded; captured even on a
+      // timeout-kill so a partial output still yields an honest hash.
+      if (captureRaw) rawOutput = `${out.stdout || ''}${out.stderr || ''}`.replace(/\r/g, '').slice(0, 4096);
       if (out.error) {
         detail = out.error.code === 'ETIMEDOUT' ? `timed out after ${limit}ms` : String(out.error.message || out.error);
       } else {
@@ -1232,9 +1239,65 @@ export function executeRequiredChecks({ cwd, requiredChecks, timeoutMs = 120_000
       detail = error instanceof Error ? error.message : String(error);
     }
     // outputHash makes the result tamper-evident/auditable; verifiedBy marks it as runner-produced.
-    results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner', ...(isolate ? { isolated: true } : {}) });
+    results.push({ command, status, exitCode, detail, outputHash, verifiedBy: 'runner', ...(isolate ? { isolated: true } : {}), ...(captureRaw ? { rawOutput } : {}) });
   }
   return results;
+}
+
+// F-2 verifier self-check + F-3 minimal repro (spec docs/specs/failure-certificate.md §3): at the SATURATED
+// verify-rejected close, re-execute the failing checks under the SAME conditions the verify exec used (cwd +
+// sanitized env + timeout, via executeRequiredChecks isolate:true) so a divergent outcome measures the CHECK's
+// stability, not a harness delta. Cost bound: <=2 commands x runsPerCommand reruns, final close only. Any
+// passing rerun => the verifier is unstable ('flaky'): the command is quarantined and the caller DEMOTES the
+// tier — a check that cannot reproduce its own rejection must never certify content failure. All reruns
+// failing => 'stable': the LAST rerun of the FIRST command becomes the minimal repro (command + exitCode +
+// sha256 of the normalized first-4096 output) — a third-party-refutable failure capture, the FAIL-side EoW.
+// Raw output never leaves this function (only the sha does). Mixed per-command outcomes are 'flaky' overall:
+// a partially unstable rejection must not promote on contaminated evidence, so a stable sibling's repro is
+// discarded rather than certified. exitCode stays null on a timeout-killed rerun — the rejection is real and
+// reproduced, but a code is never fabricated (infra ambiguity must not be dressed as content evidence).
+// Baseline differential is deliberately EVIDENCE-ONLY and currently skipped: the only differential machinery
+// (runComprehensionQuizProbes) is welded to a full workspace copy, and a same-signature baseline failure is
+// NOT proof of an invalid check anyway (a fix-task's regression check legitimately fails on baseline too) —
+// recorded as an explicit skip so the absence is honest, never silent.
+export function probeRejectedChecks({ cwd, commands, timeoutMs, runsPerCommand = 2 }) {
+  const probed = (commands || []).map((c) => String(c || '').trim()).filter(Boolean).slice(0, 2);
+  const outcomes = [];
+  const quarantinedChecks = [];
+  let reproRun = null;
+  for (const command of probed) {
+    const runs = [];
+    let anyPassed = false;
+    let lastResult = null;
+    for (let i = 0; i < runsPerCommand; i += 1) {
+      const [r] = executeRequiredChecks({ cwd, requiredChecks: [{ command }], timeoutMs, isolate: true, captureRaw: true });
+      lastResult = r || null;
+      runs.push({ exitCode: r?.exitCode ?? null, status: r?.status || 'failed' });
+      if (r?.status === 'passed') anyPassed = true;
+    }
+    if (anyPassed) quarantinedChecks.push(command);
+    if (command === probed[0]) reproRun = lastResult;
+    outcomes.push({ command: sanitizeFmScalar(command), runs });
+  }
+  const verdict = quarantinedChecks.length > 0 ? 'flaky' : 'stable';
+  const probes = {
+    flaky: {
+      commandsProbed: probed.map((c) => sanitizeFmScalar(c)),
+      runsPerCommand,
+      outcomes,
+      verdict,
+    },
+    baseline: { skipped: 'no_baseline_machinery' },
+  };
+  const minimalRepro = verdict === 'stable' && reproRun
+    ? {
+      command: sanitizeFmScalar(reproRun.command),
+      exitCode: reproRun.exitCode ?? null,
+      outputSha256: createHash('sha256').update(reproRun.rawOutput || '').digest('hex'),
+      capturedAt: isoNow(),
+    }
+    : null;
+  return { probes, minimalRepro, quarantinedChecks };
 }
 
 // verify-resolver provenance: resolve a required-artifact ref to an on-disk path (workspace first, then project).
@@ -1534,6 +1597,14 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   const assuranceTier = decision !== 'approved'
     ? 'unverified'
     : (selfAuthored ? 'self_verified' : (verifyMode === true ? 'verified' : 'self_reported'));
+  // Oracle access (P0-3): typed CONSUMPTION of the external oracle (an acceptance check flagged `oracle: true`,
+  // e.g. the official SWE-bench grader) so bench results stratify by oracle-access level — measurement only, never
+  // a gate. 'judge_once' = the verdict was consumed with zero prior verify-retries; 'interactive' = the verdict fed
+  // back at least once (task.verifyAttempts is still populated here: retry-state clearing happens only after close).
+  // Counts RUNNER-visible consumption only — an executor self-invoking the grader outside verifyChecks is invisible
+  // (spec docs/specs/oracle-access.md). Closed colon-free enum, safe as a bare fm scalar (assuranceTier precedent).
+  const hasOracle = (acceptance.requiredChecks || []).some((c) => c && c.oracle === true);
+  const oracleAccess = !hasOracle ? 'none' : (Number(task?.verifyAttempts || 0) === 0 ? 'judge_once' : 'interactive');
   const followUpNeeded = decision === 'approved'
     ? (selfAuthored ? ['self_verified — the acceptance was authored by the executor and not independently confirmed, so the true specification may be under-specified (untested code paths, missing inverse/round-trip); treat this as provisional and require an external check for full verified_done'] : [])
     : ['Add observed evidence/check results or revise acceptance before closure is trusted.'];
@@ -1556,6 +1627,7 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     // as-is for back-compat (= runner-verify mode was on); externallyVerified + assuranceTier carry the independence.
     externallyVerified,
     assuranceTier,
+    oracleAccess,
     // comprehensionVerified asserts the quiz was RUNNER-verified — only true under verify mode (else the
     // probe results are self-attested and must not be stamped as an independent understanding check).
     comprehensionVerified: acceptance.comprehensionQuiz === true && decision === 'approved' && verifyMode === true,
@@ -2985,6 +3057,8 @@ function writeReviewForRunNode({ projectDir, task, runNode, verifyMode = false }
       // (not stamped with the same authority as an externally-verified one).
       assuranceTier: report.assuranceTier,
       externallyVerified: report.externallyVerified === true,
+      // P0-3: carry the oracle-consumption type onto the closed EoW (both stamp sites read this object).
+      oracleAccess: report.oracleAccess,
     } : null,
   };
 }
@@ -3077,12 +3151,24 @@ function closeExecutePartial({
 // content close is a failure CLAIM about the task; infra/protocol closes are UNDETERMINED and must never be
 // counted as true failures — F1's third class, the same rule that keeps a grader-throw out of official_resolved.
 // The certificate never claims intrinsic impossibility: scope is always resource_relative (this budget, these
-// resolvers, this friction trajectory). `verified_failure` (check-validity + minimal-repro probes, F-2/F-3)
-// is NOT mintable in v0 — the tier ceiling here is runner_rejected. Spec: docs/specs/failure-certificate.md
-export function buildFailureCertificate({ kind, verifyMode = false, runnerRejected = false, saturated = false, attempts = 0, failureSig = null, resolversTried = [], reasons = [] } = {}) {
+// resolvers, this friction trajectory). Tier ladder is CENTRALIZED here — issuance sites pass EVIDENCE, never
+// a tier: non-content => undetermined; content without an affirmative runner rejection =>
+// self_reported_failure; a runner rejection whose failing checks the F-2 probe could NOT reproduce (some rerun
+// passed => probes.flaky.verdict 'flaky') => DEMOTED to undetermined (kind stays content — the VERIFIER, not
+// the work, is the suspect; the close site quarantines the check); a runner rejection with a STABLE K-run
+// probe AND a captured F-3 minimalRepro => verified_failure (the only mint path); anything else stays
+// runner_rejected (including stable-probe-without-repro: no promotion without a captured repro). Probes only
+// ever demote or promote a runner-rejection — they never invent one (a self-reported close keeps its tier
+// regardless of probe input, and kind always dominates). Spec: docs/specs/failure-certificate.md
+export function buildFailureCertificate({ kind, verifyMode = false, runnerRejected = false, saturated = false, attempts = 0, failureSig = null, resolversTried = [], reasons = [], oracleAccess = null, probes = null, minimalRepro = null } = {}) {
+  const flakyVerdict = probes && probes.flaky ? probes.flaky.verdict : null;
   const failureTier = kind !== 'content'
     ? 'undetermined'
-    : (runnerRejected ? 'runner_rejected' : 'self_reported_failure');
+    : (!runnerRejected
+      ? 'self_reported_failure'
+      : (flakyVerdict === 'flaky'
+        ? 'undetermined'
+        : (flakyVerdict === 'stable' && minimalRepro ? 'verified_failure' : 'runner_rejected')));
   return {
     schemaVersion: 'failure-certificate-v0',
     kind,
@@ -3091,9 +3177,16 @@ export function buildFailureCertificate({ kind, verifyMode = false, runnerReject
     verifyMode: verifyMode === true,
     saturated: saturated === true,
     attempts: Number(attempts) || 0,
+    // P0-3: oracle-consumption type, threaded ONLY from a review-derived value (content close). Infra/protocol
+    // closes never reached the judge verdict, so they pass nothing and the field is honestly ABSENT (audit: unknown).
+    ...(oracleAccess ? { oracleAccess } : {}),
     ...(failureSig ? { failureSignature: failureSig } : {}),
     ...(Array.isArray(resolversTried) && resolversTried.length ? { resolversTried } : {}),
     ...(Array.isArray(reasons) && reasons.length ? { reasons: reasons.slice(0, 8).map((r) => sanitizeFmScalar(String(r), { maxLen: 300 })) } : {}),
+    // F-2/F-3 evidence rides the certificate verbatim (string fields sanitized at the probe site) so the tier
+    // is third-party recomputable from what is stored — a certificate is a claim + its measurement, not a verdict.
+    ...(probes ? { probes } : {}),
+    ...(minimalRepro ? { minimalRepro } : {}),
   };
 }
 
@@ -3130,6 +3223,9 @@ function closeExecuteSuccess({
   surpriseReport,
   budget,
   artifactWorkspacePath,
+  // stepTimeoutMs mirrors the verify exec's per-check timeout so an F-2 probe rerun runs under identical
+  // conditions; when absent, executeRequiredChecks' 120s default is the safety net.
+  stepTimeoutMs = null,
   verifyMode = false,
   verifyRetries = 0,
   escalateOnSaturation = false,
@@ -3241,6 +3337,22 @@ function closeExecuteSuccess({
       appendRunLog(runDir, `${finishedAt} saturation_escalate taskId=${task.id} rung=decompose afterAttempts=${attempts}`);
       return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
     }
+    // F-2/F-3: probes fire ONLY at the true final close — the verify_retry, rung-1 delegate and rung-2
+    // decompose branches all returned above — and only for an affirmative runner rejection that SATURATED
+    // (a verifyRetries:0 rejection keeps the runner_rejected ceiling: cost-bound decision, locked by smoke).
+    // Probe-able evidence = runner-authored failing checkResults from THIS run (never parsed out of the
+    // review's formatted failedChecks strings); an artifact/semantic/quiz-only rejection has zero probe-able
+    // commands, so it keeps its tier. Cost: <=2 commands x 2 reruns at the verify exec's own timeout/cwd.
+    const runnerRejected = verifyMode === true && review.reviewReport.decision === 'rejected';
+    let probeEvidence = null;
+    if (runnerRejected && saturated) {
+      const failingCommands = (executionResult.observed?.checkResults || [])
+        .filter((row) => row && row.verifiedBy === 'runner' && String(row.status) === 'failed' && row.command)
+        .map((row) => row.command);
+      if (failingCommands.length > 0) {
+        probeEvidence = probeRejectedChecks({ cwd: artifactWorkspacePath, commands: failingCommands, timeoutMs: stepTimeoutMs });
+      }
+    }
     return closeExecuteFailure({
       task,
       runDir,
@@ -3252,16 +3364,26 @@ function closeExecuteSuccess({
         // F-1/F-5: a guarded review-fail close is a CONTENT failure claim. Under --verify-checks with an
         // affirmative rejection (failedChecks>0) it certifies as runner_rejected; a mere evidence gap
         // (needs_verification) stays self_reported_failure — the work was not proven bad, only unproven.
+        // F-2/F-3 probe evidence (when measured) moves the tier along the centralized ladder: stable+repro
+        // promotes to verified_failure, a flaky verdict demotes to undetermined.
         fm.failureCertificate = buildFailureCertificate({
           kind: 'content',
           verifyMode,
-          runnerRejected: verifyMode === true && review.reviewReport.decision === 'rejected',
+          runnerRejected,
           saturated,
           attempts,
           failureSig,
           resolversTried: Array.isArray(task.escalatedResolvers) ? task.escalatedResolvers : [],
           reasons: review.reviewReport.failedChecks.concat(review.reviewReport.missingExpected),
+          // P0-3 FAIL-side symmetry: the same review-derived oracle-consumption type the DONE side stamps.
+          oracleAccess: review.reviewReport.oracleAccess,
+          ...(probeEvidence ? { probes: probeEvidence.probes, minimalRepro: probeEvidence.minimalRepro } : {}),
         });
+        // A flaky verdict quarantines the unstable command(s) ON THE TASK — visible to re-planners, cleared
+        // only by a later honest success close (never silently). A stable rejection quarantines nothing.
+        if (probeEvidence && probeEvidence.quarantinedChecks.length > 0) {
+          fm.quarantinedChecks = probeEvidence.quarantinedChecks.map((c) => sanitizeFmScalar(c));
+        }
         fm.lastRunFailureReason = sanitizeFmScalar(saturated
           ? `saturation: reached a fixpoint after ${attempts} verify attempts (the failure stopped being novel): ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`
           : `review ${review.reviewReport.decision}: ${review.reviewReport.missingExpected.concat(review.reviewReport.unsupportedObserved, review.reviewReport.failedChecks).join('; ')}`);
@@ -3292,8 +3414,8 @@ function closeExecuteSuccess({
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
   // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
-  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null || task.executorOverride != null || task.escalatedResolvers != null || task.saturationEscalated != null || task.failureCertificate != null) {
-    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; delete fm.executorOverride; delete fm.escalatedResolvers; delete fm.saturationEscalated; delete fm.failureCertificate; return fm; });
+  if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null || task.executorOverride != null || task.escalatedResolvers != null || task.saturationEscalated != null || task.failureCertificate != null || task.quarantinedChecks != null) {
+    updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; delete fm.executorOverride; delete fm.escalatedResolvers; delete fm.saturationEscalated; delete fm.failureCertificate; delete fm.quarantinedChecks; return fm; });
   }
 
   logEvent(eventsPath, {
@@ -3533,6 +3655,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       surpriseReport,
       budget,
       artifactWorkspacePath,
+      stepTimeoutMs,
       verifyMode: verifyRequiredChecks,
       verifyRetries,
       escalateOnSaturation,
@@ -5113,6 +5236,9 @@ function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedRev
       // P1: persist the assurance tier so a self_verified close is auditable on the EoW itself.
       if (approvedReview.assuranceTier) fm.assuranceTier = approvedReview.assuranceTier;
       fm.externallyVerified = approvedReview.externallyVerified === true;
+      // P0-3: SECOND stamp site (reviewTarget attach) — must mirror applyApprovedReviewToEow; guarded so a
+      // reviewless legacy approvedReview never fabricates a value.
+      if (approvedReview.oracleAccess) fm.oracleAccess = approvedReview.oracleAccess;
       if (fm.reason === 'manual_close' || fm.reason === 'no_further_decomposition' || fm.reason === 'execution_path_closed') {
         fm.reason = 'approved_result';
       }
@@ -5466,6 +5592,18 @@ export function runTaskOps(workDir, options = {}) {
     until = parsed;
   }
 
+  // Budget vector v1 = the wall-clock dimension only (spec docs/specs/budget-vector.md). A RELATIVE cap on this
+  // run's elapsed time, distinct from the ABSOLUTE --until deadline — different contracts, different stopReason.
+  // The explicit option wins over the ambient TASKOPS_MAX_WALL_MS env; validated pre-lock so a bad value throws
+  // before the runner lock exists (same no-leak contract as the --max-steps/--until validators above).
+  let maxWallClockMs = null;
+  const rawWallClockMs = options.maxWallClockMs != null ? options.maxWallClockMs : process.env.TASKOPS_MAX_WALL_MS;
+  if (rawWallClockMs != null && rawWallClockMs !== '') {
+    const n = Number(rawWallClockMs);
+    if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid maxWallClockMs '${rawWallClockMs}'; expected a non-negative finite number (option maxWallClockMs or env TASKOPS_MAX_WALL_MS)`);
+    maxWallClockMs = Math.floor(n);
+  }
+
   if (maxSteps == null && until == null) maxSteps = 1;
 
   let taskTimeoutMs = null;
@@ -5536,11 +5674,15 @@ export function runTaskOps(workDir, options = {}) {
     const eventsPath = join(runDir, 'events.jsonl');
 
     const startedAt = isoNow();
+    // Wall-clock budget epoch: measured from runner start (post-parse/lock), the same moment runner_started
+    // is stamped, so elapsedMs in budget_exhausted events lines up with the run's own event timeline.
+    const wallStartMs = Date.now();
     logEvent(eventsPath, {
       timestamp: startedAt, type: 'runner_started',
       workId: parsed.project.id, runId, executor,
       agentId: executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : null,
       maxSteps, until: until != null ? new Date(until).toISOString() : null,
+      maxWallClockMs,
       maxStepsExplicit, budgetEnabled,
       loopbackPolicy, maxLoopbacks, actorName,
     });
@@ -5559,6 +5701,22 @@ export function runTaskOps(workDir, options = {}) {
       finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
       if (until != null && Date.now() >= until) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
       if (maxSteps != null && stepsRun >= maxSteps) { stopReason = STOP_REASONS.MAX_STEPS; break; }
+      // Wall-clock budget check (v1), deliberately BETWEEN step dispatches: an in-flight step always finishes
+      // normally — unlike --until this cap never shortens stepTimeoutMs (no kill in v1). Ordered after the
+      // until/maxSteps checks so their stopReason precedence stays pinned. Ethos: exhaustion is a statement
+      // about the RUN's resources, never about any task — nothing here touches a task file (no frontmatter
+      // write, so sanitizeFmScalar is not in play), remaining runnable tasks stay pending, and
+      // finalizeWorkStatusForClosure below stays a no-op while closure is incomplete.
+      if (maxWallClockMs != null) {
+        const elapsedMs = Date.now() - wallStartMs;
+        if (elapsedMs >= maxWallClockMs) {
+          stopReason = STOP_REASONS.BUDGET_EXHAUSTED;
+          stopDetail = `wall-clock budget exhausted after ${elapsedMs}ms (cap ${maxWallClockMs}ms); scheduling stopped, in-flight work already completed normally`;
+          logEvent(eventsPath, { timestamp: isoNow(), type: stopReason, runId, dimension: 'wall_clock', elapsedMs, maxWallClockMs });
+          appendRunLog(runDir, `${isoNow()} ${stopReason} dimension=wall_clock elapsedMs=${elapsedMs} maxWallClockMs=${maxWallClockMs}`);
+          break;
+        }
+      }
 
       recheckBlockedTasks(projectDir, { allowConcurrentTarget, runId });
       parsed = parseProjectForRunner(projectDir, { allowConcurrentTarget });
@@ -5751,6 +5909,8 @@ export function runTaskOps(workDir, options = {}) {
       workId: parsed.project.id, runId,
       stopReason, stopDetail, stopSource,
       stepsRun, maxSteps, maxStepsExplicit, finalBudget,
+      maxWallClockMs,
+      budgetExhausted: stopReason === STOP_REASONS.BUDGET_EXHAUSTED,
       until: until != null ? new Date(until).toISOString() : null,
       executor,
       loopbackPolicy, maxLoopbacks, loopbacksUsed, actorName,

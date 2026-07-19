@@ -114,6 +114,10 @@ function applyApprovedReviewToEow(fm, approvedReview) {
   // audit assurance ledger cannot tell a self_verified close from a verified one.
   if (approvedReview.assuranceTier) fm.assuranceTier = approvedReview.assuranceTier;
   if (approvedReview.externallyVerified != null) fm.externallyVerified = approvedReview.externallyVerified === true;
+  // P0-3: persist the oracle-consumption type on the fresh EoW (the OTHER stamp site lives in
+  // attachApprovedReviewToExistingEows — both must stay in lockstep). Guarded: an approvedReview minted
+  // before P0-3 carries no oracleAccess and must not stamp one (audit reads absence as 'unknown').
+  if (approvedReview.oracleAccess) fm.oracleAccess = approvedReview.oracleAccess;
 }
 
 export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }, io) {

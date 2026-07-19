@@ -70,7 +70,8 @@ md(`${tv}/tasks/${taskId}.md`, {
   title: instanceId, objective, responsibility: 'Resolve the issue.', completionCriteria: 'The official test suite passes.',
   order: 1, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known',
   acceptance: { mode: 'guarded', expectedOutcome: 'official SWE-bench tests pass',
-    requiredChecks: [{ command: `${VENV_PY} ${GRADE} ${instanceId} ${workspace}` }] },
+    // oracle:true (P0-3): the official grader IS the external oracle — stratifies C-arm closes by oracle consumption.
+    requiredChecks: [{ command: `${VENV_PY} ${GRADE} ${instanceId} ${workspace}`, oracle: true }] },
 });
 
 const t0 = Date.now();

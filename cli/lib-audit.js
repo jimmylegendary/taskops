@@ -318,6 +318,24 @@ function doneTierForTask(parsed, task) {
   return tiers.slice().sort((a, b) => (DONE_TIER_RANK[a] ?? -1) - (DONE_TIER_RANK[b] ?? -1))[0]; // weakest wins
 }
 
+// Oracle access (P0-3; spec docs/specs/oracle-access.md): stratify terminal closes by external-oracle
+// CONSUMPTION. Measurement only — no issue, no gate, claimSafe math untouched (issues stay the single source
+// of truth). DONE side reads the EoW stamp (unlike the tier's weakest-wins, HIGHEST consumption wins when
+// multiple EoWs disagree — a re-review may re-stamp, and consumption already happened cannot be un-consumed);
+// FAIL side reads failureCertificate.oracleAccess. A close that never reached the judge verdict
+// (infra/protocol certificate, legacy close, unrecognized value) is 'unknown', never coerced into a tier.
+const ORACLE_ACCESS_RANK = { interactive: 2, judge_once: 1, none: 0 };
+
+function oracleAccessForTask(parsed, task) {
+  if (task.status === 'done') {
+    const stamped = taskEows(parsed, task).map((eow) => eow.oracleAccess).filter((v) => ORACLE_ACCESS_RANK[v] != null);
+    if (stamped.length === 0) return null;
+    return stamped.slice().sort((a, b) => (ORACLE_ACCESS_RANK[b] ?? -1) - (ORACLE_ACCESS_RANK[a] ?? -1))[0];
+  }
+  const certValue = task.failureCertificate?.oracleAccess;
+  return ORACLE_ACCESS_RANK[certValue] != null ? certValue : null;
+}
+
 function assuranceSummary(parsed) {
   const terminals = terminalSelectedTasks(parsed);
   const doneTasks = terminals.filter((task) => task.status === 'done');
@@ -329,16 +347,28 @@ function assuranceSummary(parsed) {
       ? 'unknown'
       : tiers.slice().sort((a, b) => (DONE_TIER_RANK[a] ?? -1) - (DONE_TIER_RANK[b] ?? -1))[0]);
   const certificates = blockedTasks.map((task) => task.failureCertificate).filter(Boolean);
+  const oracleAccess = { none: 0, judge_once: 0, interactive: 0, unknown: 0 };
+  for (const task of [...doneTasks, ...blockedTasks]) {
+    const value = oracleAccessForTask(parsed, task);
+    oracleAccess[value == null ? 'unknown' : value] += 1;
+  }
   return {
     floor,
     // The pure assurance dimension, orthogonal to structural claimSafe: every closed terminal task earned the
     // full runner-verified, non-self-authored tier.
     externallySafe: doneTasks.length > 0 && tiers.every((tier) => tier === 'verified'),
     failureLedger: {
-      content: certificates.filter((cert) => cert.kind === 'content').length,
+      // A content-kind certificate DEMOTED to undetermined (F-2 verifier-flake quarantine) is not a true
+      // content failure: the verifier, not the work, is the suspect. Tier filter added with the F-2/F-3
+      // stage — a no-op for every pre-existing certificate (kind=content and tier=undetermined were
+      // mutually exclusive before probes could demote).
+      content: certificates.filter((cert) => cert.kind === 'content' && cert.failureTier !== 'undetermined').length,
+      verifiedFailure: certificates.filter((cert) => cert.failureTier === 'verified_failure').length,
       undetermined: certificates.filter((cert) => cert.failureTier === 'undetermined').length,
       uncertified: blockedTasks.filter((task) => !task.failureCertificate).length,
     },
+    // P0-3: oracle-consumption tally over the same terminal set (done + blocked/failed) — bench stratification.
+    oracleAccess,
   };
 }
 
@@ -369,7 +399,7 @@ function auditAssuranceLedger(parsed) {
     issues.push(issue({
       code: 'undetermined_failures_present',
       severity: 'info',
-      message: `${undetermined.length} blocked task(s) closed on infra/protocol failure (undetermined): excluded from the failure ledger (F1's third class); re-queue once the harness issue is resolved.`,
+      message: `${undetermined.length} blocked task(s) closed undetermined (infra/protocol failure, or a verifier-flake quarantine that demoted a content rejection): excluded from the failure ledger (F1's third class); re-queue once the harness/check issue is resolved.`,
       evidence: { taskIds: undetermined.slice(0, 5).map((task) => task.id) },
     }));
   }
@@ -435,7 +465,7 @@ export function renderAuditText(audit) {
     `counts error=${audit.counts.error || 0} warning=${audit.counts.warning || 0} info=${audit.counts.info || 0}`,
     `metrics selectedTasks=${audit.metrics.selectedTaskCount} terminalTasks=${audit.metrics.terminalSelectedTaskCount} selectedGroups=${audit.metrics.selectedTaskGroupCount} childGroups=${audit.metrics.selectedChildTaskGroupCount} versions=${audit.metrics.taskGroupVersionCount}`,
     `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount} partial=${audit.metrics.unresolvedPartialCount}/${audit.metrics.partialCount}`,
-    `assurance floor=${audit.assurance?.floor ?? 'unknown'} externallySafe=${audit.assurance?.externallySafe === true} failures content=${audit.assurance?.failureLedger?.content ?? 0} undetermined=${audit.assurance?.failureLedger?.undetermined ?? 0} uncertified=${audit.assurance?.failureLedger?.uncertified ?? 0}`,
+    `assurance floor=${audit.assurance?.floor ?? 'unknown'} externallySafe=${audit.assurance?.externallySafe === true} failures content=${audit.assurance?.failureLedger?.content ?? 0} verifiedFailure=${audit.assurance?.failureLedger?.verifiedFailure ?? 0} undetermined=${audit.assurance?.failureLedger?.undetermined ?? 0} uncertified=${audit.assurance?.failureLedger?.uncertified ?? 0} oracleAccess none=${audit.assurance?.oracleAccess?.none ?? 0} judge_once=${audit.assurance?.oracleAccess?.judge_once ?? 0} interactive=${audit.assurance?.oracleAccess?.interactive ?? 0} unknown=${audit.assurance?.oracleAccess?.unknown ?? 0}`,
   ];
   if (audit.validationErrors.length > 0) {
     lines.push('validation errors:');
