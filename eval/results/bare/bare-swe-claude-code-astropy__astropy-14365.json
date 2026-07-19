@@ -6,8 +6,9 @@
   "adapter_ok": true,
   "claimed_done": true,
   "official_resolved": true,
+  "grade_error": null,
   "diff_files": 1,
   "false_completion": false,
   "missed_honest": false,
-  "wallclock_s": 199
+  "wallclock_s": 189
 }

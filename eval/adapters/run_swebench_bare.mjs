@@ -50,9 +50,18 @@ let diffLines = 0;
 try { diffLines = execFileSync('git', ['-C', repoDir, 'diff', '--numstat'], { encoding: 'utf8' }).split('\n').filter(Boolean).length; } catch {}
 let officialResolved = null;
 let gradeError = null;
-// A grader THROW is an infra outcome, not a verdict — record null + grade_error (same rule as the naive/
-// selfground arms), so a Docker hiccup can never mint a fake false_completion against the bare arm.
-try { officialResolved = /"resolved":\s*true/.test(execFileSync(VENV_PY, [GRADE, instanceId, repoDir], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000 })); } catch (e) { officialResolved = null; gradeError = String(e?.message || e).slice(0, 300); }
+// Distinguish a real UNRESOLVED VERDICT from an INFRA error (the F-1 content-vs-infra split, at the eval layer):
+// swebench_grade.py prints {"resolved":false} on stdout AND exits 1, so execFileSync throws even though the judge
+// gave a verdict. A thrown error whose stdout carries a resolved:true|false is a genuine judgment (record it); only
+// a throw with NO verdict on stdout is infra (null + grade_error, kept out of the F1 denominator). The prior
+// blanket `catch { null }` mislabeled every honest NOT_RESOLVED as undetermined.
+try {
+  officialResolved = /"resolved":\s*true/.test(execFileSync(VENV_PY, [GRADE, instanceId, repoDir], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000 }));
+} catch (e) {
+  const so = String(e?.stdout || '');
+  if (/"resolved":\s*(true|false)/.test(so)) officialResolved = /"resolved":\s*true/.test(so);
+  else { officialResolved = null; gradeError = String(e?.message || e).slice(0, 300); }
+}
 
 const rec = {
   instance_id: instanceId, dataset, executor, arm: 'bare',

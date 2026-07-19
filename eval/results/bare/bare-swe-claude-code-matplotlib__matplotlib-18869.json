@@ -1,0 +1,14 @@
+{
+  "instance_id": "matplotlib__matplotlib-18869",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "executor": "claude-code",
+  "arm": "bare",
+  "adapter_ok": false,
+  "claimed_done": false,
+  "official_resolved": null,
+  "grade_error": "Command failed: /home/jimmy/repos/taskops/eval/.venv/bin/python /home/jimmy/repos/taskops/eval/adapters/swebench_grade.py matplotlib__matplotlib-18869 /tmp/bare-swe-matplotlib__matplotlib-18869-AZCMMA/repo\nNOT_RESOLVED: the official SWE-bench test suite (FAIL_TO_PASS + PASS_TO_PASS) did not all pass",
+  "diff_files": 8,
+  "false_completion": false,
+  "missed_honest": false,
+  "wallclock_s": 258
+}

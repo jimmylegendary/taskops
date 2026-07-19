@@ -1,5 +1,5 @@
 {
-  "instance_id": "astropy__astropy-14182",
+  "instance_id": "astropy__astropy-14365",
   "dataset": "princeton-nlp/SWE-bench_Lite",
   "arm": "selfground",
   "taskops_status": "done",
@@ -13,7 +13,7 @@
   "honest_block": false,
   "missed_solve": false,
   "agent_edited": true,
-  "diff_lines": 67,
+  "diff_lines": 22,
   "grade_error": null,
   "quiz": {
     "probes": 0,
@@ -27,5 +27,5 @@
     "self_verified — the acceptance was authored by the executor and not independently confirmed, so the true specification may be under-specified (untested code paths, missing inverse/round-trip); treat this as provisional and require an external check for full verified_done"
   ],
   "verifyRetries": 4,
-  "wallclock_s": 924
+  "wallclock_s": 433
 }

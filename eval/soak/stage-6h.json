@@ -18,7 +18,7 @@
   "arms": [
     { "key": "A", "adapter": "run_swebench_bare.mjs", "extraArgs": [], "claimField": "claimed_done", "resultPattern": "results/bare/bare-swe-claude-code-{id}.json" },
     { "key": "B", "adapter": "run_swebench_naive.mjs", "extraArgs": ["4"], "claimField": "adapter_ok", "resultPattern": "results/naive/naive-k4-claude-code-{id}.json" },
-    { "key": "C", "adapter": "run_swebench.mjs", "extraArgs": ["4"], "claimField": "verified_done", "resultPattern": "results/swebench-{id}.json" },
+    { "key": "C", "adapter": "run_swebench.mjs", "extraArgs": ["4"], "claimField": "verified_done", "resultPattern": "results/swebench-k4-{id}.json" },
     { "key": "D", "adapter": "run_swebench_selfground.mjs", "extraArgs": ["4"], "claimField": "self_certified", "resultPattern": "results/selfground/selfground-k4-{id}.json" }
   ],
   "concurrency": 2,

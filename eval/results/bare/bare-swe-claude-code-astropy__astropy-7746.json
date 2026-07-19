@@ -5,9 +5,10 @@
   "arm": "bare",
   "adapter_ok": true,
   "claimed_done": true,
-  "official_resolved": false,
+  "official_resolved": true,
+  "grade_error": null,
   "diff_files": 2,
-  "false_completion": true,
+  "false_completion": false,
   "missed_honest": false,
-  "wallclock_s": 193
+  "wallclock_s": 99
 }

@@ -1,0 +1,14 @@
+{
+  "instance_id": "pylint-dev__pylint-5859",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "executor": "claude-code",
+  "arm": "bare",
+  "adapter_ok": false,
+  "claimed_done": false,
+  "official_resolved": null,
+  "grade_error": "Command failed: /home/jimmy/repos/taskops/eval/.venv/bin/python /home/jimmy/repos/taskops/eval/adapters/swebench_grade.py pylint-dev__pylint-5859 /tmp/bare-swe-pylint-dev__pylint-5859-Vk7Vjt/repo\nNOT_RESOLVED: the official SWE-bench test suite (FAIL_TO_PASS + PASS_TO_PASS) did not all pass on your c",
+  "diff_files": 2,
+  "false_completion": false,
+  "missed_honest": false,
+  "wallclock_s": 82
+}

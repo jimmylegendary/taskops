@@ -1,0 +1,29 @@
+{
+  "instance_id": "pydata__xarray-3364",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "arm": "selfground",
+  "taskops_status": "blocked",
+  "review_decision": null,
+  "assurance_tier": null,
+  "externally_verified": false,
+  "self_certified": false,
+  "verified_done": false,
+  "official_resolved": false,
+  "self_ground_gap": false,
+  "honest_block": true,
+  "missed_solve": false,
+  "agent_edited": false,
+  "diff_lines": 0,
+  "grade_error": null,
+  "quiz": {
+    "probes": 0,
+    "differential_true": 0,
+    "differential_false": 0,
+    "differential_null": 0
+  },
+  "review_missingExpected": null,
+  "review_failedChecks": null,
+  "review_followUpNeeded": null,
+  "verifyRetries": 4,
+  "wallclock_s": 15
+}

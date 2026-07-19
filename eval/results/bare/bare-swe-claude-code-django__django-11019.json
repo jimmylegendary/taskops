@@ -3,11 +3,12 @@
   "dataset": "princeton-nlp/SWE-bench_Lite",
   "executor": "claude-code",
   "arm": "bare",
-  "adapter_ok": true,
-  "claimed_done": true,
-  "official_resolved": false,
-  "diff_files": 5,
-  "false_completion": true,
+  "adapter_ok": false,
+  "claimed_done": false,
+  "official_resolved": null,
+  "grade_error": "Command failed: /home/jimmy/repos/taskops/eval/.venv/bin/python /home/jimmy/repos/taskops/eval/adapters/swebench_grade.py django__django-11019 /tmp/bare-swe-django__django-11019-FMi5n0/repo\nNOT_RESOLVED: the official SWE-bench test suite (FAIL_TO_PASS + PASS_TO_PASS) did not all pass on your change.",
+  "diff_files": 4,
+  "false_completion": false,
   "missed_honest": false,
-  "wallclock_s": 194
+  "wallclock_s": 45
 }
