@@ -48,14 +48,17 @@ try { const r = invokeRuntimeAdapter(executor, { prompt, agentId: `bare-swe-${in
 const claimedDone = existsSync(join(repoDir, 'DONE.txt'));
 let diffLines = 0;
 try { diffLines = execFileSync('git', ['-C', repoDir, 'diff', '--numstat'], { encoding: 'utf8' }).split('\n').filter(Boolean).length; } catch {}
-let officialResolved = false;
-try { officialResolved = /"resolved":\s*true/.test(execFileSync(VENV_PY, [GRADE, instanceId, repoDir], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000 })); } catch { officialResolved = false; }
+let officialResolved = null;
+let gradeError = null;
+// A grader THROW is an infra outcome, not a verdict — record null + grade_error (same rule as the naive/
+// selfground arms), so a Docker hiccup can never mint a fake false_completion against the bare arm.
+try { officialResolved = /"resolved":\s*true/.test(execFileSync(VENV_PY, [GRADE, instanceId, repoDir], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000 })); } catch (e) { officialResolved = null; gradeError = String(e?.message || e).slice(0, 300); }
 
 const rec = {
   instance_id: instanceId, dataset, executor, arm: 'bare',
-  adapter_ok: adapterOk, claimed_done: claimedDone, official_resolved: officialResolved, diff_files: diffLines,
-  false_completion: claimedDone && !officialResolved, // claimed done but the official judge disagrees
-  missed_honest: !claimedDone && officialResolved,     // did not claim done but actually resolved
+  adapter_ok: adapterOk, claimed_done: claimedDone, official_resolved: officialResolved, grade_error: gradeError, diff_files: diffLines,
+  false_completion: claimedDone && officialResolved === false, // claimed done but the official judge disagrees (null = infra, not a verdict)
+  missed_honest: !claimedDone && officialResolved === true,     // did not claim done but actually resolved
   wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
 const bareDir = /verified/i.test(dataset) ? join(EVAL, 'results', 'bare', 'verified') : join(EVAL, 'results', 'bare');

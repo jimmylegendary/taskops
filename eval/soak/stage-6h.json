@@ -1,0 +1,30 @@
+{
+  "stage": "stage-6h",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "instances": [
+    "astropy__astropy-14182",
+    "astropy__astropy-14365",
+    "astropy__astropy-7746",
+    "django__django-11019",
+    "pallets__flask-4045",
+    "matplotlib__matplotlib-18869",
+    "mwaskom__seaborn-2848",
+    "psf__requests-1963",
+    "pydata__xarray-3364",
+    "pylint-dev__pylint-5859",
+    "pytest-dev__pytest-11143",
+    "scikit-learn__scikit-learn-10297"
+  ],
+  "arms": [
+    { "key": "A", "adapter": "run_swebench_bare.mjs", "extraArgs": [], "claimField": "claimed_done", "resultPattern": "results/bare/bare-swe-claude-code-{id}.json" },
+    { "key": "B", "adapter": "run_swebench_naive.mjs", "extraArgs": ["4"], "claimField": "adapter_ok", "resultPattern": "results/naive/naive-k4-claude-code-{id}.json" },
+    { "key": "C", "adapter": "run_swebench.mjs", "extraArgs": ["4"], "claimField": "verified_done", "resultPattern": "results/swebench-{id}.json" },
+    { "key": "D", "adapter": "run_swebench_selfground.mjs", "extraArgs": ["4"], "claimField": "self_certified", "resultPattern": "results/selfground/selfground-k4-{id}.json" }
+  ],
+  "concurrency": 2,
+  "globalWallMin": 330,
+  "perRunTimeoutMin": 30,
+  "maxAttemptsPerJob": 2,
+  "haltOnConsecutiveFailures": 4,
+  "env": { "TASKOPS_MAX_WALL_MS": "1500000" }
+}
