@@ -1,0 +1,31 @@
+{
+  "instance_id": "astropy__astropy-14182",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "arm": "selfground",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "assurance_tier": "self_verified",
+  "externally_verified": false,
+  "self_certified": true,
+  "verified_done": true,
+  "official_resolved": true,
+  "self_ground_gap": false,
+  "honest_block": false,
+  "missed_solve": false,
+  "agent_edited": true,
+  "diff_lines": 67,
+  "grade_error": null,
+  "quiz": {
+    "probes": 0,
+    "differential_true": 0,
+    "differential_false": 0,
+    "differential_null": 0
+  },
+  "review_missingExpected": [],
+  "review_failedChecks": [],
+  "review_followUpNeeded": [
+    "self_verified — the acceptance was authored by the executor and not independently confirmed, so the true specification may be under-specified (untested code paths, missing inverse/round-trip); treat this as provisional and require an external check for full verified_done"
+  ],
+  "verifyRetries": 4,
+  "wallclock_s": 924
+}

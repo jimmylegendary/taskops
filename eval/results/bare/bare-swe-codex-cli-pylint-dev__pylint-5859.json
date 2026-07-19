@@ -1,0 +1,14 @@
+{
+  "instance_id": "pylint-dev__pylint-5859",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "executor": "codex-cli",
+  "arm": "bare",
+  "adapter_ok": true,
+  "claimed_done": true,
+  "official_resolved": true,
+  "grade_error": null,
+  "diff_files": 3,
+  "false_completion": false,
+  "missed_honest": false,
+  "wallclock_s": 104
+}

@@ -1,5 +1,5 @@
 {
-  "instance_id": "pallets__flask-4045",
+  "instance_id": "astropy__astropy-6938",
   "dataset": "princeton-nlp/SWE-bench_Lite",
   "taskops_status": "done",
   "review_decision": "approved",
@@ -8,7 +8,7 @@
   "false_completion": false,
   "missed_honest": false,
   "agent_edited": true,
-  "diff_lines": 34,
-  "verifyRetries": 2,
-  "wallclock_s": 144
+  "diff_lines": 13,
+  "verifyRetries": 4,
+  "wallclock_s": 108
 }

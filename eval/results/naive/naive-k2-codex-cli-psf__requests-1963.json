@@ -1,0 +1,13 @@
+{
+  "instance_id": "psf__requests-1963",
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "executor": "codex-cli",
+  "arm": "naive-retry",
+  "k": 2,
+  "adapter_ok": true,
+  "official_resolved": true,
+  "grade_error": null,
+  "rounds_used": 1,
+  "diff_files": 1,
+  "wallclock_s": 154
+}
