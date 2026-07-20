@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TaskOps run-graph 뷰어 — task graph(분해) + run graph</title>
+<style>
+  :root{
+    --bg:#0e1217; --panel:#151b23; --panel2:#1a222c; --line:#26303c; --line2:#33404f;
+    --ink:#e7edf4; --mut:#93a0b0; --dim:#5d6b7c;
+    --fn:#2dd4bf; --violet:#b096f8; --amber:#fbbf24; --red:#f87171; --green:#4ade80; --blue:#6aabfa;
+    --mono:ui-monospace,'JetBrains Mono','Cascadia Code',Consolas,monospace;
+    --sans:'Pretendard Variable',Pretendard,-apple-system,'Noto Sans KR','Malgun Gothic',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5}
+  code,.mono{font-family:var(--mono)}
+
+  header{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,rgba(14,18,23,.98),rgba(14,18,23,.93));backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:13px 22px}
+  header h1{font-size:17px;font-weight:800;letter-spacing:-.01em}
+  header h1 .sub{color:var(--mut);font-weight:600;font-size:12.5px;margin-left:8px}
+  .rlegend{display:flex;flex-wrap:wrap;gap:14px;margin-top:9px;font-size:11.5px;color:var(--mut)}
+  .rlegend .lg{display:flex;align-items:center;gap:6px}
+  .rd{width:9px;height:9px;border-radius:3px;display:inline-block}
+
+  .wrap{display:grid;grid-template-columns:250px 1fr;min-height:calc(100vh - 66px)}
+  nav{border-right:1px solid var(--line);height:calc(100vh - 66px);overflow-y:auto;position:sticky;top:66px;background:var(--bg);padding:12px 8px 40px}
+  nav .grp{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:700;padding:6px 10px 8px}
+  nav a.work{display:block;padding:9px 11px;border-radius:9px;color:var(--mut);border:1px solid transparent;cursor:pointer;margin-bottom:3px}
+  nav a.work:hover{background:var(--panel);color:var(--ink)}
+  nav a.work.on{background:var(--panel2);color:var(--ink);border-color:var(--line2)}
+  nav a.work .wn{font-family:var(--mono);font-size:12.5px;font-weight:600}
+  nav a.work .wm{font-size:10.5px;color:var(--dim);margin-top:2px}
+
+  main{padding:20px 26px 90px}
+  .whead .wt{font-family:var(--mono);font-size:15px;font-weight:700}
+  .whead .wo{color:var(--mut);font-size:12.5px;margin-top:4px;max-width:80ch}
+  .whead .hint{color:var(--dim);font-size:11.5px;margin-top:6px}
+  .sec{margin-top:24px}
+  .sec .sh{font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:800;color:var(--fn);display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
+  .sec .sh .sd{font-size:11px;color:var(--dim);font-weight:500;letter-spacing:0;text-transform:none}
+
+  /* task graph: nested decomposition tree */
+  .tg{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:12px 14px;margin-top:10px}
+  .tghd{display:flex;align-items:center;gap:9px;cursor:pointer;padding:2px}
+  .tghd .tgi{font-family:var(--mono);font-size:12px;color:var(--violet);font-weight:700}
+  .tghd .tgo{font-size:12px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tghd .tgv{font-family:var(--mono);font-size:10px;color:var(--dim);border:1px solid var(--line2);border-radius:5px;padding:1px 6px;flex-shrink:0}
+  .tasks{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding-left:6px;border-left:2px solid var(--line2);margin-left:4px}
+  .tk{border:1px solid var(--line2);border-left:3px solid var(--rc,var(--line2));border-radius:9px;background:var(--panel2);padding:8px 12px;cursor:pointer;transition:transform .1s,box-shadow .1s}
+  .tk:hover{transform:translateX(2px);box-shadow:0 2px 10px rgba(0,0,0,.3)}
+  .tk:focus-visible{outline:2px solid var(--fn);outline-offset:2px}
+  .tk.sel{box-shadow:0 0 0 2px var(--fn) inset}
+  .tk .tkr{display:flex;align-items:center;gap:8px}
+  .tk .ord{font-family:var(--mono);font-size:10px;color:var(--dim);flex-shrink:0}
+  .tk .tkt{font-weight:700;font-size:13.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tk .badges{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+  .bdg{font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:5px;border:1px solid var(--rc,var(--line2));color:var(--rc,var(--mut))}
+  .bdg.u{border-color:var(--line2);color:var(--mut)}
+  .child{margin-top:8px}
+  .decomp-arrow{font-size:10.5px;color:var(--violet);font-family:var(--mono);margin:2px 0 0 8px}
+  /* readiness accents */
+  .r-runnable{--rc:var(--green)} .r-needs_decomposition{--rc:var(--violet)}
+  .r-needs_exploration{--rc:var(--amber)} .r-blocked{--rc:var(--red)} .r-done{--rc:var(--dim)}
+
+  /* run graph: node chain */
+  .rung{display:flex;flex-direction:column;gap:0;align-items:flex-start;margin-top:12px;padding-left:6px}
+  .rnode{border:1px solid var(--line2);border-left:3px solid var(--nc,var(--blue));border-radius:9px;background:var(--panel2);padding:8px 13px;cursor:pointer;min-width:220px;transition:transform .1s}
+  .rnode:hover{transform:translateX(2px)}
+  .rnode:focus-visible{outline:2px solid var(--fn);outline-offset:2px}
+  .rnode.sel{box-shadow:0 0 0 2px var(--fn) inset}
+  .rnode .rk{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:800;color:var(--nc,var(--mut))}
+  .rnode .rl{font-weight:700;font-size:13px;margin-top:1px}
+  .redge{margin-left:22px;padding:3px 0 3px 12px;border-left:2px solid var(--line2);font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .n-implementation{--nc:var(--fn)} .n-verification{--nc:var(--violet)} .n-eow{--nc:var(--green)} .n-decompose{--nc:var(--amber)}
+
+  .empty{color:var(--dim);padding:60px 10px;text-align:center}
+
+  /* drawer */
+  .backdrop{position:fixed;inset:0;background:rgba(6,9,13,.45);opacity:0;pointer-events:none;transition:opacity .26s ease;z-index:40}
+  .backdrop.open{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:0;height:100vh;width:400px;max-width:92vw;background:var(--panel);border-left:1px solid var(--line2);z-index:50;transform:translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column;box-shadow:-14px 0 40px rgba(0,0,0,.4)}
+  .drawer.open{transform:translateX(0)}
+  .dr-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 14px;border-bottom:1px solid var(--line)}
+  .dr-hd .dk{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:var(--dk,var(--fn))}
+  .dr-hd .dt{font-weight:800;font-size:17px;margin-top:2px;text-wrap:balance}
+  .dr-x{flex:0 0 auto;width:30px;height:30px;border-radius:8px;border:1px solid var(--line2);background:var(--panel2);color:var(--mut);cursor:pointer;font-size:16px;display:grid;place-items:center}
+  .dr-x:hover{color:var(--ink)}
+  .dr-body{padding:16px 20px 30px;overflow-y:auto}
+  .dr-field{display:flex;flex-direction:column;gap:2px;padding:9px 0;border-bottom:1px solid var(--line)}
+  .dr-field .fk{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);font-weight:700}
+  .dr-field .fv{font-family:var(--mono);font-size:13px;color:var(--ink);word-break:break-word;white-space:pre-wrap}
+  .dr-note{margin-top:14px;font-size:13px;color:var(--mut);line-height:1.55;border-left:2px solid var(--dk,var(--fn));padding-left:12px}
+  @media (prefers-reduced-motion: reduce){.drawer,.backdrop,.tk,.rnode{transition:none}}
+  @media (max-width:860px){.wrap{grid-template-columns:1fr}nav{display:none}main{padding:16px 12px 70px}.drawer{width:100vw}}
+</style>
+</head>
+<body>
+<header>
+  <h1>TaskOps run-graph 뷰어 <span class="sub">task graph(분해 tree) + run graph — readiness가 다음을 정한다</span></h1>
+  <div class="rlegend">
+    <span class="lg"><span class="rd" style="background:var(--green)"></span>runnable</span>
+    <span class="lg"><span class="rd" style="background:var(--violet)"></span>needs_decomposition (분해)</span>
+    <span class="lg"><span class="rd" style="background:var(--amber)"></span>needs_exploration (탐색)</span>
+    <span class="lg"><span class="rd" style="background:var(--red)"></span>blocked</span>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="nav"></nav>
+  <main id="main"><div class="empty">왼쪽에서 work를 선택하세요.</div></main>
+</div>
+<div class="backdrop" id="backdrop"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="노드 세부">
+  <div class="dr-hd"><div><div class="dk" id="drK"></div><div class="dt" id="drT"></div></div><button class="dr-x" id="drX" aria-label="닫기">✕</button></div>
+  <div class="dr-body" id="drBody"></div>
+</aside>
+<script>
+const DATA = [{"root": "/home/jimmy/repos/taskops/examples/taskops-canonical-minimal-v1", "name": "taskops-canonical-minimal-v1", "work": {"taskOpsVersion": "v1", "entityType": "work", "id": "project-alpha-v1", "title": "TaskOps canonical minimal v1 example", "objective": "Prove the first TaskOps v1 md-first layout for versioned task groups, snapshots, and run graph separation.", "activeRootTaskGroupId": "tg-root", "activeSnapshotId": "snapshot-alpha-v1", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, "taskGroups": {"tg-root": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroup", "id": "tg-root", "objective": "Establish the first minimal TaskOps v1 work shape.", "activeVersionId": "tgv-root-v1", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, "versions": {"tgv-root-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-root-v1", "taskGroupId": "tg-root", "version": "v1", "summary": "First root decomposition for the canonical minimal TaskOps fixture.", "selected": "true", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, "tasks": [{"taskOpsVersion": "v1", "entityType": "task", "id": "task-design", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Decompose the design slice", "objective": "Capture one child task group to demonstrate version-path selection.", "responsibility": "Own the design-side child decomposition example.", "completionCriteria": "A child task group exists with one selected version and coherent tasks.", "runReadiness": "needs_decomposition", "runReadinessReason": "Parent task owns a child task group rather than a single run.", "understandingLevel": "known", "order": "2", "childTaskGroupId": "tg-design", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-run", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Record execution truth separately", "objective": "Show that execution reality lives under runs/<run-id>/ rather than inside the decomposition tree.", "responsibility": "Own the minimal run graph fixture.", "completionCriteria": "At least one run node and one run edge exist and point to real ids.", "runReadiness": "needs_exploration", "runReadinessReason": "Execution truth needs a small exploratory trace before the next decomposition is reliable.", "understandingLevel": "partial", "unknowns": ["exact run trace shape for downstream feedback"], "nextLearningGoal": "Create or inspect a minimal run node and feed the learned constraint back into the task graph.", "order": "3", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-structure", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Define canonical project structure", "objective": "Create the top-level project, snapshot, run, and derived folders coherently.", "responsibility": "Own the root container layout and shared canonical boundaries.", "completionCriteria": "Top-level folders and index notes exist with coherent ids and purposes.", "runReadiness": "runnable", "runReadinessReason": "Objective, responsibility, and completion criteria define one checkable run.", "understandingLevel": "known", "order": "1", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T03:20:00+09:00", "status": "done"}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-run", "graphType": "task", "attachedToType": "task", "attachedToId": "task-run", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-structure", "graphType": "task", "attachedToType": "task", "attachedToId": "task-structure", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-node-structure"]}], "decomp_log": "# Decomposition log\n\n- 2026-04-27 — Decomposed the root objective into structure, child decomposition, and execution trace setup.\n"}}}, "tg-design": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroup", "id": "tg-design", "objective": "Define the design-side decomposition for the minimal fixture.", "parentTaskId": "task-design", "activeVersionId": "tgv-design-v1", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, "versions": {"tgv-design-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-design-v1", "taskGroupId": "tg-design", "version": "v1", "summary": "First design decomposition for the canonical minimal TaskOps fixture.", "selected": "true", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, "tasks": [{"taskOpsVersion": "v1", "entityType": "task", "id": "task-model", "taskGroupId": "tg-design", "taskGroupVersionId": "tgv-design-v1", "title": "Freeze the model fields", "objective": "Make the required entity fields explicit for the minimal fixture.", "responsibility": "Own the canonical frontmatter fields used by the example.", "completionCriteria": "Project, task group, version, task, snapshot, run node, and run edge notes all use coherent required fields.", "runReadiness": "runnable", "runReadinessReason": "Objective, responsibility, and completion criteria define one checkable run.", "understandingLevel": "known", "order": "1", "createdAt": "2026-04-27T03:20:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-verify-example", "taskGroupId": "tg-design", "taskGroupVersionId": "tgv-design-v1", "title": "Verify example reachability", "objective": "Ensure the chosen snapshot and run graph can be inspected directly from disk.", "responsibility": "Own the example-level coherence check.", "completionCriteria": "A human can trace selected versions and run references without hidden state.", "runReadiness": "runnable", "runReadinessReason": "Objective, responsibility, and completion criteria define one checkable run.", "understandingLevel": "known", "order": "2", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T03:20:00+09:00", "status": "done"}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-verify-example", "graphType": "task", "attachedToType": "task", "attachedToId": "task-verify-example", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-node-verify"]}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-model", "graphType": "task", "attachedToType": "task", "attachedToId": "task-model", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}], "decomp_log": "# Decomposition log\n\n- 2026-04-27 — Split the design slice into model freezing and example verification.\n"}}}}, "runs": {"run-alpha-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "run", "id": "run-alpha-v1", "workId": "project-alpha-v1", "createdAt": "2026-04-27T03:20:00+09:00", "status": "active"}, "nodes": [{"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-node-structure", "runId": "run-alpha-v1", "type": "implementation", "title": "Create the canonical folder layout", "status": "done", "sourceTaskId": "task-structure", "sourceTaskGroupVersionId": "tgv-root-v1", "createdAt": "2026-04-27T03:20:00+09:00"}, {"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-node-verify", "runId": "run-alpha-v1", "type": "verification", "title": "Inspect the example for coherence", "status": "done", "sourceTaskId": "task-verify-example", "sourceTaskGroupVersionId": "tgv-design-v1", "createdAt": "2026-04-27T03:22:00+09:00"}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-run-node-verify", "runId": "run-alpha-v1", "graphType": "run", "attachedToType": "runNode", "attachedToId": "run-node-verify", "reason": "execution_path_closed", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}], "edges": [{"taskOpsVersion": "v1", "entityType": "runEdge", "id": "edge-run-node-verify-to-eow", "runId": "run-alpha-v1", "fromRunNodeId": "run-node-verify", "toRunNodeId": "eow-run-node-verify", "edgeType": "closes_with", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "runEdge", "id": "run-edge-structure-to-verify", "runId": "run-alpha-v1", "fromRunNodeId": "run-node-structure", "toRunNodeId": "run-node-verify", "edgeType": "informs", "createdAt": "2026-04-27T03:23:00+09:00", "status": "active"}]}}, "snapshots": [{"taskOpsVersion": "v1", "entityType": "versionSnapshot", "id": "snapshot-alpha-v1", "rootTaskGroupId": "tg-root", "createdAt": "2026-04-27T03:20:00+09:00", "label": "Initial selected version path", "status": "active", "selectedVersions": ["taskGroupId: tg-root", "taskGroupId: tg-design"]}]}, {"root": "/home/jimmy/repos/taskops/examples/taskops-minimal-v1", "name": "taskops-minimal-v1", "work": {"taskOpsVersion": "v1", "entityType": "work", "id": "project-alpha-v1", "title": "TaskOps richer v1 fixture", "objective": "Provide a denser TaskOps v1 md-first fixture beyond the canonical minimal example while preserving the same task-group / snapshot / run split.", "activeRootTaskGroupId": "tg-root", "activeSnapshotId": "snapshot-root-v1", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, "taskGroups": {"tg-root": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroup", "id": "tg-root", "objective": "Establish the first minimal TaskOps v1 work shape.", "activeVersionId": "tgv-root-v1", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, "versions": {"tgv-root-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-root-v1", "taskGroupId": "tg-root", "version": "v1", "summary": "First root decomposition for the TaskOps v1 fixture.", "selected": "true", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, "tasks": [{"taskOpsVersion": "1", "entityType": "task", "id": "task-acquire-users", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Acquire users", "objective": "Establish a repeatable user acquisition path", "responsibility": "Acquisition channel and conversion ownership", "completionCriteria": "At least one intentional acquisition path exists and can be executed repeatedly", "order": "2", "childTaskGroupId": "tg-acquire-users", "createdAt": "2026-04-27T00:00:00Z", "status": "active"}, {"taskOpsVersion": "1", "entityType": "task", "id": "task-build-product", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Build the product", "objective": "Produce a usable product that can deliver the intended value", "responsibility": "Product definition and implementation ownership", "completionCriteria": "A usable product exists with the intended core value loop implemented", "order": "1", "childTaskGroupId": "tg-build-product", "createdAt": "2026-04-27T00:00:00Z", "status": "active"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-design", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Decompose the design slice", "objective": "Capture one child task group to demonstrate version-path selection.", "responsibility": "Own the design-side child decomposition example.", "completionCriteria": "A child task group exists with one selected version and coherent tasks.", "order": "2", "childTaskGroupId": "tg-design", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-run", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Record execution truth separately", "objective": "Show that execution reality lives under runs/<run-id>/ rather than inside the decomposition tree.", "responsibility": "Own the minimal run graph fixture.", "completionCriteria": "At least one run node and one run edge exist and point to real ids.", "order": "3", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-structure", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v1", "title": "Define canonical project structure", "objective": "Create the top-level project, snapshot, run, and derived folders coherently.", "responsibility": "Own the root container layout and shared canonical boundaries.", "completionCriteria": "Top-level folders and index notes exist with coherent ids and purposes.", "order": "1", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T03:10:00+09:00", "status": "done"}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-run", "graphType": "task", "attachedToType": "task", "attachedToId": "task-run", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-node-human-decision"]}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-design", "graphType": "task", "attachedToType": "task", "attachedToId": "task-design", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-structure", "graphType": "task", "attachedToType": "task", "attachedToId": "task-structure", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-node-structure"]}], "decomp_log": "# Decomposition log\n\n- 2026-04-27 — Decomposed the root objective into structure, child decomposition, and execution trace setup.\n"}}}, "tg-design": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroup", "id": "tg-design", "objective": "Define the design-side decomposition for the minimal fixture.", "parentTaskId": "task-design", "activeVersionId": "tgv-design-v1", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, "versions": {"tgv-design-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-design-v1", "taskGroupId": "tg-design", "version": "v1", "summary": "First design decomposition for the TaskOps v1 fixture.", "selected": "true", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, "tasks": [{"taskOpsVersion": "v1", "entityType": "task", "id": "task-model", "taskGroupId": "tg-design", "taskGroupVersionId": "tgv-design-v1", "title": "Freeze the model fields", "objective": "Make the required entity fields explicit for the minimal fixture.", "responsibility": "Own the canonical frontmatter fields used by the example.", "completionCriteria": "Project, task group, version, task, snapshot, run node, and run edge notes all use coherent required fields.", "order": "1", "createdAt": "2026-04-27T03:10:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-verify-example", "taskGroupId": "tg-design", "taskGroupVersionId": "tgv-design-v1", "title": "Verify example reachability", "objective": "Ensure the chosen snapshot and run graph can be inspected directly from disk.", "responsibility": "Own the example-level coherence check.", "completionCriteria": "A human can trace selected versions and run references without hidden state.", "order": "2", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-verify-example", "graphType": "task", "attachedToType": "task", "attachedToId": "task-verify-example", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-node-verify"]}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-model", "graphType": "task", "attachedToType": "task", "attachedToId": "task-model", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}], "decomp_log": "# Decomposition log\n\n- 2026-04-27 — Split the design slice into model freezing and example verification.\n"}}}, "tg-acquire-users": {"meta": {"taskOpsVersion": "1", "entityType": "taskGroup", "id": "tg-acquire-users", "objective": "Establish a repeatable user acquisition path", "parentTaskId": "task-acquire-users", "activeVersionId": "tgv-acquire-users-v1", "createdAt": "2026-04-27T00:00:00Z"}, "versions": {"tgv-acquire-users-v1": {"meta": {"taskOpsVersion": "1", "entityType": "taskGroupVersion", "id": "tgv-acquire-users-v1", "taskGroupId": "tg-acquire-users", "version": "1", "summary": "Initial acquisition decomposition into channel and conversion work", "selected": "true", "createdAt": "2026-04-27T00:00:00Z"}, "tasks": [{"taskOpsVersion": "1", "entityType": "task", "id": "task-find-channel", "taskGroupId": "tg-acquire-users", "taskGroupVersionId": "tgv-acquire-users-v1", "title": "Find an acquisition channel", "objective": "Identify a viable channel for reaching target users", "responsibility": "Channel selection ownership", "completionCriteria": "At least one viable channel and audience hypothesis is defined", "order": "1", "createdAt": "2026-04-27T00:00:00Z", "status": "active"}, {"taskOpsVersion": "1", "entityType": "task", "id": "task-improve-conversion", "taskGroupId": "tg-acquire-users", "taskGroupVersionId": "tgv-acquire-users-v1", "title": "Improve conversion", "objective": "Improve the user path from arrival to activation", "responsibility": "Conversion path ownership", "completionCriteria": "A concrete activation path exists with identifiable improvement points", "order": "2", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T00:00:00Z", "status": "pending"}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-find-channel", "graphType": "task", "attachedToType": "task", "attachedToId": "task-find-channel", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-improve-conversion", "graphType": "task", "attachedToType": "task", "attachedToId": "task-improve-conversion", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-landing-test"]}], "decomp_log": "# Decomposition log\n\n- 2026-04-27 — Initial acquire-users decomposition created.\n"}}}, "tg-build-product": {"meta": {"taskOpsVersion": "1", "entityType": "taskGroup", "id": "tg-build-product", "objective": "Produce a usable product that can deliver the intended value", "parentTaskId": "task-build-product", "activeVersionId": "tgv-build-product-v1", "createdAt": "2026-04-27T00:00:00Z"}, "versions": {"tgv-build-product-v1": {"meta": {"taskOpsVersion": "1", "entityType": "taskGroupVersion", "id": "tgv-build-product-v1", "taskGroupId": "tg-build-product", "version": "1", "summary": "Product build split into design and implementation responsibilities", "selected": "true", "createdAt": "2026-04-27T00:00:00Z"}, "tasks": [{"taskOpsVersion": "1", "entityType": "task", "id": "task-design-solution", "taskGroupId": "tg-build-product", "taskGroupVersionId": "tgv-build-product-v1", "title": "Design the solution", "objective": "Define the product structure, UX, and boundaries", "responsibility": "Product/UX design ownership", "completionCriteria": "The product structure and interaction flow are explicitly defined", "order": "1", "runRefs": ["runId: run-alpha-v1"], "createdAt": "2026-04-27T00:00:00Z", "status": "done"}, {"taskOpsVersion": "1", "entityType": "task", "id": "task-implement-solution", "taskGroupId": "tg-build-product", "taskGroupVersionId": "tgv-build-product-v1", "title": "Implement the solution", "objective": "Turn the design into a usable product", "responsibility": "Engineering implementation ownership", "completionCriteria": "The designed product can actually be used end to end", "order": "2", "createdAt": "2026-04-27T00:00:00Z", "status": "active"}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-design-solution", "graphType": "task", "attachedToType": "task", "attachedToId": "task-design-solution", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done", "evidenceRefs": ["run:run-alpha-v1/node:run-design-research"]}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-implement-solution", "graphType": "task", "attachedToType": "task", "attachedToId": "task-implement-solution", "reason": "no_further_decomposition", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}], "decomp_log": "# Decomposition log\n\n- 2026-04-27 — Initial build-product decomposition created.\n"}}}}, "runs": {"run-alpha-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "run", "id": "run-alpha-v1", "workId": "project-alpha-v1", "createdAt": "2026-04-27T03:10:00+09:00", "status": "active"}, "nodes": [{"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-design-research", "runId": "run-alpha-v1", "type": "research", "title": "Research UX and market positioning together", "status": "done", "sourceTaskId": "task-design-solution", "sourceTaskGroupVersionId": "tgv-build-product-v1", "createdAt": "2026-04-27T00:00:00Z"}, {"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-node-human-decision", "runId": "run-alpha-v1", "type": "delegate", "title": "Ask Jimmy to confirm the next execution constraint", "status": "waiting", "sourceTaskId": "task-run", "sourceTaskGroupVersionId": "tgv-root-v1", "delegateeType": "human", "delegateeRef": "jimmy", "request": "Confirm whether the execution trace should wait for a human decision before the next run branch.", "expectedOutput": "A clear yes/no decision plus any constraint that should update the task graph.", "requestedAt": "2026-05-08T04:45:00+09:00", "timeoutAt": "2026-05-10T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00"}, {"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-node-structure", "runId": "run-alpha-v1", "type": "implementation", "title": "Create the canonical folder layout", "status": "done", "sourceTaskId": "task-structure", "sourceTaskGroupVersionId": "tgv-root-v1", "createdAt": "2026-04-27T03:10:00+09:00"}, {"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-landing-test", "runId": "run-alpha-v1", "type": "experiment", "title": "Run a landing-page conversion test", "status": "done", "sourceTaskId": "task-improve-conversion", "sourceTaskGroupVersionId": "tgv-acquire-users-v1", "createdAt": "2026-04-27T00:00:00Z"}, {"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-node-verify", "runId": "run-alpha-v1", "type": "verification", "title": "Inspect the example for coherence", "status": "done", "sourceTaskId": "task-verify-example", "sourceTaskGroupVersionId": "tgv-design-v1", "createdAt": "2026-04-27T03:12:00+09:00"}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-run-node-verify", "runId": "run-alpha-v1", "graphType": "run", "attachedToType": "runNode", "attachedToId": "run-node-verify", "reason": "execution_path_closed", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-run-landing-test", "runId": "run-alpha-v1", "graphType": "run", "attachedToType": "runNode", "attachedToId": "run-landing-test", "reason": "execution_path_closed", "declaredBy": "ai", "declaredAt": "2026-05-08T04:45:00+09:00", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}], "edges": [{"taskOpsVersion": "v1", "entityType": "runEdge", "id": "edge-001", "runId": "run-alpha-v1", "fromRunNodeId": "run-design-research", "toRunNodeId": "run-landing-test", "edgeType": "informs", "createdAt": "2026-04-27T00:00:00Z"}, {"taskOpsVersion": "v1", "entityType": "runEdge", "id": "edge-run-node-verify-to-eow", "runId": "run-alpha-v1", "fromRunNodeId": "run-node-verify", "toRunNodeId": "eow-run-node-verify", "edgeType": "closes_with", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "runEdge", "id": "edge-structure-to-human-decision", "runId": "run-alpha-v1", "fromRunNodeId": "run-node-structure", "toRunNodeId": "run-node-human-decision", "edgeType": "waits_for", "createdAt": "2026-05-08T04:45:00+09:00", "status": "waiting"}, {"taskOpsVersion": "v1", "entityType": "runEdge", "id": "edge-run-landing-test-to-eow", "runId": "run-alpha-v1", "fromRunNodeId": "run-landing-test", "toRunNodeId": "eow-run-landing-test", "edgeType": "closes_with", "createdAt": "2026-05-08T04:45:00+09:00", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "runEdge", "id": "run-edge-structure-to-verify", "runId": "run-alpha-v1", "fromRunNodeId": "run-node-structure", "toRunNodeId": "run-node-verify", "edgeType": "informs", "createdAt": "2026-04-27T03:13:00+09:00", "status": "active"}]}}, "snapshots": [{"taskOpsVersion": "v1", "entityType": "versionSnapshot", "id": "snapshot-alpha-v1", "rootTaskGroupId": "tg-root", "createdAt": "2026-04-27T03:10:00+09:00", "label": "Initial selected version path", "status": "active", "selectedVersions": ["taskGroupId: tg-root", "taskGroupId: tg-design"]}, {"taskOpsVersion": "v1", "entityType": "versionSnapshot", "id": "snapshot-root-v1", "rootTaskGroupId": "tg-root", "label": "Initial chosen version path", "createdAt": "2026-04-27T00:00:00Z", "status": "active", "selectedVersions": ["taskGroupId: tg-root", "taskGroupId: tg-build-product", "taskGroupId: tg-acquire-users"]}]}, {"root": "/tmp/taskops-e2e-self-decompose-1tedvo", "name": "taskops-e2e-self-decompose-1tedvo", "work": {"taskOpsVersion": "v1", "entityType": "work", "id": "work-e2e-self-decompose", "title": "E2E Self Decompose", "objective": "Validate delegation-mode self-resolution child stamping.", "language": "en", "activeRootTaskGroupId": "tg-root", "activeSnapshotId": "snapshot-root-v1", "createdAt": "2026-07-02T00:00:00.000Z", "status": "active"}, "taskGroups": {"tg-root": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroup", "id": "tg-root", "objective": "Validate delegation-mode self-resolution child stamping.", "activeVersionId": "tgv-root-v1", "createdAt": "2026-07-02T00:00:00.000Z", "status": "active"}, "versions": {"tgv-root-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-root-v1", "taskGroupId": "tg-root", "version": "v1", "summary": "Initial root decomposition", "selected": "true", "createdAt": "2026-07-02T00:00:00.000Z", "status": "active"}, "tasks": [], "eows": [], "decomp_log": "# Decomposition log\n\n- Initial version created.\n"}, "tgv-root-v2": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-root-v2", "taskGroupId": "tg-root", "version": "v2", "summary": "E2E Self Decompose v2 fixture", "createdAt": "2026-07-02T00:00:00.000Z", "status": "active", "selected": "true"}, "tasks": [{"taskOpsVersion": "v1", "entityType": "task", "id": "task-self-decompose", "taskGroupId": "tg-root", "taskGroupVersionId": "tgv-root-v2", "title": "Self decompose task", "objective": "Create deterministic runnable children.", "responsibility": "Own the decomposition pipeline proof.", "completionCriteria": "The generated child version carries the expected self-resolution metadata.", "order": "1", "createdAt": "2026-07-02T00:00:00.000Z", "status": "done", "runReadiness": "needs_decomposition", "runRefs": ["runId: run-main"], "childTaskGroupId": "tg-self-decompose", "runReadinessReason": "Decomposed by taskops-runner (claude-code) into tg-self-decompose/tgv-self-decompose-v1 at 2026-07-02T00:00:00.000Z."}], "eows": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-task-self-decompose", "graphType": "task", "attachedToType": "task", "attachedToId": "task-self-decompose", "reason": "decomposed_by_runner", "declaredBy": "taskops-runner", "declaredAt": "2026-07-02T00:00:00.000Z", "createdAt": "2026-07-02T00:00:00.000Z", "status": "done", "resolvedByTaskGroupId": "tg-self-decompose"}], "decomp_log": "# Decomposition log\n\n- Version created from spec.\n"}}}, "tg-self-decompose": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroup", "id": "tg-self-decompose", "objective": "Deterministic fake decomposition for self-resolution e2e.", "activeVersionId": "tgv-self-decompose-v1", "createdAt": "2026-07-02T00:00:00.000Z", "status": "active", "decomposedFromTaskId": "task-self-decompose", "decomposedFromTaskGroupId": "tg-root", "decomposedFromTaskGroupVersionId": "tgv-root-v2", "decomposedByRunId": "run-main", "decomposedByRunNodeId": "run-node-task-self-decompose"}, "versions": {"tgv-self-decompose-v1": {"meta": {"taskOpsVersion": "v1", "entityType": "taskGroupVersion", "id": "tgv-self-decompose-v1", "taskGroupId": "tg-self-decompose", "version": "v1", "summary": "Deterministic runnable child tasks for self-resolution e2e", "createdAt": "2026-07-19T05:57:18.304Z", "status": "active", "decomposedFromTaskId": "task-self-decompose", "decomposedFromTaskGroupId": "tg-root", "decomposedFromTaskGroupVersionId": "tgv-root-v2", "decomposedByRunId": "run-main", "decomposedByRunNodeId": "run-node-task-self-decompose"}, "tasks": [{"taskOpsVersion": "v1", "entityType": "task", "id": "task-self-decompose-child-a", "taskGroupId": "tg-self-decompose", "taskGroupVersionId": "tgv-self-decompose-v1", "title": "Runnable self child A", "objective": "Complete deterministic child responsibility A.", "responsibility": "Own deterministic child responsibility A.", "completionCriteria": "Child A is available for self-resolution execution.", "order": "1", "createdAt": "2026-07-19T05:57:18.304Z", "status": "pending", "runReadiness": "runnable", "expectedPlan": [], "inheritedFrom": ["taskId: task-self-decompose"]}, {"taskOpsVersion": "v1", "entityType": "task", "id": "task-self-decompose-child-b", "taskGroupId": "tg-self-decompose", "taskGroupVersionId": "tgv-self-decompose-v1", "title": "Runnable self child B", "objective": "Complete deterministic child responsibility B.", "responsibility": "Own deterministic child responsibility B.", "completionCriteria": "Child B is available for self-resolution execution.", "order": "2", "createdAt": "2026-07-19T05:57:18.304Z", "status": "pending", "runReadiness": "runnable", "expectedPlan": [], "inheritedFrom": ["taskId: task-self-decompose"]}], "eows": [], "decomp_log": "# Decomposition log\n\n- Version created from spec.\n"}}}}, "runs": {"run-main": {"meta": {"taskOpsVersion": "v1", "entityType": "run", "id": "run-main", "workId": "work-e2e-self-decompose", "createdAt": "2026-07-02T00:00:00.000Z", "status": "active"}, "nodes": [{"taskOpsVersion": "v1", "entityType": "eow", "id": "eow-run-node-task-self-decompose", "runId": "run-main", "graphType": "run", "attachedToType": "runNode", "attachedToId": "run-node-task-self-decompose", "reason": "decomposition_recorded", "declaredBy": "taskops-runner", "declaredAt": "2026-07-02T00:00:00.000Z", "createdAt": "2026-07-02T00:00:00.000Z", "status": "done"}, {"taskOpsVersion": "v1", "entityType": "runNode", "id": "run-node-task-self-decompose", "runId": "run-main", "type": "decomposition", "title": "Decompose: Self decompose task", "status": "done", "createdAt": "2026-07-02T00:00:00.000Z", "sourceTaskId": "task-self-decompose", "sourceTaskGroupVersionId": "tgv-root-v2"}], "edges": [{"taskOpsVersion": "v1", "entityType": "runEdge", "id": "edge-run-node-task-self-decompose-to-eow", "runId": "run-main", "fromRunNodeId": "run-node-task-self-decompose", "toRunNodeId": "eow-run-node-task-self-decompose", "edgeType": "closes_with", "createdAt": "2026-07-02T00:00:00.000Z", "status": "done"}]}}, "snapshots": [{"taskOpsVersion": "v1", "entityType": "versionSnapshot", "id": "snapshot-root-v1", "rootTaskGroupId": "tg-root", "createdAt": "2026-07-02T00:00:00.000Z", "label": "Initial snapshot", "status": "active", "selectedVersions": ["taskGroupId: tg-root", "taskGroupId: tg-self-decompose"]}]}];
+let nodeReg=[];
+
+// sidebar
+const nav=document.getElementById('nav');
+const grp=document.createElement('div'); grp.className='grp'; grp.textContent='TaskOps work 기록';
+nav.appendChild(grp);
+DATA.forEach((W,i)=>{
+  const nT=Object.values(W.taskGroups).reduce((s,tg)=>s+Object.values(tg.versions).reduce((a,v)=>a+v.tasks.length,0),0);
+  const nR=Object.values(W.runs).reduce((s,r)=>s+r.nodes.length,0);
+  const a=document.createElement('a'); a.className='work';
+  a.innerHTML=`<div class="wn">${W.name.replace(/^taskops-/,'')}</div><div class="wm">${Object.keys(W.taskGroups).length} taskGroup · ${nT} task · ${nR} run-node</div>`;
+  a.addEventListener('click',()=>select(i)); nav.appendChild(a);
+});
+
+const READ_NOTE = {
+  'runnable':'실행 준비 완료 — 다음은 execute run node로.',
+  'needs_decomposition':'너무 커서 실행 불가 — 자식 taskGroup으로 분해된다.',
+  'needs_exploration':'완료 기준이 아직 불확실 — 작은 탐색 트레이스로 먼저 배운다.',
+  'blocked':'선행 조건 미충족 — 막혀 있다.'
+};
+const F=(k,v,mono)=>({k,v,mono});
+function reg(detail){ const n=nodeReg.length; nodeReg.push(detail); return n; }
+
+// task node
+function taskNode(t){
+  const r=t.runReadiness||'done';
+  const unknowns = Array.isArray(t.unknowns)?t.unknowns:(t.unknowns?[t.unknowns]:[]);
+  const nd=reg({dk:'var(--rc-x)',rc:r,k:'Task 노드',t:t.title||t.id,
+    fields:[
+      F('id',t.id),F('objective',t.objective||'—'),F('responsibility',t.responsibility||'—'),
+      F('completionCriteria',t.completionCriteria||'—'),
+      F('runReadiness',(t.runReadiness||'—')+(t.runReadinessReason?'\n· '+t.runReadinessReason:'')),
+      F('understandingLevel (안다 축)',t.understandingLevel||'—'),
+      F('unknowns (모르는 것)', unknowns.length?unknowns.map(u=>'· '+u).join('\n'):'없음'),
+      F('nextLearningGoal (다음에 배울 것)',t.nextLearningGoal||'—'),
+      F('childTaskGroup (분해 결과)',t.childTaskGroupId||'—'),
+      F('status',t.status||'—')],
+    note: READ_NOTE[r]||'taskops의 task는 <b>readiness가 다음 행동을 정한다</b> — runnable이면 실행, needs_decomposition이면 분해, needs_exploration이면 탐색.'});
+  const badges=[`<span class="bdg">${r}</span>`,`<span class="bdg u">안다: ${t.understandingLevel||'—'}</span>`];
+  if (unknowns.length) badges.push(`<span class="bdg u">unknowns ${unknowns.length}</span>`);
+  let h=`<div class="tk r-${r}" data-nd="${nd}" tabindex="0" role="button" style="--rc-x:var(--rc)">`+
+    `<div class="tkr"><span class="ord">#${t.order||'?'}</span><span class="tkt">${t.title||t.id}</span></div>`+
+    `<div class="badges">${badges.join('')}</div></div>`;
+  return h;
+}
+
+// recursive task graph
+function renderTG(tgid, W, seen){
+  const tg=W.taskGroups[tgid]; if(!tg||seen.has(tgid)) return ''; seen.add(tgid);
+  const vid=tg.meta.activeVersionId; const ver=tg.versions[vid]; if(!ver) return '';
+  const dl=ver.decomp_log;
+  const ndTG=reg({dk:'var(--violet)',k:'TaskGroup / version',t:tgid+' · '+vid,
+    fields:[F('objective',tg.meta.objective||'—'),F('activeVersion',vid),F('tasks',String(ver.tasks.length)),
+      F('eow',String(ver.eows.length)),...(dl?[F('decomposition-log',dl)]:[])],
+    note:'하나의 <b>taskGroup 버전</b>에 이 분해가 담긴다. 재분해하면 새 version이 생기고 snapshot이 어느 버전을 쓸지 고른다.'});
+  let h=`<div class="tg"><div class="tghd" data-nd="${ndTG}" tabindex="0" role="button">`+
+    `<span class="tgi">${tgid}</span><span class="tgo">${tg.meta.objective||''}</span><span class="tgv">${vid}</span></div>`+
+    `<div class="tasks">`;
+  const tasks=[...ver.tasks].sort((a,b)=>(+a.order||0)-(+b.order||0));
+  for (const t of tasks){
+    h+=taskNode(t);
+    if (t.childTaskGroupId && W.taskGroups[t.childTaskGroupId]){
+      h+=`<div class="decomp-arrow">└─ 분해 → ${t.childTaskGroupId}</div>`;
+      h+=`<div class="child">${renderTG(t.childTaskGroupId, W, seen)}</div>`;
+    }
+  }
+  h+=`</div></div>`;
+  return h;
+}
+
+// run graph
+function renderRuns(W){
+  let h='';
+  for (const [rid,run] of Object.entries(W.runs)){
+    const byId={}; run.nodes.forEach(n=>byId[n.id]=n);
+    // order nodes by edges if possible, else as-is
+    h+=`<div class="rung">`;
+    // build a simple order: nodes not appearing as a 'to' first
+    const tos=new Set(run.edges.map(e=>e.toRunNodeId));
+    const ordered=run.nodes.slice().sort((a,b)=> (tos.has(a.id)?1:0)-(tos.has(b.id)?1:0));
+    ordered.forEach((n,i)=>{
+      const type=n.type|| (n.id.includes('eow')?'eow':'node');
+      const nd=reg({dk:'var(--nc-x)',k:'Run node · '+type,t:n.title||n.id,
+        fields:[F('id',n.id),F('type',type),F('status',n.status||'—'),F('run',rid),
+          ...(n.sourceTaskId?[F('sourceTask',n.sourceTaskId)]:[]),...(n.reason?[F('reason',n.reason)]:[])],
+        note: type==='verification'?'실행이 완료 기준을 실제로 만족하는지 검증하는 run node.':type==='eow'?'Evidence of Work — 이 run이 무엇으로 닫혔는지의 종결 증거.':'실행 현실(execution truth)은 <b>분해 트리가 아니라 runs/&lt;run-id&gt;/ 밑</b>에 별도로 산다.'});
+      const cls=type==='verification'?'n-verification':type.includes('eow')||n.id.includes('eow')?'n-eow':type==='implementation'?'n-implementation':'n-decompose';
+      h+=`<div class="rnode ${cls}" data-nd="${nd}" tabindex="0" role="button" style="--nc-x:var(--nc)"><div class="rk">${type}</div><div class="rl">${n.title||n.id}</div></div>`;
+      // edge to next
+      const oute=run.edges.find(e=>e.fromRunNodeId===n.id);
+      if (oute) h+=`<div class="redge">└─ ${oute.edgeType} → ${oute.toRunNodeId}</div>`;
+    });
+    h+=`</div>`;
+  }
+  return h||'<div style="color:var(--dim);font-size:13px">run graph 없음</div>';
+}
+
+// drawer
+const drawer=document.getElementById('drawer'),backdrop=document.getElementById('backdrop');
+let selEl=null;
+function openDrawer(nd){
+  const d=nodeReg[nd]; if(!d) return;
+  const K=document.getElementById('drK'); K.textContent=d.k||''; K.style.color=d.dk&&d.dk.indexOf('var(--rc')<0?d.dk:'var(--fn)';
+  document.getElementById('drT').textContent=d.t||'';
+  document.getElementById('drBody').innerHTML=(d.fields||[]).map(f=>`<div class="dr-field"><div class="fk">${f.k}</div><div class="fv">${(f.v==null?'—':f.v)}</div></div>`).join('')+
+    (d.note?`<div class="dr-note">${d.note}</div>`:'');
+  drawer.classList.add('open'); backdrop.classList.add('open');
+  document.querySelectorAll('.sel').forEach(e=>e.classList.remove('sel'));
+  const el=document.querySelector(`[data-nd="${nd}"]`); if(el){el.classList.add('sel'); selEl=el;}
+}
+function closeDrawer(){drawer.classList.remove('open');backdrop.classList.remove('open');if(selEl){selEl.classList.remove('sel');selEl=null;}}
+backdrop.addEventListener('click',closeDrawer);
+document.getElementById('drX').addEventListener('click',closeDrawer);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
+document.getElementById('main').addEventListener('click',e=>{const n=e.target.closest('[data-nd]');if(n){e.stopPropagation();openDrawer(+n.dataset.nd);}});
+document.getElementById('main').addEventListener('keydown',e=>{const n=e.target.closest('[data-nd]');if(n&&(e.key==='Enter'||e.key===' ')){e.preventDefault();openDrawer(+n.dataset.nd);}});
+
+function select(i){
+  closeDrawer(); nodeReg=[];
+  document.querySelectorAll('nav a.work').forEach((a,j)=>a.classList.toggle('on',j===i));
+  const W=DATA[i]; const rootTG=W.work.activeRootTaskGroupId;
+  const treeHtml=renderTG(rootTG, W, new Set());
+  const runHtml=renderRuns(W);
+  document.getElementById('main').innerHTML=
+    `<div class="whead"><div class="wt">${W.work.id||W.name}</div>`+
+    `<div class="wo">${W.work.objective||W.work.title||''}</div>`+
+    `<div class="hint">노드(taskGroup·task·run node)를 클릭하면 오른쪽에 세부가 열립니다. task는 readiness·안다축·unknowns·nextLearningGoal을 담습니다.</div></div>`+
+    `<div class="sec"><div class="sh">Task Graph <span class="sd">분해 트리 — readiness가 다음을 정한다 (needs_decomposition → 자식 taskGroup)</span></div>${treeHtml}</div>`+
+    `<div class="sec"><div class="sh">Run Graph <span class="sd">실행 현실 — runs/&lt;run-id&gt;/ 밑의 run node + edge + EoW</span></div>${runHtml}</div>`;
+  window.scrollTo(0,0);
+}
+select(0);
+</script>
+</body>
+</html>
