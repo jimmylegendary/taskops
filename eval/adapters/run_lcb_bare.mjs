@@ -18,9 +18,11 @@ const EVAL = dirname(here);
 const VENV_PY = join(EVAL, '.venv', 'bin', 'python');
 const GRADE = join(here, 'lcb_grade.py');
 const taskId = process.argv[2];
-const executor = process.argv[3] || process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';   // default codex: quota separate from the chat session; env override honored (mirrors run_swebench_bare.mjs L21)
-const split = process.argv[4] || 'conflicting';
-if (!taskId) { console.error('usage: run_lcb_bare.mjs <task_id> <executor> [split]'); process.exit(2); }
+// arg order mirrors the SWE adapters + run-stage.mjs contract (id, split/dataset, ...extra): split is argv[3] so a
+// soak stage passes it as cfg.dataset; executor comes from argv[4] then the env, defaulting to codex-cli.
+const split = process.argv[3] || 'conflicting';
+const executor = process.argv[4] || process.env.TASKOPS_SWE_EXECUTOR || 'codex-cli';
+if (!taskId) { console.error('usage: run_lcb_bare.mjs <task_id> [split] [executor]'); process.exit(2); }
 
 // use the MCP-safe claude wrapper when executor is claude-code (same as the wrapped arm, for a fair comparison)
 if (executor === 'claude-code') { const wrapper = '/home/jimmy/repos/personal-assets-vault/taskops-governance/experiments/claude-safe-wrapper.sh'; chmodSync(wrapper, 0o755); process.env.TASKOPS_CLAUDE_BIN = wrapper; }

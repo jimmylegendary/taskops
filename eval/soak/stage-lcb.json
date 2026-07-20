@@ -1,0 +1,19 @@
+{
+  "stage": "stage-lcb",
+  "dataset": "conflicting",
+  "judgeField": "test_passed",
+  "instances": [
+    "lcbhard_0", "lcbhard_1", "lcbhard_2", "lcbhard_3",
+    "lcbhard_4", "lcbhard_5", "lcbhard_6", "lcbhard_7"
+  ],
+  "arms": [
+    { "key": "A", "adapter": "run_lcb_bare.mjs", "extraArgs": [], "claimField": "claimed_done", "resultPattern": "results/bare/bare-lcb-codex-cli-conflicting-{id}.json" },
+    { "key": "C", "adapter": "run_lcb.mjs", "extraArgs": ["2"], "claimField": "verified_done", "resultPattern": "results/lcb-codex-cli-conflicting-{id}.json" }
+  ],
+  "concurrency": 1,
+  "globalWallMin": 90,
+  "perRunTimeoutMin": 10,
+  "maxAttemptsPerJob": 2,
+  "haltOnConsecutiveFailures": 4,
+  "env": { "TASKOPS_SWE_EXECUTOR": "codex-cli", "TASKOPS_CODEX_EFFORT": "low" }
+}
