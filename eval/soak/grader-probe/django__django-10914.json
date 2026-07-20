@@ -1,0 +1,16 @@
+{
+  "instance_id": "django__django-10914",
+  "N": 1,
+  "resolvedCount": 1,
+  "infra": 0,
+  "flaky": false,
+  "verdict": "STABLE (gold workspace가 N회 모두 resolved → grader는 이 인스턴스에서 결정적)",
+  "outcomes": [
+    {
+      "run": 1,
+      "resolved": true,
+      "elapsedS": 32,
+      "err": null
+    }
+  ]
+}
