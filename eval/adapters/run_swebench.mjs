@@ -76,7 +76,9 @@ md(`${tv}/tasks/${taskId}.md`, {
   order: 1, createdAt: now, status: 'pending', runReadiness: 'runnable', understandingLevel: 'known',
   acceptance: { mode: 'guarded', expectedOutcome: 'official SWE-bench tests pass',
     // oracle:true (P0-3): the official grader IS the external oracle — stratifies C-arm closes by oracle consumption.
-    requiredChecks: [{ command: `${VENV_PY} ${GRADE} ${instanceId} ${workspace}`, oracle: true }] },
+    // dataset must ride the requiredCheck too — without it the verify grade falls back to Lite and a Verified
+    // instance dies as an infra error before the agent's work is ever judged.
+    requiredChecks: [{ command: `${VENV_PY} ${GRADE} ${instanceId} ${workspace} ${dataset}`, oracle: true }] },
 });
 
 const t0 = Date.now();

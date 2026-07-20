@@ -21,9 +21,10 @@ rid = f"grade-{INSTANCE}-{os.getpid()}"
 pred = EVAL / "preflight" / f"pred-{rid}.json"
 json.dump([{"instance_id": INSTANCE, "model_name_or_path": "taskops", "model_patch": patch}], open(pred, "w"))
 
-subprocess.run(
+CACHE = os.environ.get("SWEBENCH_CACHE_LEVEL", "instance")  # a 500-instance run sets 'env' so per-instance images
+subprocess.run(                                              # (~1GB each) are not retained — disk would not survive.
     [PY, "-m", "swebench.harness.run_evaluation", "--dataset_name", DS, "--predictions_path", str(pred),
-     "--instance_ids", INSTANCE, "--max_workers", "1", "--cache_level", "instance", "--run_id", rid],
+     "--instance_ids", INSTANCE, "--max_workers", "1", "--cache_level", CACHE, "--run_id", rid],
     cwd=str(EVAL), capture_output=True, text=True,
 )
 report = EVAL / f"taskops.{rid}.json"
