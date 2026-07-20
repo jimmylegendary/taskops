@@ -10,13 +10,14 @@
 ## 1. 벤치·앵커 (bare = 공개 점수, 우리는 taskops arm만 실행)
 
 - **벤치**: SWE-bench Verified **전수 500** (princeton-nlp/SWE-bench_Verified)
-- **공개 bare 앵커**: **gpt-5.6 Sol = 96.20%** — [vals.ai SWE-bench Verified 리더보드](https://www.vals.ai/benchmarks/swebench) (2026-07 접근, bash-tool-only harness). 같은 모델의 공개값이라 채택.
-- **선택 이유**: 정확히 같은 모델의 공개 bare가 존재하는 유일한 벤치. SWE-bench Pro는 gpt-5.6 공개 앵커 불명확(집계 사이트별 상이, Scale 표준화는 GPT-5.4 xHigh 59.1%)이라 기각.
+- **공개 bare 앵커**: **GPT-5.5 = 88.7%** — OpenAI 자체 보고(2026-04-23 릴리스; marc0.dev·tokenmix·BenchLM 교차 확인). 같은 모델의 vendor-공개값.
+- **모델 변경 이력 (2026-07-21)**: 최초 gpt-5.6-sol(vals.ai 96.20%) 설계였으나 **sol은 크레딧 과금**이라 Jimmy 지시로 중지 → **gpt-5.5(구독 per-token $0)**로 교체. 부수 이득: 헤드룸 96.2%→88.7%로 3.8pt→**11.3pt** — 능력 인스트루먼트로 오히려 개선(ceiling 완화).
+- 선택 이유: 같은 모델의 공개 bare + 비용 $0 + 헤드룸. Pro는 gpt-5.x 공개 앵커 불명확이라 기각.
 
 ## 2. 우리 arm 설정 (동일 모델·동일 effort 원칙)
 
-- executor: **codex-cli = gpt-5.6-sol** (공개 앵커와 동일 모델)
-- effort: **high 고정**. vals.ai는 effort 미공개 — 리더보드 관행(xHigh/High 표기 관례)에 맞춰 high로 고정하고 이 불확실성을 §5에 기록. **tier escalation ladder는 OFF** (동일-effort 원칙과 충돌).
+- executor: **codex-cli `-m gpt-5.5`** (`TASKOPS_CODEX_NATIVE_MODEL` — 구독 native, provider/크레딧 무접촉; 어댑터 실주입 검증 완료)
+- effort: **high 고정**. OpenAI-reported 88.7%의 effort 미공개 — vendor 보고 관행(high/xhigh)에 맞춰 high 고정, 불확실성은 §5 기록. **tier escalation ladder는 OFF** (동일-effort 원칙과 충돌).
 - 위임 해석: **runTaskOps verify-grounded 실행** (verifyRetries=1, requiredCheck=공식 Docker 하니스 oracle). 외부 ai-resolver는 **연결 안 함** — 다른 모델(claude)이 개입하면 "같은 모델" 순수성이 깨진다. 즉 gpt-5.6-sol 단독 + taskops 게이트/재시도.
 - 파라미터: per-instance runner wall 40min(`TASKOPS_MAX_WALL_MS`), driver kill 50min, 동시성 1, 연속실패 3 → HALT(재개형), job당 최대 2회 시도.
 - 디스크: `SWEBENCH_CACHE_LEVEL=env` — per-instance 이미지(~1GB×500)를 남기지 않음. env 이미지만 유지.

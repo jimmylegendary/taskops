@@ -221,6 +221,11 @@ export function codexArgs({ prompt, variant = null }) {
   // an unexpected token can't inject extra -c config.
   const effort = trim(variant) || trim(process.env.TASKOPS_CODEX_EFFORT);
   if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
+  // Native (subscription) model override — e.g. gpt-5.5 at per-token $0 vs the credit-metered default. Unlike
+  // TASKOPS_CODEX_MODEL (OpenRouter routing: swaps provider+key), this injects ONLY `-m` and keeps the native
+  // provider/auth, so a 500-instance bench can run on the flat subscription without burning credits.
+  const nativeModel = trim(process.env.TASKOPS_CODEX_NATIVE_MODEL);
+  if (nativeModel && !trim(process.env.TASKOPS_CODEX_MODEL)) args.push('-m', nativeModel);
   // Optional OpenAI-compatible routing (e.g. OpenRouter open models) via env — no global ~/.codex/config.toml or
   // openclaw edit. Inactive unless TASKOPS_CODEX_MODEL is set, so default codex behavior is unchanged.
   const orModel = trim(process.env.TASKOPS_CODEX_MODEL);
