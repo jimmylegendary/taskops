@@ -1,6 +1,6 @@
 {
   "name": "taskops",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Markdown-first task/run graph CLI with EoW closure, delegation, and Obsidian-friendly TaskOps work trees.",
   "bin": {
     "taskops": "./bin/taskops.js"
