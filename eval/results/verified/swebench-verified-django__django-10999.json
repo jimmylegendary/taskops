@@ -1,0 +1,14 @@
+{
+  "instance_id": "django__django-10999",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "taskops_status": "blocked",
+  "review_decision": "approved",
+  "verified_done": false,
+  "official_resolved": false,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 18,
+  "verifyRetries": 1,
+  "wallclock_s": 576
+}

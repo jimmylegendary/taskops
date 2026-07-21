@@ -1,0 +1,19 @@
+{
+  "instance_id": "django__django-11276",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "official_resolved": true,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 73,
+  "verifyRetries": 1,
+  "wallclock_s": 243,
+  "regraded": {
+    "at": "2026-07-21T13:39:29",
+    "from_pred": "pred-grade-django__django-11276-3948079.json",
+    "reason": "forged-FAIL recovery (missing-report infra scored as verdict)"
+  }
+}

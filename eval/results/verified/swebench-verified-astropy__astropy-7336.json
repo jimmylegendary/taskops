@@ -1,0 +1,19 @@
+{
+  "instance_id": "astropy__astropy-7336",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "official_resolved": true,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 15,
+  "verifyRetries": 1,
+  "wallclock_s": 331,
+  "regraded": {
+    "at": "2026-07-21T13:24:36",
+    "from_pred": "pred-grade-astropy__astropy-7336-3670863.json",
+    "reason": "forged-FAIL recovery (missing-report infra scored as verdict)"
+  }
+}
