@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -507,8 +507,10 @@ const watchOut = JSON.parse(run([
   '--max-waves', '5',
   '--json'
 ]).stdout);
-if (watchOut.stopReason !== 'all_closed' || watchOut.claimedWaves !== 2 || watchOut.claimedItems !== 2 || watchOut.waves.length !== 2) {
-  console.error('runner watch should drain two executable tasks with one-shot worker evidence and stop all_closed');
+// P0#6: one-shot worker 종결은 policy-approved가 아니므로(execution_path_closed) watch는 all_closed가 아니라
+// graph_closed_unapproved로 정직하게 종료한다(navigation ↔ audit 정렬). drain 동작(2 waves/2 items)은 불변.
+if (watchOut.stopReason !== 'graph_closed_unapproved' || watchOut.claimedWaves !== 2 || watchOut.claimedItems !== 2 || watchOut.waves.length !== 2) {
+  console.error('runner watch should drain two executable tasks with one-shot worker evidence and stop graph_closed_unapproved');
   console.error(watchOut);
   process.exit(1);
 }
@@ -891,7 +893,8 @@ const daemonRunOut = JSON.parse(run([
   '--max-daemon-cycles', '1',
   '--json'
 ]).stdout);
-if (daemonRunOut.cycles.length !== 1 || daemonRunOut.cycles[0].stopReason !== 'all_closed' || daemonRunOut.cycles[0].claimedWaves !== 1) {
+// P0#6: dry-run/worker 종결은 policy 미승인이라 cycle stopReason은 graph_closed_unapproved.
+if (daemonRunOut.cycles.length !== 1 || daemonRunOut.cycles[0].stopReason !== 'graph_closed_unapproved' || daemonRunOut.cycles[0].claimedWaves !== 1) {
   console.error('daemon run should execute a foreground supervise cycle and stop at max-daemon-cycles in smoke');
   console.error(daemonRunOut);
   process.exit(1);
@@ -977,7 +980,7 @@ const daemonBatchRunOut = JSON.parse(run([
   '--max-parallel', '8',
   '--json'
 ]).stdout);
-if (daemonBatchRunOut.cycles.length !== 1 || daemonBatchRunOut.cycles[0].stopReason !== 'all_closed' || daemonBatchRunOut.cycles[0].claimedWaves !== 3 || daemonBatchRunOut.cycles[0].claimedItems !== 3) {
+if (daemonBatchRunOut.cycles.length !== 1 || daemonBatchRunOut.cycles[0].stopReason !== 'graph_closed_unapproved' || daemonBatchRunOut.cycles[0].claimedWaves !== 3 || daemonBatchRunOut.cycles[0].claimedItems !== 3) {
   console.error('daemon batch run should finish all three tasks through one-shot worker-pool slots');
   console.error(daemonBatchRunOut);
   process.exit(1);
@@ -1044,8 +1047,9 @@ if (typeof reasonProbeParsed.lastRunFailureReason !== 'string' || reasonProbePar
 }
 
 const secondRunOut = JSON.parse(run(['run', runnerWorkDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
-if (secondRunOut.stopReason !== 'all_closed' || secondRunOut.stepsRun !== 1 || secondRunOut.tasks[0].taskId !== 'task-second') {
-  console.error('Expected the second run to finish task-second and stop with all_closed (closure complete)');
+// P0#6: dry-run 종결은 policy 미승인이라 구조 종결 후 graph_closed_unapproved로 정지한다.
+if (secondRunOut.stopReason !== 'graph_closed_unapproved' || secondRunOut.stepsRun !== 1 || secondRunOut.tasks[0].taskId !== 'task-second') {
+  console.error('Expected the second run to finish task-second and stop with graph_closed_unapproved (structural closure, unapproved)');
   console.error(secondRunOut);
   process.exit(1);
 }
@@ -1131,7 +1135,8 @@ if (!visibleSnapshotAfter.includes('taskGroupId: tg-parent') || !visibleSnapshot
 }
 run(['validate', visibleDecomposeDir]);
 
-// ---- all_closed: fully closed work stops with the new reason instead of no_runnable ----
+// ---- graph_closed_unapproved: fully (structurally) closed work stops with a closure reason instead of no_runnable ----
+// P0#6: dry-run 종결은 policy 미승인(execution_path_closed)이라 all_closed가 아니라 graph_closed_unapproved로 정지한다.
 const allClosedDir = join(tempRoot, 'runner-all-closed');
 run(['init', allClosedDir, '--id', 'runner-all-closed', '--title', 'Runner all closed', '--objective', 'Verify runner reports all_closed when work is fully closed', '--language', 'en']);
 const allClosedSpec = join(tempRoot, 'runner-all-closed-spec.json');
@@ -1159,14 +1164,14 @@ run(['decompose', allClosedDir, '--task-group-id', 'tg-root', '--spec', allClose
 const allClosedSnapshot = join(allClosedDir, 'snapshots', 'snapshot-root-v1.md');
 writeFileSync(allClosedSnapshot, readFileSync(allClosedSnapshot, 'utf8').replace('versionId: tgv-root-v1', 'versionId: tgv-root-v2'));
 const allClosedRunOut = JSON.parse(run(['run', allClosedDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
-if (allClosedRunOut.stopReason !== 'all_closed' || allClosedRunOut.stepsRun !== 1) {
-  console.error('Expected all_closed stop reason once work is fully closed by EoW');
+if (allClosedRunOut.stopReason !== 'graph_closed_unapproved' || allClosedRunOut.stepsRun !== 1) {
+  console.error('Expected graph_closed_unapproved stop reason once work is structurally closed by an unapproved EoW');
   console.error(allClosedRunOut);
   process.exit(1);
 }
 const allClosedRunLog = readFileSync(join(allClosedDir, 'runs', 'run-main', 'run-log.md'), 'utf8');
-if (!allClosedRunLog.includes('all_closed')) {
-  console.error('Expected run-log.md to mention all_closed');
+if (!allClosedRunLog.includes('graph_closed_unapproved')) {
+  console.error('Expected run-log.md to mention graph_closed_unapproved');
   console.error(allClosedRunLog);
   process.exit(1);
 }
@@ -1239,9 +1244,16 @@ if (!exploreArtifactBody.includes('Exploration artifact for task-explore') || !e
   process.exit(1);
 }
 const exploreTaskAfter = readFileSync(join(dispatchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-explore.md'), 'utf8');
-if (!exploreTaskAfter.includes('status: done') || !exploreTaskAfter.includes('runReadiness: needs_decomposition') || !exploreTaskAfter.includes('runRefs:')) {
-  console.error('task-explore must be marked done with runReadiness=needs_decomposition after exploration step');
+// P0#1 (run graph ⟂ task graph): exploration은 RUN node만 닫고 source objective task는 닫지 않는다. task-explore는
+// done이 아니라 pending으로 남고 needs_decomposition으로 다음 스텝(decompose)에 전진한다. (버그였던 'status: done'
+// assert는 exploration이 objective를 종결시키는 오종결을 승인하고 있었다 — non-closing 불변식으로 교체.)
+if (exploreTaskAfter.includes('status: done') || !exploreTaskAfter.includes('status: pending') || !exploreTaskAfter.includes('runReadiness: needs_decomposition') || !exploreTaskAfter.includes('runRefs:')) {
+  console.error('task-explore must stay pending (NOT done) with runReadiness=needs_decomposition and runRefs after exploration');
   console.error(exploreTaskAfter);
+  process.exit(1);
+}
+if (existsSync(join(dispatchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore.md'))) {
+  console.error('exploration must NOT attach a task-EoW to the source objective task (task graph stays open)');
   process.exit(1);
 }
 run(['validate', dispatchWorkDir]);
@@ -1253,7 +1265,8 @@ if (decomposeRunOut.stopReason !== 'max_steps' || decomposeRunOut.stepsRun !== 1
   process.exit(1);
 }
 const decomposeAction = (decomposeRunOut.actions || decomposeRunOut.tasks)[0];
-// After exploration, task-explore's readiness is needs_decomposition (lower task-order priority than task-decompose since order=1 still beats order=2).
+// P0#1: exploration이 task-explore를 닫지 않으므로 이제 task-explore는 pending+needs_decomposition으로 남아
+// order=1로 먼저 decompose 대상이 된다(예전엔 done이라 skip되고 task-decompose가 대상이었다). 둘 다 허용.
 if (decomposeAction.kind !== 'decompose' || !['task-explore', 'task-decompose'].includes(decomposeAction.taskId)) {
   console.error('Expected the second dispatch step to be a decomposition action on one of the open tasks');
   console.error(decomposeAction);
@@ -1429,8 +1442,10 @@ if (blockerSecondRunOut.stopReason !== 'max_steps' || blockerSecondRunOut.stepsR
   process.exit(1);
 }
 const staleUnblockTask = parseFrontmatterText(readFileSync(join(blockerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-dependent-unknown.md'), 'utf8'));
-if (staleUnblockTask.status !== 'done' || staleUnblockTask.runReadiness !== 'needs_decomposition') {
-  console.error('explored stale unblocked task should be ready for decomposition after exploratory closure');
+// P0#1 (run graph ⟂ task graph): exploration 후 objective는 열린 채(pending) needs_decomposition으로 decompose를
+// 기다리는 것이 정답이며 done은 오종결이다. (예전 done assert는 exploratory closure 버그에 의존했다.)
+if (staleUnblockTask.status === 'done' || staleUnblockTask.status !== 'pending' || staleUnblockTask.runReadiness !== 'needs_decomposition') {
+  console.error('explored stale unblocked task should stay pending (NOT done) and be ready for decomposition after exploration');
   console.error(staleUnblockTask);
   process.exit(1);
 }
@@ -1531,7 +1546,8 @@ if (closeAgain.status === 0 || !/already closed/.test(closeAgain.stderr)) {
   process.exit(1);
 }
 
-// Run the remaining runnable task to fully close the work; then expect next=done.
+// Run the remaining runnable task to structurally close the work. P0#6: dry-run 종결은 policy 미승인이라
+// next=done이 아니라 graph_closed_unapproved로, explain.complete=false로 보고된다(navigation ↔ audit 정렬).
 const honestRunOut = JSON.parse(run(['run', honestDir, '--executor', 'dry-run', '--max-steps', '1', '--json']).stdout);
 if (honestRunOut.tasks[0]?.taskId !== 'task-honest-run' || honestRunOut.tasks[0]?.status !== 'completed') {
   console.error('Expected runner to complete task-honest-run');
@@ -1540,14 +1556,14 @@ if (honestRunOut.tasks[0]?.taskId !== 'task-honest-run' || honestRunOut.tasks[0]
 }
 run(['validate', honestDir]);
 const nextAfter = JSON.parse(run(['next', honestDir, '--json']).stdout);
-if (nextAfter.action !== 'done' || nextAfter.stopReason !== 'all_closed') {
-  console.error('Expected next to report done/all_closed after full closure');
+if (nextAfter.action !== 'graph_closed_unapproved' || nextAfter.stopReason !== 'graph_closed_unapproved') {
+  console.error('Expected next to report graph_closed_unapproved after unapproved structural closure');
   console.error(nextAfter);
   process.exit(1);
 }
 const explainAfter = JSON.parse(run(['explain', honestDir, '--json']).stdout);
-if (explainAfter.complete !== true || explainAfter.next.action !== 'done' || explainAfter.openReasons.length !== 0) {
-  console.error('Expected explain to report complete=true, next=done, and no open reasons after closure');
+if (explainAfter.complete !== false || explainAfter.next.action !== 'graph_closed_unapproved' || explainAfter.openReasons.length !== 1) {
+  console.error('Expected explain to report complete=false, next=graph_closed_unapproved, and the unapproved reason after structural closure');
   console.error(explainAfter);
   process.exit(1);
 }
@@ -1920,7 +1936,7 @@ const queueLoopbackOut = JSON.parse(run([
   '--report-sink', 'ledger',
   '--json'
 ]).stdout);
-if (queueLoopbackOut.stopReason !== 'all_closed' || queueLoopbackOut.claimedItems !== 1 || queueLoopbackOut.loopbackPolicy !== 'self') {
+if (queueLoopbackOut.stopReason !== 'graph_closed_unapproved' || queueLoopbackOut.claimedItems !== 1 || queueLoopbackOut.loopbackPolicy !== 'self') {
   console.error('runner watch should propagate loopback self and close the claimed task after resolving a self delegate');
   console.error(queueLoopbackOut);
   process.exit(1);
@@ -2070,7 +2086,7 @@ const runIdLoopbackOut = JSON.parse(run([
   '--run-id', 'custom-loopback-run',
   '--json'
 ]).stdout);
-if (runIdLoopbackOut.cycles[0].stopReason !== 'all_closed' || !runIdLoopbackOut.cycles[0].waveDetails[0].stopReason) {
+if (runIdLoopbackOut.cycles[0].stopReason !== 'graph_closed_unapproved' || !runIdLoopbackOut.cycles[0].waveDetails[0].stopReason) {
   console.error('run-id loopback smoke should complete through daemon-backed execution');
   console.error(runIdLoopbackOut);
   process.exit(1);
@@ -2141,7 +2157,7 @@ const delegatedEntrypointOut = JSON.parse(run([
 ]).stdout);
 const delegatedEntrypointCycle = delegatedEntrypointOut.cycles[0];
 const delegatedEntrypointWave = delegatedEntrypointCycle.waveDetails[0];
-if (delegatedEntrypointCycle.stopReason !== 'all_closed' || delegatedEntrypointCycle.claimedItems !== 1 || delegatedEntrypointWave?.releaseStatus !== 'done' || delegatedEntrypointWave?.targetCompleted !== true) {
+if (delegatedEntrypointCycle.stopReason !== 'graph_closed_unapproved' || delegatedEntrypointCycle.claimedItems !== 1 || delegatedEntrypointWave?.releaseStatus !== 'done' || delegatedEntrypointWave?.targetCompleted !== true) {
   console.error('high-level delegate entrypoint should reuse daemon run internals and complete the claimed task');
   console.error(delegatedEntrypointOut);
   process.exit(1);
@@ -2183,7 +2199,7 @@ const runLoopbackEntrypointOut = JSON.parse(run([
   '--max-daemon-cycles', '1',
   '--json'
 ]).stdout);
-if (runLoopbackEntrypointOut.cycles[0].stopReason !== 'all_closed' || runLoopbackEntrypointOut.cycles[0].claimedItems !== 1) {
+if (runLoopbackEntrypointOut.cycles[0].stopReason !== 'graph_closed_unapproved' || runLoopbackEntrypointOut.cycles[0].claimedItems !== 1) {
   console.error('user-facing taskops run --loopback self should route through daemon-backed queue execution');
   console.error(runLoopbackEntrypointOut);
   process.exit(1);
@@ -2231,7 +2247,7 @@ const poolWatch = JSON.parse(run([
   '--max-waves', '20',
   '--json'
 ]).stdout);
-if (poolWatch.stopReason !== 'all_closed' || poolWatch.maxParallel !== 3 || poolWatch.claimedItems !== 10 || poolWatch.waves.length !== 10) {
+if (poolWatch.stopReason !== 'graph_closed_unapproved' || poolWatch.maxParallel !== 3 || poolWatch.claimedItems !== 10 || poolWatch.waves.length !== 10) {
   console.error('runner watch should drain ten queued tasks with maxParallel=3 while keeping queue projection separate from concurrency');
   console.error(poolWatch);
   process.exit(1);

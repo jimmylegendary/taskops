@@ -354,7 +354,9 @@ function check(condition, label, failures, details = null) {
 function checkWarnings(warningCounts, failures) {
   check(warningCounts.selectedVersion === 0, 'selected-version warning should be absent', failures, warningCounts);
   check(warningCounts.readinessConsistency === 1, 'readiness consistency warning should appear exactly once', failures, warningCounts);
-  check(warningCounts.activeStructural === 1, 'active/structural warning should appear exactly once', failures, warningCounts);
+  // P0#6 (R1B3): runner가 구조 종결을 ACK한 미승인 정지(structuralClosureComplete stamp + 미승인 closureState)에는
+  // active-vs-structural 경고를 억제한다 → 0.
+  check(warningCounts.activeStructural === 0, 'active/structural warning is suppressed for a runner-ACKed unapproved stop', failures, warningCounts);
   check(warningCounts.unexpected.length === 0, 'unexpected warnings should be absent', failures, warningCounts.unexpected);
 }
 
@@ -362,7 +364,8 @@ function evaluateInvariants({ daemonOut, cycle, wave, db, events, parsed, warnin
   const failures = [];
   check(daemonOut?.workDir === resolve(fixture.workDir), 'daemon workDir should match fixture workDir', failures);
   check(Array.isArray(daemonOut?.cycles) && daemonOut.cycles.length === 1, 'daemon should run exactly one bounded cycle', failures, daemonOut?.cycles?.length);
-  check(cycle?.stopReason === 'all_closed', 'daemon cycle should stop all_closed', failures, cycle?.stopReason);
+  // P0#6: dry-run 종결은 policy 미승인이라 daemon cycle stopReason은 graph_closed_unapproved.
+  check(cycle?.stopReason === 'graph_closed_unapproved', 'daemon cycle stops graph_closed_unapproved for an unapproved structural closure', failures, cycle?.stopReason);
   check(cycle?.claimedWaves === 1, 'daemon should claim one wave', failures, cycle?.claimedWaves);
   check(cycle?.claimedItems === 1, 'daemon should claim one item', failures, cycle?.claimedItems);
   check(wave?.releaseStatus === 'done', 'claimed wave should release done', failures, wave?.releaseStatus);

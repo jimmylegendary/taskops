@@ -262,7 +262,9 @@ function runTrial(root, trialIndex) {
 
   assert.equal(daemonOut.workDir, resolve(fixture.workDir), 'daemon workDir should match fixture workDir');
   assert.equal(daemonOut.cycles.length, 1, 'daemon should run exactly one bounded cycle');
-  assert.equal(cycle.stopReason, 'all_closed', 'daemon cycle should stop all_closed');
+  // P0#6: dry-run loopback 종결은 policy 미승인이라 daemon cycle은 graph_closed_unapproved로 정지한다(navigation ↔ audit
+  // 정렬). closure.complete(구조 종결)는 여전히 true라 아래 296행 assert는 불변.
+  assert.equal(cycle.stopReason, 'graph_closed_unapproved', 'daemon cycle stops graph_closed_unapproved for an unapproved structural closure');
   assert.equal(cycle.claimedWaves, 1, 'daemon should claim one wave');
   assert.equal(cycle.claimedItems, 1, 'daemon should claim one item');
   assert.equal(wave.releaseStatus, 'done', 'claimed wave should release done');
@@ -291,9 +293,11 @@ function runTrial(root, trialIndex) {
   assert.equal(events.counts.loopback_completed, 1, 'events should include one loopback_completed');
   assert.deepEqual(parsed.errors, [], 'post-run validation errors should be empty');
   assert.equal(postWarnings.selectedVersion, 0, 'post-run selected-version warning should be absent');
-  assert.equal(postWarnings.activeStructural, 1, 'post-run active/structural warning should be exactly one');
+  // P0#6 (R1B3): 미승인 구조 종결은 status='active'로 유지되지만, runner가 구조 종결을 ACK(structuralClosureComplete
+  // stamp)했고 closureState가 미승인이면 '승인 대기 정당한 정지'라 active-vs-structural 경고를 억제한다 → 0.
+  assert.equal(postWarnings.activeStructural, 0, 'post-run active/structural warning is suppressed for a runner-ACKed unapproved stop (P0#6)');
   assert.deepEqual(postWarnings.unexpected, [], 'post-run unexpected warnings should be absent');
-  assert.equal(explain.closure?.complete, true, 'explain closure.complete should be true');
+  assert.equal(explain.closure?.complete, true, 'explain closure.complete (structural) should be true');
 
   const semantic = {
     stopReason: cycle.stopReason,

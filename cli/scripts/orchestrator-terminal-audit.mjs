@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Regression: the autonomous watch loop must not equate `all_closed` (STRUCTURAL closure)
-// with an inductively-sound completion. Before the fix it reported all_closed from
-// explainWork().complete (= structuralComplete) and never audited. Now the terminal result
-// carries the claim-safety verdict, so a structurally-complete-but-unapproved graph is
-// reported all_closed WITH claimSafe:false rather than as a false, trusted 'done'.
+// Regression: the autonomous watch loop must not equate structural closure with an inductively-sound
+// completion. P0#6 aligns navigation with audit: a structurally-complete-but-unapproved graph terminates
+// the watch with `graph_closed_unapproved` (NOT all_closed) AND carries claimSafe:false — never a false,
+// trusted 'done'. (Before P0#6 the watch reported all_closed from explainWork().complete=structuralComplete;
+// now explainWork().complete requires policy approval, and the watch labels the unapproved stop honestly.)
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,8 +31,8 @@ md('task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-01.md', { taskOpsVersi
 
 const result = await runQueueWatch(workDir, { runtimeAdapter: 'dry-run', maxIdleCycles: 1, pollIntervalMs: 1, idleExitAfterSeconds: 0 });
 
-assert.equal(result.stopReason, 'all_closed', 'a structurally-complete work should still terminate all_closed');
-assert.equal(result.claimSafe, false, 'all_closed on an unapproved (informational) closure must report claimSafe:false');
+assert.equal(result.stopReason, 'graph_closed_unapproved', 'P0#6: an unapproved structural closure terminates graph_closed_unapproved (NOT all_closed)');
+assert.equal(result.claimSafe, false, 'an unapproved (informational) closure must report claimSafe:false (the honesty invariant is preserved)');
 assert.equal(typeof result.closureState, 'string', 'terminal result must carry the closureState verdict');
 assert.notEqual(result.closureState, 'policy_approved_complete', 'unapproved closure must not read as policy-approved');
 

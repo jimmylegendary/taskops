@@ -258,8 +258,12 @@ try {
   assert.equal(exploreRun.actions[0].status, 'completed');
   assert.equal(exploreRun.stopReason, 'max_steps');
   const exploreTask = parseMarkdownFile(taskPath(exploreWorkDir, 'task-explore-valid'));
-  assert.equal(exploreTask.status, 'done');
+  // P0#1 (run graph ⟂ task graph): exploration은 RUN node만 닫고 source objective task는 닫지 않는다 —
+  // status는 pending 유지(절대 done 아님), uncertaintyState는 정확히 한 단 승격, source task-EoW 미부착.
+  assert.equal(exploreTask.status, 'pending', 'exploration must not close the source objective task (stays pending, never done)');
   assert.equal(exploreTask.runReadiness, 'needs_decomposition');
+  assert.equal(String(exploreTask.uncertaintyState || '').trim(), 'known_unknown', 'exploration success promotes uncertaintyState exactly one rung unknown_unknown→known_unknown');
+  assert.equal(existsSync(join(exploreWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore-valid.md')), false, 'exploration must not attach a task-EoW to the source objective');
   assert.equal(exploreTask.surpriseHistory.length, 1);
   assert.equal(exploreTask.surpriseHistory[0].actionKind, 'explore');
   assert.deepEqual(exploreTask.surpriseHistory[0].contradictedKnownIds, ['k-explore-assumption']);
@@ -272,8 +276,13 @@ try {
   assert.equal(exploreRunNode.result.surpriseReport.summary, 'Live exploration discovered one blocking unknown and one new known delta.');
   assert.equal(exploreRunNode.result.surpriseHistoryEntry.actionKind, 'explore');
   const exploreRerun = runLive(exploreWorkDir, 'task-explore-valid');
-  assert.equal(exploreRerun.stepsRun, 0);
-  assert.equal(parseMarkdownFile(taskPath(exploreWorkDir, 'task-explore-valid')).surpriseHistory.length, 1, 'done exploration task should not accumulate a second observation');
+  // P0#1 anti-loop: exploration이 task를 닫지 않으므로(예전 stepsRun===0 = 닫혀서 no-op 버그), rerun은 pending+
+  // needs_decomposition task를 decompose로 전진시킨다 — 절대 두 번째 exploration을 돌리지 않는다(보고서 8.3 봉쇄).
+  assert.equal(exploreRerun.stepsRun, 1, 'the rerun advances one decompose step, it does not no-op on a falsely-closed task');
+  assert.equal(exploreRerun.actions[0].kind, 'decompose', 'the rerun is a decompose step, NEVER a second exploration');
+  const exploreAfterRerun = parseMarkdownFile(taskPath(exploreWorkDir, 'task-explore-valid'));
+  assert.equal(String(exploreAfterRerun.uncertaintyState || '').trim(), 'known_unknown', 'uncertaintyState is not re-promoted on the rerun (exactly one rung, anti-loop)');
+  assert.equal(exploreAfterRerun.surpriseHistory.length, 1, 'no second exploration observation accumulates (anti-loop)');
 
   const malformedExecuteWorkDir = makeWork('execute-malformed-work', baseTask('task-execute-malformed', 'malformed execution report', {
     runReadiness: 'runnable',

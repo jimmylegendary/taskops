@@ -22,7 +22,12 @@ md(`${tv}/index.md`, { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id:
 md('snapshots/snapshot-root-v1.md', { taskOpsVersion: 'v1', entityType: 'versionSnapshot', id: 'snapshot-root-v1', rootTaskGroupId: 'tg-root', createdAt: now, label: 'R', status: 'active', selectedVersions: [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }] });
 const taskFile = `${tv}/tasks/task-01.md`;
 md(taskFile, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-01', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'done', order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' });
-md(`${tv}/eow/eow-task-01.md`, { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-01', graphType: 'task', attachedToType: 'task', attachedToId: 'task-01', taskGroupVersionId: 'tgv-root-v1', reason: 'execution_path_closed', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
+// P0#6 (R1B2 택1): clean baseline은 POLICY-APPROVED review EoW로 닫는다. execution_path_closed는 이제
+// structurally_complete_unapproved(미승인)로 떨어져 clean.complete=false가 되므로, A6의 discriminator를 EXACTLY
+// validation-errors로 보존하려면(clean=approved+no-error=complete vs invalid=approved+error=not-complete) clean을
+// 진짜 policy-approved로 만든다. 택2(양쪽을 graph_closed_unapproved로)는 두 극을 complete=false로 붕괴시켜 A6를
+// vacuous하게 만들므로 금지.
+md(`${tv}/eow/eow-task-01.md`, { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-01', graphType: 'task', attachedToType: 'task', attachedToId: 'task-01', taskGroupVersionId: 'tgv-root-v1', reason: 'approved_result', approvedByReviewNodeId: 'run-node-review-01', approvedReviewMode: 'runner-managed', approvedReviewReportHash: 'h-report', reviewedAcceptanceHash: 'h-acc', reviewedResultHash: 'h-res', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
 
 // baseline: a clean structurally-complete graph reports complete/done.
 const clean = explainWork(w);

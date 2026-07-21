@@ -146,11 +146,13 @@ function record(id, feature, expectedResult, actualResult, pass) {
 
 try {
   // Expected results are declared before executing each test case.
+  // P0#6: dry-run 종결은 policy 미승인이라 navigation은 all_closed/complete가 아니라 graph_closed_unapproved/
+  // complete=false로 보고한다(구조 종결은 됐지만 policy-approved는 아님 = audit claimSafe와 정렬).
   const tc1Expected = {
-    stopReason: 'all_closed',
+    stopReason: 'graph_closed_unapproved',
     requiredActions: ['decompose:completed:task-plan', 'execute:completed:task-child-execute'],
-    closure: { complete: true, waitingDelegations: 0, openBlockers: 0 },
-    evidence: 'Runner should decompose parent, extend snapshot, execute child, and close work.'
+    closure: { complete: false, waitingDelegations: 0, openBlockers: 0 },
+    evidence: 'Runner should decompose parent, extend snapshot, execute child, and structurally close work (unapproved).'
   };
   const tc1Dir = createDecompositionWork();
   const tc1Run = JSON.parse(run(['run', tc1Dir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
@@ -168,13 +170,13 @@ try {
   record('TC01', '1. request-to-completion autonomous decomposition', tc1Expected, tc1Actual,
     tc1Actual.stopReason === tc1Expected.stopReason &&
     tc1Expected.requiredActions.every((x) => tc1Actual.actions.includes(x)) &&
-    tc1Actual.closure.complete === true && tc1Actual.closure.waitingDelegations === 0 && tc1Actual.closure.openBlockers === 0);
+    tc1Actual.closure.complete === false && tc1Actual.closure.waitingDelegations === 0 && tc1Actual.closure.openBlockers === 0);
 
   const tc2Expected = {
-    runLogContains: ['runner_started', 'task_started', 'task_completed', 'all_closed'],
+    runLogContains: ['runner_started', 'task_started', 'task_completed', 'graph_closed_unapproved'],
     eventsContain: ['decomposition_completed', 'task_completed'],
-    explainComplete: true,
-    evidence: 'Work history should be inspectable/explainable after execution.'
+    explainComplete: false,
+    evidence: 'Work history should be inspectable/explainable after execution (structurally closed, unapproved).'
   };
   const runLog = readFileSync(join(tc1Dir, 'runs', 'run-main', 'run-log.md'), 'utf8');
   const events = readFileSync(join(tc1Dir, 'runs', 'run-main', 'events.jsonl'), 'utf8');
@@ -185,7 +187,7 @@ try {
     explainStatus: tc1Explain.status
   };
   record('TC02', '2. work record inspection and explanation', tc2Expected, tc2Actual,
-    tc2Actual.runLogContains.length === tc2Expected.runLogContains.length && tc2Actual.eventsContain.length === tc2Expected.eventsContain.length && tc2Actual.explainComplete === true);
+    tc2Actual.runLogContains.length === tc2Expected.runLogContains.length && tc2Actual.eventsContain.length === tc2Expected.eventsContain.length && tc2Actual.explainComplete === false);
 
   const tc3Expected = {
     loopbackPolicy: 'none', stopReason: 'delegation_pending', stepsRun: 0,
@@ -199,7 +201,7 @@ try {
     tc3Actual.loopbackPolicy === 'none' && tc3Actual.stopReason === 'delegation_pending' && tc3Actual.stepsRun === 0 && tc3Actual.source?.id === 'run-node-human-decision');
 
   const tc4Expected = {
-    loopbackPolicy: 'self', stopReason: 'all_closed', claimedItems: 1, loopbacksUsed: 1, action: { kind: 'loopback', status: 'completed', executedBy: 'Nova', executionMode: 'loopback' },
+    loopbackPolicy: 'self', stopReason: 'graph_closed_unapproved', claimedItems: 1, loopbacksUsed: 1, action: { kind: 'loopback', status: 'completed', executedBy: 'Nova', executionMode: 'loopback' },
     delegateFrontmatter: ['status: done', 'resolvedBy: loopback', 'executionMode: loopback', 'executedBy: Nova'],
     evidence: 'User-facing loopback mode should route through daemon-backed queue execution, take a self-delegation, execute it itself, and record who executed it.'
   };
@@ -223,14 +225,16 @@ try {
     delegateFrontmatter: tc4Expected.delegateFrontmatter.filter((x) => tc4Node.includes(x))
   };
   record('TC04', '4. loopback mode executes waiting delegation as self and records executor', tc4Expected, tc4Actual,
-    tc4Actual.loopbackPolicy === 'self' && tc4Actual.stopReason === 'all_closed' && tc4Actual.claimedItems === 1 && tc4Actual.loopbacksUsed === 1 &&
+    tc4Actual.loopbackPolicy === 'self' && tc4Actual.stopReason === 'graph_closed_unapproved' && tc4Actual.claimedItems === 1 && tc4Actual.loopbacksUsed === 1 &&
     tc4Actual.action?.executedBy === 'Nova' && tc4Actual.action?.executionMode === 'loopback' &&
     tc4Actual.taskCompletedEvent === 'task_completed' && tc4Actual.runnerStoppedEvent === 'runner_stopped' &&
     tc4Actual.delegateFrontmatter.length === tc4Expected.delegateFrontmatter.length);
 
+  // P0#6: dry-run(미승인) 종결의 최종 신호는 complete=false/status=active/nextAction=graph_closed_unapproved다 —
+  // navigation이 미승인 완료를 done으로 오보하지 않는다(policy-approved만 done/complete로 승격).
   const tc5Expected = {
-    complete: true, status: 'complete', nextAction: 'done', reportableStopReason: 'all_closed',
-    evidence: 'A completed work can be reported with complete=true/status=complete and all_closed stop reason.'
+    complete: false, status: 'active', nextAction: 'graph_closed_unapproved', reportableStopReason: 'graph_closed_unapproved',
+    evidence: 'An unapproved structural closure reports complete=false/status=active/graph_closed_unapproved (done requires policy approval).'
   };
   const tc5Actual = {
     complete: tc1Explain.complete,
@@ -239,7 +243,7 @@ try {
     reportableStopReason: tc1Run.stopReason
   };
   record('TC05', '5. final completion report signal', tc5Expected, tc5Actual,
-    tc5Actual.complete === true && tc5Actual.status === 'complete' && tc5Actual.nextAction === 'done' && tc5Actual.reportableStopReason === 'all_closed');
+    tc5Actual.complete === false && tc5Actual.status === 'active' && tc5Actual.nextAction === 'graph_closed_unapproved' && tc5Actual.reportableStopReason === 'graph_closed_unapproved');
 
   mkdirSync(dirname(resultPath), { recursive: true });
   const payload = {

@@ -48,6 +48,10 @@ export const LOOPBACK_POLICIES = Object.freeze(['none', 'self']);
 export const STOP_REASONS = Object.freeze({
   NO_RUNNABLE: 'no_runnable',
   ALL_CLOSED: 'all_closed',
+  // P0#6: 구조는 닫혔으나 policy 미승인(structurally_complete_unapproved / manual_attested_complete). audit이
+  // claimSafe=false로 거부하는 상태를 navigation도 done/all_closed가 아니라 이 stop으로 노출해, unattended runner가
+  // 미승인 완료를 진짜 완료로 오인하지 않게 한다(navigation ↔ audit 완료-의미 정렬).
+  GRAPH_CLOSED_UNAPPROVED: 'graph_closed_unapproved',
   BLOCKED_ONLY: 'blocked_only',
   WAITING: 'waiting',
   DELEGATION_PENDING: 'delegation_pending',
@@ -59,6 +63,26 @@ export const STOP_REASONS = Object.freeze({
   VALIDATION_FAILED: 'validation_failed',
   ERROR: 'error',
 });
+
+// P0#6 공유 predicate: navigation의 'done' surface와 finalize의 status='done' flip은 audit과 'policy-approval
+// AXIS'(closure.policyApprovedComplete)에서 수렴한다. 이 axis는 parser(lib-taskops.js)가 계산해 closure에 실어주는
+// 공유 SoT라, navigation⟂audit이 서로를 호출하지 않고도 같은 predicate를 읽는다. audit(lib-audit.js)의 claimSafe도
+// closure.policyApprovedComplete===true를 요구하고 manualAttested를 인정하지 않으므로, 여기서도 manualAttested
+// disjunct 없이 policyApprovedComplete만 인정한다 — 그래야 manual_attested_complete work가 'next=done인데
+// audit=미완료'인 불일치를 재도입하지 않는다. 네 진입점(shapeNextAction/pickNextAction/explainWork/
+// finalizeWorkStatusForClosure)이 이 하나를 참조해 done-surface drift를 막는다.
+//
+// 정확성 주의(과장 금지): 이건 'policy-approval axis 수렴'이지 claimSafe와의 '완전 등가'가 아니다. audit claimSafe는
+// 세 conjunct를 '더' 건다 — counts.error===0(audit-issue 에러; parsed.errors와 DISJOINT), unresolvedPartialCount===0,
+// repeatedReviewTaskCount===0 (lib-audit.js:429-433). 이 셋은 audit 엔진 내부 신호라 navigation이 의존하지 않는다
+// (그래야 navigation이 audit 엔진에 결합되지 않는다 — closure에는 unresolvedPartialCount/repeatedReviewTaskCount가
+// 없고 partialCount만 있다). 결과로 policy-approved인데 '미해결 partial'을 든 그래프는 nav=done인데 audit=claimSafe:false로
+// 갈릴 수 있다(문서화된 residual; scripts/navigation-approval-parity.mjs case 4). 이 residual을 닫으려면
+// (partial/review/error axis를 이 predicate에 접어넣기) navigation을 audit 엔진에 결합해야 하므로, 7개 P0 밖의
+// 의도적 후속 선택으로 남긴다 — 그 선택을 하면 case 4의 nav 단언을 graph_closed_unapproved로 바꿔야 한다.
+function isApprovedComplete(closure) {
+  return Boolean(closure && closure.complete === true && closure.policyApprovedComplete === true);
+}
 
 export const FINISHING_MODE_RESERVE = (maxSteps) => {
   const n = Number(maxSteps);
@@ -2316,10 +2340,19 @@ export function pickNextAction(parsed, target = {}) {
     if (parsed.errors.length > 0) {
       return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE, detail: `Work has ${parsed.errors.length} validation error(s); closure cannot be trusted until resolved.` };
     }
+    // P0#6: 구조는 닫혔으나 policy 미승인이면 audit이 claimSafe=false로 거부한다 — navigation도 ALL_CLOSED가 아니라
+    // GRAPH_CLOSED_UNAPPROVED로 노출해 audit과 동일 bar로 정렬한다(structurally_complete_unapproved / manual_attested_complete).
+    if (!isApprovedComplete(parsed.closure)) {
+      return {
+        kind: 'stop',
+        reason: STOP_REASONS.GRAPH_CLOSED_UNAPPROVED,
+        detail: `Graph is structurally closed but not policy-approved (${parsed.closure.closureState}); run taskops audit and obtain a policy-approved review closure before treating the work as done.`,
+      };
+    }
     return {
       kind: 'stop',
       reason: STOP_REASONS.ALL_CLOSED,
-      detail: 'All selected terminal tasks are closed by task EoW, run terminal nodes are closed by run EoW, and no waiting/delegated/blocked work remains.',
+      detail: 'All selected terminal tasks are closed by policy-approved task EoW, run terminal nodes are closed by run EoW, and no waiting/delegated/blocked work remains.',
     };
   }
   return { kind: 'stop', reason: STOP_REASONS.NO_RUNNABLE };
@@ -5002,14 +5035,36 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
       })
     : null;
 
+  // P0#1 [뿌리] / P0#2: exploration은 NON-CLOSING epistemic probe다 — RUN node만 닫고(아래 closeRunNodeWithEow),
+  // source objective task는 절대 닫지 않는다(run graph ⟂ task graph). 이전 코드는 fm.status='done'(objective 종결)
+  // + closeTaskWithEow(source task-EoW 부착)로 exploration이 목표를 완료로 오판시켰다(F1 '말한 완료=진짜 완료' 위반).
   updateMarkdownFrontmatter(task.path, (fm) => {
-    fm.status = 'done';
+    // (1) 절대 fm.status='done' 하지 않는다 — attachRunRef가 스텝 시작 시 task를 'active'로 올리므로, 여기서
+    //     'pending'으로 되돌려 open 상태를 유지한다. done+needs_decomposition(no child) 모순 상태를 애초에
+    //     만들지 않아 P0#3 validator와도 정합한다.
+    fm.status = 'pending';
     fm.runReadiness = 'needs_decomposition';
-    fm.runReadinessReason = sanitizeFmScalar(`Exploration recorded by taskops-runner (${executor}) at ${finishedAt}; ready for decomposition with informed inputs.`);
+    fm.runReadinessReason = sanitizeFmScalar(`Exploration recorded by taskops-runner (${executor}) at ${finishedAt}; source objective stays open (pending), ready for decomposition with informed inputs.`);
+    // (2) uncertaintyState 승격은 surpriseReported가 아니라 EXPLORATION 성공에 gate — 정확히 한 단
+    //     (unknown_unknown→known_unknown), 절대 'known'으로 승격 금지(runnable/execute로 새어 acceptance 우회).
+    //     근거: inferUncertaintyReadiness는 unknown_unknown을 explicit runReadiness 무시하고 UNCONDITIONAL
+    //     needs_exploration으로 강제하므로, 승격하지 않으면 no-marker 성공 후 매 스텝 재-explore 무한루프가 된다.
+    //     이미 known_unknown이면 재승격 없음(anti-loop): 두 번째 exploration에서 1428 branch 미진입.
+    if (String(fm.uncertaintyState || '').trim() === 'unknown_unknown') fm.uncertaintyState = 'known_unknown';
     delete fm.lastRunFailureReason;
     return fm;
   });
-  closeTaskWithEow({ task, reason: 'exploration_recorded_by_runner', finishedAt });
+  // P0#2 defense-in-depth: acceptance-bearing task(enforced/guarded/runner-managed)는 acceptance 검증 /
+  // policy-approved review로만 닫혀야 하며 exploration 통과로 종결되면 acceptance를 우회한다. #1이 exploration의
+  // close 자체를 제거해 불변식을 만족하지만, 향후 회귀가 이 path에 close를 재도입하지 못하도록 acceptance task에
+  // 한해 사후 검증한다(정상 경로에서는 절대 발화하지 않음).
+  if (POLICY_APPROVING_ACCEPTANCE_MODES.has(normalizeAcceptance(task).mode)) {
+    const postExplorationFm = parseMarkdownFile(task.path);
+    const sourceTaskEowPath = join(dirname(dirname(task.path)), 'eow', `eow-${task.id}.md`);
+    if (postExplorationFm.status === 'done' || existsSync(sourceTaskEowPath)) {
+      throw new Error(`P0#2 invariant violated: exploration must not close acceptance-bearing task ${task.id} (acceptance requires verified/reviewed closure, not an exploration pass)`);
+    }
+  }
   updateMarkdownFrontmatter(runNodePath, (fm) => {
     fm.status = 'done';
     fm.result = {
@@ -5105,6 +5160,7 @@ function executePrototypeTask({ projectDir, project, task, runDir, runId, events
 
 const ACTION_BY_STOP_REASON = Object.freeze({
   [STOP_REASONS.ALL_CLOSED]: 'done',
+  [STOP_REASONS.GRAPH_CLOSED_UNAPPROVED]: 'graph_closed_unapproved',
   [STOP_REASONS.NO_RUNNABLE]: 'no_runnable',
   [STOP_REASONS.BLOCKED_ONLY]: 'blocked',
   [STOP_REASONS.WAITING]: 'wait',
@@ -5124,7 +5180,9 @@ function commandForAction(action, workDir) {
     case 'delegation_pending':
       return `# resolve the pending delegation in the run graph, then re-run taskops next`;
     case 'done':
-      return `# all branches closed by EoW; no further action required`;
+      return `# all branches closed by policy-approved EoW; no further action required`;
+    case 'graph_closed_unapproved':
+      return `taskops audit ${workDir} --json  # 구조는 닫혔으나 policy 미승인 — audit로 확인 후 review closure(정책 승인)를 받으세요`;
     default:
       return `taskops explain ${workDir}  # inspect why no action is available`;
   }
@@ -5133,10 +5191,21 @@ function commandForAction(action, workDir) {
 function shapeNextAction(next, workDir, parsed = null) {
   // A6: do not shape a 'done' action for a canonically-invalid graph (validation errors present).
   if (parsed?.closure?.complete === true && !(parsed.errors?.length > 0)) {
+    // P0#6: done surface는 policy-approved-complete일 때만(audit claimSafe와 동일 bar). 구조만 닫힌 미승인 종결
+    // (structurally_complete_unapproved / manual_attested_complete)은 graph_closed_unapproved로 노출한다.
+    if (!isApprovedComplete(parsed.closure)) {
+      return {
+        action: ACTION_BY_STOP_REASON[STOP_REASONS.GRAPH_CLOSED_UNAPPROVED],
+        target: null,
+        reason: `Graph is structurally closed but not policy-approved (${parsed.closure.closureState}); audit refuses claimSafe until a policy-approved review closure exists.`,
+        stopReason: STOP_REASONS.GRAPH_CLOSED_UNAPPROVED,
+        command: commandForAction(ACTION_BY_STOP_REASON[STOP_REASONS.GRAPH_CLOSED_UNAPPROVED], workDir),
+      };
+    }
     return {
       action: 'done',
       target: null,
-      reason: 'All terminal task/run EoW coverage is met and no waiting/blocked work remains.',
+      reason: 'All terminal task/run EoW coverage is met (policy-approved) and no waiting/blocked work remains.',
       stopReason: STOP_REASONS.ALL_CLOSED,
       command: commandForAction('done', workDir),
     };
@@ -5215,14 +5284,19 @@ export function explainWork(workDir) {
   const shaped = shapeNextAction(next, workDir, parsed);
   const closure = parsed.closure || {};
   // A6: a canonically-invalid graph is never honestly complete — closure cannot be trusted while
-  // validation errors exist.
-  const complete = closure.complete === true && parsed.errors.length === 0;
+  // validation errors exist. P0#6: 완료는 policy-approved-complete일 때만(audit claimSafe와 동일 bar) — 구조만
+  // 닫힌 미승인 종결은 complete=false로 보고해 navigation을 audit에 정렬한다.
+  const complete = closure.complete === true && parsed.errors.length === 0 && isApprovedComplete(closure);
   const reasons = [];
   const readinessCounts = complete
     ? { runnable: 0, needs_decomposition: 0, needs_exploration: 0, blocked: 0, waiting: 0 }
     : countOpenTasksByReadiness(parsed);
   if (!complete) {
     if (parsed.errors.length > 0) reasons.push(`work has ${parsed.errors.length} validation error(s); cannot trust closure`);
+    // P0#6: 구조는 닫혔으나 policy 미승인 — audit이 claimSafe=false로 거부하는 정당한 정지 상태.
+    if (parsed.errors.length === 0 && closure.structuralComplete === true && !isApprovedComplete(closure)) {
+      reasons.push(`graph is structurally closed but not policy-approved (${closure.closureState}); audit refuses claimSafe until a policy-approved review closure exists`);
+    }
     if ((closure.openTerminalTaskCount || 0) > 0) reasons.push(`${closure.openTerminalTaskCount} terminal task(s) missing EoW`);
     if ((closure.openRunTerminalNodeCount || 0) > 0) reasons.push(`${closure.openRunTerminalNodeCount} run terminal node(s) missing EoW`);
     if ((closure.openBlockerCount || 0) > 0) reasons.push(`${closure.openBlockerCount} blocked task(s) or run node(s)`);
@@ -5451,6 +5525,10 @@ export function closeTarget(workDir, targetId, {
     if (statusFlipped) {
       updateMarkdownFrontmatter(task.path, (fm) => {
         fm.status = 'done';
+        // P0#3 (R2B4): 완료로 flip되는 leaf는 actionable readiness(needs_*)를 남기면 done+actionable+no-child
+        // 지문이 되어 신규 validator에 false-error가 된다. manual_verified는 완료 attestation이므로 forward
+        // readiness는 무의미 → non-actionable terminal 관례인 'runnable'(executed-done과 동형)로 정규화한다.
+        fm.runReadiness = 'runnable';
         fm.runReadinessReason = sanitizeFmScalar(`Closed by taskops close --reason manual_verified at ${declaredAt}.`);
         return fm;
       });
@@ -5584,7 +5662,11 @@ function finalizeWorkStatusForClosure(projectDir, { runId, closedAt, allowConcur
     };
   }
 
-  const shouldSetDone = !['done', 'cancelled'].includes(previousStatus);
+  // P0#6: status='done' flip은 policy-approved-complete일 때만. 미승인 구조 종결은 status를 'active'로 유지하되
+  // closureState + structuralClosureComplete(및 closedAt/closedBy/closedByRunId) stamp는 그대로 남겨 관찰가능성과
+  // 1179 경고 억제(runner-ACK)를 보존한다.
+  const approved = isApprovedComplete(closure);
+  const shouldSetDone = approved && !['done', 'cancelled'].includes(previousStatus);
   const needsClosedAt = !parsed.project.closedAt;
   const needsClosedBy = !parsed.project.closedBy;
   const needsClosedByRunId = runId && !parsed.project.closedByRunId;
@@ -5610,7 +5692,7 @@ function finalizeWorkStatusForClosure(projectDir, { runId, closedAt, allowConcur
 
   const projectIndexPath = join(projectDir, 'index.md');
   const nextFm = updateMarkdownFrontmatter(projectIndexPath, (fm) => {
-    if (!['done', 'cancelled'].includes(fm.status)) fm.status = 'done';
+    if (approved && !['done', 'cancelled'].includes(fm.status)) fm.status = 'done';
     if (!fm.closedAt) fm.closedAt = closedAt;
     if (!fm.closedBy) fm.closedBy = 'taskops-runner';
     if (runId && !fm.closedByRunId) fm.closedByRunId = runId;
@@ -5883,6 +5965,7 @@ export function runTaskOps(workDir, options = {}) {
           || stopReason === STOP_REASONS.DELEGATION_PENDING
           || stopReason === STOP_REASONS.BLOCKED_ONLY
           || stopReason === STOP_REASONS.ALL_CLOSED
+          || stopReason === STOP_REASONS.GRAPH_CLOSED_UNAPPROVED
         ) {
           logEvent(eventsPath, { timestamp: isoNow(), type: stopReason, runId, detail: stopDetail, source: stopSource });
           appendRunLog(runDir, `${isoNow()} ${stopReason}${stopDetail ? ` ${stopDetail}` : ''}`);

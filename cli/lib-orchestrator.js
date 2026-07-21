@@ -139,7 +139,9 @@ function normalizeReportSink(value) {
 }
 
 function targetCompleted(result, target) {
-  if (result.stopReason === 'all_closed') return true;
+  // P0#6: all_closed(policy-approved) 뿐 아니라 graph_closed_unapproved(구조 종결·미승인)도 구조적으로는 더 돌릴
+  // runnable work가 없는 종결이므로 재-타게팅을 멈춘다(추가 진행은 policy 승인이지 더 많은 run이 아니다).
+  if (result.stopReason === 'all_closed' || result.stopReason === 'graph_closed_unapproved') return true;
   const actions = result.actions || result.tasks || [];
   return actions.some((action) => (
     action
@@ -799,6 +801,15 @@ export async function runQueueWatch(workDir, options = {}) {
     finalExplain = explainWork(workDir);
     if (finalExplain.complete) {
       stopReason = 'all_closed';
+      break;
+    }
+    // P0#6: explainWork.complete은 이제 policy-approved-complete일 때만 true다(navigation ↔ audit 정렬). 구조가
+    // 닫혔으나 policy 미승인(structurally_complete_unapproved / manual_attested_complete)이면 더 claim할 queue work가
+    // 없다 — 무한 idle하지 말고 graph_closed_unapproved로 정직하게 종료한다(하단 audit이 claimSafe=false를 실어 나른다).
+    // (P0#6 이전엔 finalExplain.complete=structuralComplete라 이 지점에서 all_closed로 종료했다 — 종료 동작을 보존하되
+    //  미승인은 graph_closed_unapproved로 정직하게 라벨링.)
+    if (finalExplain.closure && finalExplain.closure.structuralComplete === true && finalExplain.validationErrors && finalExplain.validationErrors.length === 0) {
+      stopReason = 'graph_closed_unapproved';
       break;
     }
 

@@ -98,6 +98,7 @@ const LOCALIZED_TEXT = {
       entityTypeMustBeOneOf: (types) => `entityType must be one of: ${types.join(', ')}`,
       invalidStatus: (status) => `invalid status '${status}'`,
       invalidRunReadiness: (value) => `invalid runReadiness '${value}'`,
+      doneWithActionableReadiness: (value) => `task is 'done' but runReadiness '${value}' is still actionable without a child task group; a completed leaf must not carry actionable readiness`,
       invalidResolverKind: (value) => `invalid resolverKind '${value}'`,
       invalidUnderstandingLevel: (value) => `invalid understandingLevel '${value}'`,
       invalidUncertaintyState: (value) => `invalid uncertaintyState '${value}'`,
@@ -181,6 +182,7 @@ const LOCALIZED_TEXT = {
       entityTypeMustBeOneOf: (types) => `entityType은 다음 중 하나여야 함: ${types.join(', ')}`,
       invalidStatus: (status) => `유효하지 않은 status '${status}'`,
       invalidRunReadiness: (value) => `유효하지 않은 runReadiness '${value}'`,
+      doneWithActionableReadiness: (value) => `task가 'done'이지만 runReadiness '${value}'가 child task group 없이 여전히 actionable함; 완료된 leaf는 actionable readiness를 가질 수 없음`,
       invalidResolverKind: (value) => `유효하지 않은 resolverKind '${value}'`,
       invalidUnderstandingLevel: (value) => `유효하지 않은 understandingLevel '${value}'`,
       invalidUncertaintyState: (value) => `유효하지 않은 uncertaintyState '${value}'`,
@@ -841,6 +843,15 @@ export function parseProject(projectDir) {
         if (task.taskGroupVersionId !== v.id) errors.push(withPath(taskPath, t.taskGroupVersionIdMustBe(v.id)));
         if (!STATUS_VALUES.includes(task.status)) errors.push(withPath(taskPath, t.invalidStatus(task.status)));
         if (task.runReadiness && !RUN_READINESS_VALUES.includes(task.runReadiness)) errors.push(withPath(taskPath, t.invalidRunReadiness(task.runReadiness)));
+        // P0#3: status==='done' + actionable runReadiness(needs_*) + child 없음 = 자기모순(P0#1 버그의 fingerprint).
+        // '완료된 leaf는 actionable readiness를 갖지 않는다'를 canonically 금지한다. STORED task.runReadiness를 판독한다.
+        //  - 'runnable' 제외: executeRunnableTask는 runReadiness를 재작성하지 않아 done+runnable은 정합(executed-done).
+        //  - childTaskGroupId 면제: decomposed parent(done+needs_decomposition+childTaskGroupId)는 정당한 branch.
+        if (task.status === 'done'
+          && ['needs_exploration', 'needs_decomposition', 'needs_prototype'].includes(task.runReadiness)
+          && !task.childTaskGroupId) {
+          errors.push(withPath(taskPath, t.doneWithActionableReadiness(task.runReadiness)));
+        }
         if (task.resolverKind && !RESOLVER_KIND_VALUES.includes(task.resolverKind)) errors.push(withPath(taskPath, t.invalidResolverKind(task.resolverKind)));
         if (task.understandingLevel && !UNDERSTANDING_LEVEL_VALUES.includes(task.understandingLevel)) errors.push(withPath(taskPath, t.invalidUnderstandingLevel(task.understandingLevel)));
         validateTaskUncertaintyFields(task, taskPath, errors, t);
@@ -1099,6 +1110,14 @@ export function parseProject(projectDir) {
   let manualAttestedTerminalTaskEowCount = 0;
   const selectedPairs = activeSnapshot?.selectedVersions || [];
   const selectedTaskGroupIds = new Set(selectedPairs.map((pair) => pair.taskGroupId));
+  // P0#4: active completion predicate(특히 openBlockerCount)는 selected/active version의 task만 세야 한다. superseded
+  // (non-selected) version에 남은 blocked task가 openBlockerCount를 영구 오염시켜 structuralComplete를 영원히 막던
+  // 버그를 제거한다. closure는 parseProject 내부(parsed 객체 존재 전) 계산이라 lib-audit.selectedTasks 헬퍼를 직접
+  // 호출할 수 없어 여기서 mirror한다. empty-set fallback(size===0→count-all, lib-audit.js:57과 동일) 필수 —
+  // activeSnapshot 없는 legacy fixture의 현행 closure를 보존한다. history/superseded task는 parse에 남겨 audit
+  // trail을 유지하되 active completion 계산에서만 제외한다.
+  const selectedVersionIdSet = new Set(selectedPairs.map((pair) => pair.versionId).filter(Boolean));
+  const inSelectedVersion = (task) => selectedVersionIdSet.size === 0 || selectedVersionIdSet.has(task.taskGroupVersionId);
   for (const pair of selectedPairs) {
     const version = versions.get(pair.versionId);
     if (!version) continue;
@@ -1164,7 +1183,7 @@ export function parseProject(projectDir) {
   const taskHasUnresolvedBlocker = (task) => normalizeBlockedByRefs(task.blockedBy).some((ref) => !taskBlockerResolved(ref));
   const taskIsOpenBlocked = (task) => !['done', 'cancelled'].includes(task.status)
     && (task.status === 'blocked' || task.runReadiness === 'blocked' || taskHasUnresolvedBlocker(task));
-  const openBlockerCount = [...tasks.values()].filter(taskIsOpenBlocked).length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
+  const openBlockerCount = [...tasks.values()].filter((task) => inSelectedVersion(task) && taskIsOpenBlocked(task)).length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
   const structuralComplete = terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0;
   const policyApprovedComplete = structuralComplete
     && terminalTaskCount === policyApprovedTerminalTaskEowCount
@@ -1176,7 +1195,13 @@ export function parseProject(projectDir) {
   const closureState = policyApprovedComplete
     ? 'policy_approved_complete'
     : (manualAttestedComplete ? 'manual_attested_complete' : (structuralComplete ? 'structurally_complete_unapproved' : 'open'));
-  if (structuralComplete && project.status === 'active') {
+  // P0#6 (R1B3): 미승인 종결은 status='active'로 유지되므로(finalize가 policy-approved일 때만 done flip), runner가
+  // 구조 종결을 ACK(structuralClosureComplete stamp)했고 closureState가 미승인(structurally_complete_unapproved /
+  // manual_attested_complete)이면 '승인 대기 중인 정당한 정지'라 경고를 억제한다. runner 미-ACK(forgot-to-finalize)
+  // 이거나 policy_approved인데 active(approved-but-not-flipped = 진짜 버그)면 경고를 유지한다.
+  const runnerAckedUnapprovedStop = project.structuralClosureComplete === true
+    && (closureState === 'structurally_complete_unapproved' || closureState === 'manual_attested_complete');
+  if (structuralComplete && project.status === 'active' && !runnerAckedUnapprovedStop) {
     warnings.push(withPath(projectIndex, `work status is active while graph is structurally complete (${closureState})`));
   }
   if (structuralComplete && hasManualAttestation && !policyApprovedComplete) {
@@ -1715,12 +1740,26 @@ function uncertaintyReadinessConsistencyIssues(task, semanticReadiness) {
   }
   if (inheritedKnownRefs(task).length > 0 && !hasLocalKnownEvidence(task)) {
     if (semanticReadiness.runReadiness === 'runnable' || task.runReadiness === 'runnable') {
-      issues.push({
-        code: 'inherited_only_known_not_runnable',
-        severity: 'error',
-        downgradeTo: 'needs_exploration',
-        message: 'Inherited known references are revalidation targets, not local known evidence; local validation is required before runnable.',
-      });
+      // P0#7: inherited-known 재검증은 source task를 닫지 않는 non-closing validation이다. ATOMIC ACCEPTED task
+      // (expectedPlan.expectedDepth===0 + policy-approving acceptance)는 inherited-known을 exploration/decomposition이
+      // 아니라 ACCEPTANCE-VERIFIED EXECUTE로 재검증해야 한다 — acceptance review가 결과를 검증(inherited 가정이 틀리면
+      // reject)하므로 그 자체가 local validation이며, 완료는 여전히 acceptance/review로 gate된다. exploration으로 강등하면
+      // atomic accepted task를 acceptance 검증 대신 exploration으로 새게 해 acceptance를 우회한다.
+      // non-atomic(depth>=1)이거나 policy-approving acceptance가 없으면(gate 부재) 기존대로 needs_exploration으로 강등해
+      // inherited-known을 먼저 재검증한다. hasLocalKnownEvidence는 실제 검증/surprise 시 true가 되어 이 강등이 자연 해제된다.
+      const expDepth = task.expectedPlan && typeof task.expectedPlan === 'object' ? Number(task.expectedPlan.expectedDepth) : NaN;
+      const acceptanceMode = task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)
+        ? String(task.acceptance.mode || '').trim()
+        : '';
+      const atomicAccepted = expDepth === 0 && POLICY_APPROVED_MODES.has(acceptanceMode);
+      if (!atomicAccepted) {
+        issues.push({
+          code: 'inherited_only_known_not_runnable',
+          severity: 'error',
+          downgradeTo: 'needs_exploration',
+          message: 'Inherited known references are revalidation targets, not local known evidence; local validation is required before runnable.',
+        });
+      }
     }
   }
 
@@ -2345,6 +2384,10 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     if (Array.isArray(task.surpriseHistory)) fm.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
     if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) fm.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
     if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) fm.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
+    // P0#5 (R2B3): expectedResult는 top-level task 필드(normalizeAcceptance의 verify/review fallback + decompose/
+    // execute 프롬프트 + coverage detector가 읽음)인데 여기 persist 목록에 없어 restart/promotion clone이 고쳐져도
+    // round-trip이 안 됐다. writer가 persist해야 clone 보존이 실효를 갖는다.
+    if (typeof task.expectedResult === 'string' && task.expectedResult.trim() !== '') fm.expectedResult = task.expectedResult;
     if (Array.isArray(task.runRefs)) fm.runRefs = task.runRefs;
     if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) fm.acceptance = task.acceptance;
     if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) fm.followUpBudget = task.followUpBudget;
@@ -2479,6 +2522,8 @@ function cloneTaskForPromotion(task) {
   if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
   if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
   if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) cloned.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
+  // P0#5 (R2B3): promotion clone도 expectedResult(top-level 계약 필드)를 보존한다 — 기존 누락 교정.
+  if (typeof task.expectedResult === 'string' && task.expectedResult.trim() !== '') cloned.expectedResult = task.expectedResult;
   if (Array.isArray(task.followUpBlockedByPartialIds)) cloned.followUpBlockedByPartialIds = [...task.followUpBlockedByPartialIds];
   if (Array.isArray(task.repeatedPartialReviewPartialIds)) cloned.repeatedPartialReviewPartialIds = [...task.repeatedPartialReviewPartialIds];
   if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
@@ -3380,6 +3425,12 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);
     if (task.inheritedFrom && typeof task.inheritedFrom === 'object' && !Array.isArray(task.inheritedFrom)) cloned.inheritedFrom = cloneFrontmatterValue(task.inheritedFrom);
     if (task.expectedPlan && typeof task.expectedPlan === 'object' && !Array.isArray(task.expectedPlan)) cloned.expectedPlan = cloneFrontmatterValue(task.expectedPlan);
+    // P0#5: restart clone은 semantic contract를 전부 보존해야 한다(promotion-preserves / restart-drops 비대칭 제거).
+    // acceptance/followUpBudget/expectedResult가 빠지면 restart된 accepted task가 무제약 task로 강등되어 acceptance를
+    // 우회한다. promotion clone(cloneTaskForPromotion)과 동형으로 보존한다.
+    if (task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)) cloned.acceptance = task.acceptance;
+    if (task.followUpBudget && typeof task.followUpBudget === 'object' && !Array.isArray(task.followUpBudget)) cloned.followUpBudget = task.followUpBudget;
+    if (typeof task.expectedResult === 'string' && task.expectedResult.trim() !== '') cloned.expectedResult = task.expectedResult;
     const order = task.order ?? 0;
     if (task.id === fromTaskId) {
       cloned.status = 'pending';
