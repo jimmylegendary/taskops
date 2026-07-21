@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isPartialUnresolved, partialPromotionWaveBudgetState } from './lib-taskops.js';
+import { progressLedger, renderProgressLedgerText } from './lib-progress-ledger.js';
 
 const DEFAULT_MAX_FLAT_TASKS = 12;
 
@@ -438,6 +439,10 @@ export function auditParsedWork(parsed, options = {}) {
     // Assurance ledger (P0-1): DONE-side tier floor + pure-assurance externallySafe + FAIL-side ledger.
     // claimSafe itself is flipped by the self_verified ERROR issue — issues stay the single source of truth.
     assurance,
+    // Progress ledger (divergence/convergence axis; spec docs/theory/divergence-convergence-v0.md): a sibling to
+    // `assurance`, ORTHOGONAL to claimSafe — measurement only, contributes ZERO issues and never touches the
+    // claimSafe/strictSafe/counts expressions. The only coupling is numeric (transport borrows DONE_TIER_RANK).
+    progress: progressLedger(parsed),
     counts,
     metrics: {
       selectedTaskCount: selectedTasks(parsed).length,
@@ -467,6 +472,8 @@ export function renderAuditText(audit) {
     `closure state=${audit.metrics.closureState} structural=${audit.metrics.structuralComplete} policyApproved=${audit.metrics.policyApprovedComplete} manualEow=${audit.metrics.manualEowCount} partial=${audit.metrics.unresolvedPartialCount}/${audit.metrics.partialCount}`,
     `assurance floor=${audit.assurance?.floor ?? 'unknown'} externallySafe=${audit.assurance?.externallySafe === true} failures content=${audit.assurance?.failureLedger?.content ?? 0} verifiedFailure=${audit.assurance?.failureLedger?.verifiedFailure ?? 0} undetermined=${audit.assurance?.failureLedger?.undetermined ?? 0} uncertified=${audit.assurance?.failureLedger?.uncertified ?? 0} oracleAccess none=${audit.assurance?.oracleAccess?.none ?? 0} judge_once=${audit.assurance?.oracleAccess?.judge_once ?? 0} interactive=${audit.assurance?.oracleAccess?.interactive ?? 0} unknown=${audit.assurance?.oracleAccess?.unknown ?? 0}`,
   ];
+  // Progress axis (measurement-only sibling): one appended line, orthogonal to claimSafe (never routed into issues).
+  lines.push(renderProgressLedgerText(audit.progress));
   if (audit.validationErrors.length > 0) {
     lines.push('validation errors:');
     for (const err of audit.validationErrors) lines.push(`- ${err}`);
