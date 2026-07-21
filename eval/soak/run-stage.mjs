@@ -76,6 +76,13 @@ function runJob(job) {
         if (existsSync(rp)) { try { const r = JSON.parse(readFileSync(rp, 'utf8')); resultSummary = { official_resolved: r.official_resolved ?? null, wallclock_s: r.wallclock_s ?? null }; } catch {} }
       }
       log({ ts: new Date().toISOString(), stage: cfg.stage, arm: job.arm.key, id: job.id, status, exitCode: code, startedAt: started, elapsedS: Math.round((Date.now() - jt0) / 1000), resultSummary, stdoutTail: out.slice(-1000), stderrTail: err.slice(-500) });
+      // Disk hygiene for long runs: after the instance is fully done (verify + final grade all used the same
+      // instance-level image), remove that image. Done here — never mid-grade — so the removal cannot race the
+      // harness the way env-level cleanup did (the 35-forged-FAIL incident). {id1776} = swebench image tag form.
+      if (cfg.postJobCleanup && !DRY) {
+        const cmd = cfg.postJobCleanup.replace('{id1776}', job.id.replace('__', '_1776_')).replace('{id}', job.id);
+        try { execFileSync('/bin/sh', ['-c', cmd], { stdio: 'ignore', timeout: 60000 }); } catch {}
+      }
       console.log(`[${cfg.stage}] ${job.arm.key}:${job.id} → ${status} (${Math.round((Date.now() - jt0) / 60000)}min, elapsed ${(Math.round((Date.now() - t0) / 60000))}min)`);
       resolveP(status);
     });

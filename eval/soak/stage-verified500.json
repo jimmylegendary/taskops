@@ -524,7 +524,7 @@
   "TASKOPS_SWE_EXECUTOR": "codex-cli",
   "TASKOPS_CODEX_EFFORT": "high",
   "TASKOPS_MAX_WALL_MS": "2400000",
-  "SWEBENCH_CACHE_LEVEL": "env",
   "TASKOPS_CODEX_NATIVE_MODEL": "gpt-5.5"
- }
+ },
+ "postJobCleanup": "docker rmi -f sweb.eval.x86_64.{id1776}:latest"
 }

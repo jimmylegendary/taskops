@@ -28,7 +28,15 @@ subprocess.run(                                              # (~1GB each) are n
     cwd=str(EVAL), capture_output=True, text=True,
 )
 report = EVAL / f"taskops.{rid}.json"
-resolved = report.exists() and json.load(open(report)).get("resolved_instances", 0) == 1
+if not report.exists():
+    # A MISSING report is an INFRA outcome, never a verdict: the harness died before grading (image-removal
+    # races, dataset/network hiccups). Emitting resolved:false here forged 35/45 false_completions on the
+    # verified500 run (verify PASSed 3x, then the final grade's harness crashed pre-log and was scored as a
+    # real FAIL). Same contract as swebench_pro_grade.py: exit 2 + NO "resolved" token → caller records
+    # null + grade_error and the close stays out of the F1 denominator.
+    print(f"GRADE_INFRA_ERROR: harness produced no report ({report.name}) — not a verdict.", file=sys.stderr)
+    sys.exit(2)
+resolved = json.load(open(report)).get("resolved_instances", 0) == 1
 # emit a machine-readable line the scorer can capture, plus a diagnostic for retry feedback
 print(json.dumps({"instance": INSTANCE, "resolved": bool(resolved), "diff_lines": patch.count(chr(10))}))
 if not resolved:
