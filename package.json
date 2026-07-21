@@ -1,7 +1,7 @@
 {
   "name": "taskops-monorepo",
   "private": true,
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Monorepo for TaskOps skill, CLI, and Obsidian plugin.",
   "workspaces": [
     "cli",
