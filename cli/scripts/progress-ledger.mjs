@@ -234,7 +234,213 @@ try {
     assert.equal(l.channels.div.decomposition, 1.585);
   }
 
-  console.log('progress-ledger: OK (T1-T8)');
+  // ── T9: P4 confinement — realized 분해깊이가 선언된 expectedDepth 울타리를 초과하면 breachCount로 포착.
+  // 독립 산출(이론 §2.2 confinement 명명규약 · 데이터-렌즈): P(expectedDepth=1)→Q(expectedDepth=0)→R(leaf,울타리無).
+  // realizedDepth(P)=P→Q→R=2>1 breach; realizedDepth(Q)=Q→R=1>0 breach; R 미-fenced.
+  // fencedTaskCount=2, depthBudgetSum=1+0=1, depthRealizedSum=2+1=3, breachCount=2, confinementRatio=3.0.
+  {
+    const root = tmp('t9'); cleanups.push(root); const w = join(root, 'work');
+    baseRoot(w, [
+      { taskGroupId: 'tg-root', versionId: 'tgv-root-v1' },
+      { taskGroupId: 'tg-mid', versionId: 'tgv-mid-v1' },
+      { taskGroupId: 'tg-leaf', versionId: 'tgv-leaf-v1' },
+    ]);
+    task(w, 'tg-root', 'tgv-root-v1', 'P', { order: 1, childTaskGroupId: 'tg-mid', childTaskGroupVersionId: 'tgv-mid-v1', expectedPlan: { expectedDepth: 1 } });
+    group(w, 'tg-mid', 'tgv-mid-v1'); version(w, 'tg-mid', 'tgv-mid-v1');
+    task(w, 'tg-mid', 'tgv-mid-v1', 'Q', { order: 1, childTaskGroupId: 'tg-leaf', childTaskGroupVersionId: 'tgv-leaf-v1', expectedPlan: { expectedDepth: 0 } });
+    group(w, 'tg-leaf', 'tgv-leaf-v1'); version(w, 'tg-leaf', 'tgv-leaf-v1');
+    task(w, 'tg-leaf', 'tgv-leaf-v1', 'R', { order: 1 });
+    const l = ledger(w);
+    assert.equal(l.confinement.fencedTaskCount, 2, 'T9: P and Q declared expectedDepth fences (R did not)');
+    assert.equal(l.confinement.depthBudgetSum, 1, 'T9: ΣD = 1+0');
+    assert.equal(l.confinement.depthRealizedSum, 3, 'T9: Σrealized = 2+1 (version-scoped longest hop)');
+    assert.equal(l.confinement.breachCount, 2, 'T9: both P and Q overrun their fence');
+    assert.equal(l.confinement.confinementRatio, 3, 'T9: 3/1 = 3.0 (>1 = overrun pressure, NOT a reward)');
+    // 직교 가드: confinement 추가가 claimSafe/issues를 건드리지 않는다.
+    const a = auditParsedWork(parseProject(w));
+    assert.ok(!a.issues.some((i) => String(i.code).startsWith('progress')), 'T9: confinement emits no issue');
+  }
+
+  // ── T10: P4 no-fence → confinementRatio=null (미측정). dark-room 가드(§3.4c): 울타리 부재를 0-good으로 보상 금지.
+  // 독립 산출: expectedPlan 전무 → fencedTaskCount=0, 전 카운트 0, confinementRatio=null (빈 work NaN/오해 금지).
+  {
+    const root = tmp('t10'); cleanups.push(root); const w = join(root, 'work');
+    baseRoot(w);
+    task(w, 'tg-root', 'tgv-root-v1', 't', { order: 1 });
+    const l = ledger(w);
+    assert.equal(l.confinement.fencedTaskCount, 0);
+    assert.equal(l.confinement.depthBudgetSum, 0);
+    assert.equal(l.confinement.depthRealizedSum, 0);
+    assert.equal(l.confinement.breachCount, 0);
+    assert.equal(l.confinement.confinementRatio, null, 'T10: no fence declared → null (미측정, NOT 0-good)');
+  }
+
+  // ── T11: P5 divSplit — closedDiv(닫힌 발산) vs openDiv(열린 발산), decomposition-closure + surprise-convergence 두 경로.
+  // 개명(productive→closed) 필드 검증. 독립 산출(penalty 가중 + convergence 규칙 + closure 규칙):
+  //   decomp p1(자식 3 done, cc=3)→log2(4)=2 CLOSED; decomp p2(자식 1 active, cc=1)→log2(2)=1 OPEN;
+  //   surprise sc(3×{surpriseScore:0.1,nonBlockingNewUnknownIds:['n']}→converged, penalty 0.5×3=1.5) CLOSED;
+  //   surprise so(1×{blockingNewUnknownIds:['u']}, window<3→converged:false) OPEN, penalty 1.
+  //   aDiv=2+1+1.5+1=5.5, closedDiv=2+1.5=3.5, openDiv=1+1=2.0, closedShare=0.636.
+  {
+    const root = tmp('t11'); cleanups.push(root); const w = join(root, 'work');
+    baseRoot(w, [
+      { taskGroupId: 'tg-root', versionId: 'tgv-root-v1' },
+      { taskGroupId: 'tg-c1', versionId: 'tgv-c1-v1' },
+      { taskGroupId: 'tg-c2', versionId: 'tgv-c2-v1' },
+    ]);
+    task(w, 'tg-root', 'tgv-root-v1', 'p1', { order: 1, status: 'done', childTaskGroupId: 'tg-c1', childTaskGroupVersionId: 'tgv-c1-v1' });
+    task(w, 'tg-root', 'tgv-root-v1', 'p2', { order: 2, status: 'done', childTaskGroupId: 'tg-c2', childTaskGroupVersionId: 'tgv-c2-v1' });
+    task(w, 'tg-root', 'tgv-root-v1', 'sc', { order: 3, surpriseHistory: [
+      { id: 'sc1', observedAt: now, surpriseScore: 0.1, nonBlockingNewUnknownIds: ['n'] },
+      { id: 'sc2', observedAt: now, surpriseScore: 0.1, nonBlockingNewUnknownIds: ['n'] },
+      { id: 'sc3', observedAt: now, surpriseScore: 0.1, nonBlockingNewUnknownIds: ['n'] },
+    ] });
+    task(w, 'tg-root', 'tgv-root-v1', 'so', { order: 4, surpriseHistory: [
+      { id: 'so1', observedAt: now, blockingNewUnknownIds: ['u'] },
+    ] });
+    group(w, 'tg-c1', 'tgv-c1-v1'); version(w, 'tg-c1', 'tgv-c1-v1');
+    task(w, 'tg-c1', 'tgv-c1-v1', 'c1a', { order: 1, status: 'done' });
+    task(w, 'tg-c1', 'tgv-c1-v1', 'c1b', { order: 2, status: 'done' });
+    task(w, 'tg-c1', 'tgv-c1-v1', 'c1c', { order: 3, status: 'done' });
+    group(w, 'tg-c2', 'tgv-c2-v1'); version(w, 'tg-c2', 'tgv-c2-v1');
+    task(w, 'tg-c2', 'tgv-c2-v1', 'c2a', { order: 1, status: 'active' });
+    const l = ledger(w);
+    assert.equal(l.aDiv, 5.5, 'T11: 2+1+1.5+1 (κ 공식 불변)');
+    assert.equal(l.divSplit.closedDiv, 3.5, 'T11: decomp-closed(2) + surprise-converged(1.5)');
+    assert.equal(l.divSplit.openDiv, 2, 'T11: decomp-open(1) + surprise-unconverged(1)');
+    assert.equal(l.divSplit.closedShare, 0.636, 'T11: round3(3.5/5.5)');
+    assert.equal(l.divSplit.closedDiv + l.divSplit.openDiv, l.aDiv, 'T11: 불변식 closedDiv+openDiv===aDiv');
+  }
+
+  // ── T12: P6 flagship convergenceHonestyGap — κ≥1 ∧ claimSafe=false → TRUE(canonical 재현); κ<1 → FALSE(minimal 재현).
+  // '많이 수렴(κ≥1) ≠ 정직 완료'. canonical: aDiv=1, done+verified transport=3 → κ=3.0, policyApproved 미설정 → claimSafe=false ⇒ gap.
+  // minimal: aDiv=5.5(penalty 3·1+1·2+0.5·1), transport=0 → κ=0 ⇒ gap=false(claimSafe=false여도).
+  {
+    const rootC = tmp('t12c'); cleanups.push(rootC); const wC = join(rootC, 'work');
+    baseRoot(wC);
+    task(wC, 'tg-root', 'tgv-root-v1', 't', { status: 'done', surpriseHistory: [{ id: 's1', observedAt: now, blockingNewUnknownIds: ['u1'] }] });
+    eow(wC, 'tg-root', 'tgv-root-v1', 't', { assuranceTier: 'verified' });
+    const aC = auditParsedWork(parseProject(wC));
+    assert.equal(aC.progress.kappaReabsorb, 3, 'T12: canonical κ = 3/1');
+    assert.equal(aC.claimSafe, false, 'T12: canonical not policy-approved');
+    assert.equal(aC.progressFlags.convergenceHonestyGap, true, 'T12: κ≥1 ∧ claimSafe=false → gap TRUE');
+    assert.equal(aC.progressFlags.components.kappa, 3, 'T12: components expose kappa');
+    assert.equal(aC.progressFlags.components.claimSafe, false, 'T12: components expose claimSafe');
+
+    const rootM = tmp('t12m'); cleanups.push(rootM); const wM = join(rootM, 'work');
+    baseRoot(wM);
+    task(wM, 'tg-root', 'tgv-root-v1', 't', { status: 'active', surpriseHistory: [{ id: 's1', observedAt: now, contradictedKnownIds: ['k1'], blockingNewUnknownIds: ['u1', 'u2'], nonBlockingNewUnknownIds: ['u3'] }] });
+    const aM = auditParsedWork(parseProject(wM));
+    assert.equal(aM.progress.kappaReabsorb, 0, 'T12: minimal κ = 0/5.5 = 0');
+    assert.equal(aM.claimSafe, false);
+    assert.equal(aM.progressFlags.convergenceHonestyGap, false, 'T12: κ<1 → no gap even when claimSafe=false');
+  }
+
+  // ── T13: P6 objectiveDriftCooccurrence — 실제 재버전화(1 group·2 versions) ∧ contradicted_known 공존 → TRUE; 단일버전 → FALSE.
+  // 트리거 versions.size>taskGroups.size. 공존(co-occurrence)만 flag, 인과 미주장.
+  {
+    const rootR = tmp('t13r'); cleanups.push(rootR); const wR = join(rootR, 'work');
+    baseRoot(wR);
+    version(wR, 'tg-root', 'tgv-root-v2'); // 재버전화: 같은 group의 2번째 버전(unselected) → versions.size=2, taskGroups.size=1
+    task(wR, 'tg-root', 'tgv-root-v1', 't', { status: 'active', surpriseHistory: [{ id: 's1', observedAt: now, contradictedKnownIds: ['k1'] }] });
+    const aR = auditParsedWork(parseProject(wR));
+    assert.equal(aR.progressFlags.components.taskGroupVersionCount, 2, 'T13: 2 versions');
+    assert.equal(aR.progressFlags.components.taskGroupCount, 1, 'T13: 1 group');
+    assert.equal(aR.progressFlags.components.contradictedKnownPresent, true);
+    assert.equal(aR.progressFlags.objectiveDriftCooccurrence, true, 'T13: 재버전화(2>1) ∧ contradicted_known → drift co-occurrence');
+
+    const rootS = tmp('t13s'); cleanups.push(rootS); const wS = join(rootS, 'work');
+    baseRoot(wS);
+    task(wS, 'tg-root', 'tgv-root-v1', 't', { status: 'active', surpriseHistory: [{ id: 's1', observedAt: now, contradictedKnownIds: ['k1'] }] });
+    const aS = auditParsedWork(parseProject(wS));
+    assert.equal(aS.progressFlags.components.taskGroupVersionCount, 1, 'T13: single version');
+    assert.equal(aS.progressFlags.objectiveDriftCooccurrence, false, 'T13: 1>1 false → no drift even with contradicted_known');
+  }
+
+  // ── T13b: [데이터-렌즈 CONFIRMED 회귀 락] 재버전화 아닌 순수 분해(root+child = 2 versions·2 groups)는 drift 아님.
+  // 교정 트리거 versions.size>taskGroups.size 검증: 2>2 false. 원안 versions.size>1이면 high surprise와 공존해 잘못 TRUE.
+  {
+    const root = tmp('t13b'); cleanups.push(root); const w = join(root, 'work');
+    baseRoot(w, [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }, { taskGroupId: 'tg-child', versionId: 'tgv-child-v1' }]);
+    task(w, 'tg-root', 'tgv-root-v1', 'p', { order: 1, status: 'done', childTaskGroupId: 'tg-child', childTaskGroupVersionId: 'tgv-child-v1' });
+    group(w, 'tg-child', 'tgv-child-v1'); version(w, 'tg-child', 'tgv-child-v1');
+    task(w, 'tg-child', 'tgv-child-v1', 'c', { order: 1, status: 'active', surpriseHistory: [{ id: 'sh', observedAt: now, surpriseScore: 0.7 }] });
+    const a = auditParsedWork(parseProject(w));
+    assert.equal(a.progressFlags.components.taskGroupVersionCount, 2, 'T13b: root+child = 2 versions');
+    assert.equal(a.progressFlags.components.taskGroupCount, 2, 'T13b: root+child = 2 groups');
+    assert.equal(a.progressFlags.components.highSurprisePresent, true, 'T13b: surpriseScore 0.7 ≥ 0.67');
+    assert.equal(a.progressFlags.objectiveDriftCooccurrence, false, 'T13b: 2>2 false → 분해≠drift (원 트리거였다면 오발화 TRUE)');
+  }
+
+  // ── T14: P4/P5/P6 additive orthogonality — progress 확장이 claimSafe/issues/strictSafe를 불변으로 유지(T6 확장).
+  // base vs +divergence vs +confinement vs +flags: audit.claimSafe/issues.length/strictSafe 동일, progress emits no issue.
+  // convergenceHonestyGap이 base=false→flags=true로 바뀌어도 claimSafe 불변(progress ⟂ claimSafe 병합 금지 실증).
+  {
+    const mk = (tag, build) => { const root = tmp(tag); cleanups.push(root); const w = join(root, 'work'); build(w); return auditParsedWork(parseProject(w)); };
+    const base = mk('t14base', (w) => { baseRoot(w); task(w, 'tg-root', 'tgv-root-v1', 't1', { order: 1 }); task(w, 'tg-root', 'tgv-root-v1', 't2', { order: 2 }); });
+    const div = mk('t14div', (w) => { baseRoot(w); task(w, 'tg-root', 'tgv-root-v1', 't1', { order: 1, surpriseHistory: [{ id: 's1', observedAt: now, blockingNewUnknownIds: ['u1', 'u2', 'u3', 'u4'] }] }); task(w, 'tg-root', 'tgv-root-v1', 't2', { order: 2 }); });
+    const conf = mk('t14conf', (w) => {
+      baseRoot(w, [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }, { taskGroupId: 'tg-ch', versionId: 'tgv-ch-v1' }]);
+      task(w, 'tg-root', 'tgv-root-v1', 't1', { order: 1, childTaskGroupId: 'tg-ch', childTaskGroupVersionId: 'tgv-ch-v1', expectedPlan: { expectedDepth: 1 } });
+      task(w, 'tg-root', 'tgv-root-v1', 't2', { order: 2 });
+      group(w, 'tg-ch', 'tgv-ch-v1'); version(w, 'tg-ch', 'tgv-ch-v1');
+      task(w, 'tg-ch', 'tgv-ch-v1', 'c1', { order: 1, status: 'active' });
+    });
+    const flags = mk('t14flags', (w) => {
+      baseRoot(w);
+      task(w, 'tg-root', 'tgv-root-v1', 't1', { order: 1, status: 'done', surpriseHistory: [{ id: 's1', observedAt: now, blockingNewUnknownIds: ['u1'] }] });
+      eow(w, 'tg-root', 'tgv-root-v1', 't1', { assuranceTier: 'verified' });
+      task(w, 'tg-root', 'tgv-root-v1', 't2', { order: 2, status: 'active' });
+    });
+    for (const [name, a] of [['div', div], ['conf', conf], ['flags', flags]]) {
+      assert.equal(a.claimSafe, base.claimSafe, `T14: ${name} claimSafe byte-unchanged`);
+      assert.equal(a.issues.length, base.issues.length, `T14: ${name} issue count byte-unchanged`);
+      assert.equal(a.strictSafe, base.strictSafe, `T14: ${name} strictSafe byte-unchanged`);
+      assert.ok(!a.issues.some((i) => String(i.code).startsWith('progress')), `T14: ${name} progress emits no issue`);
+      assert.ok('confinement' in a.progress && 'divSplit' in a.progress, `T14: ${name} progress has confinement+divSplit siblings`);
+      assert.ok('progressFlags' in a, `T14: ${name} progressFlags present as top-level sibling`);
+    }
+    assert.equal(base.progressFlags.convergenceHonestyGap, false, 'T14: base no gap');
+    assert.equal(flags.progressFlags.convergenceHonestyGap, true, 'T14: flags gap TRUE while claimSafe identical to base');
+    assert.equal(flags.claimSafe, base.claimSafe, 'T14: gap flip does NOT merge into claimSafe (직교)');
+  }
+
+  // ── T15: progress-empty work(active task만) — P4/P5/P6 전부 NaN/Infinity 없이 graceful (실측 17/19 sparsity 재현).
+  {
+    const root = tmp('t15'); cleanups.push(root); const w = join(root, 'work');
+    baseRoot(w);
+    task(w, 'tg-root', 'tgv-root-v1', 't', { status: 'active' });
+    const a = auditParsedWork(parseProject(w));
+    const p = a.progress;
+    assert.equal(p.aDiv, 0);
+    assert.equal(p.confinement.fencedTaskCount, 0);
+    assert.equal(p.confinement.confinementRatio, null, 'T15: no fence → null');
+    assert.deepEqual(p.divSplit, { closedDiv: 0, openDiv: 0, closedShare: null }, 'T15: empty divSplit graceful');
+    assert.equal(p.kappaReabsorb, null);
+    assert.equal(a.progressFlags.convergenceHonestyGap, false, 'T15: κ=null → gap false');
+    assert.equal(a.progressFlags.objectiveDriftCooccurrence, false, 'T15: 1 version·1 group → drift false');
+    for (const v of [p.confinement.confinementRatio, p.confinement.depthBudgetSum, p.confinement.depthRealizedSum, p.divSplit.closedShare, p.divSplit.closedDiv, p.divSplit.openDiv]) {
+      assert.ok(v === null || Number.isFinite(v), 'T15: every new metric is null or finite (no NaN/Infinity)');
+    }
+  }
+
+  // ── T16: [데이터-렌즈 test-coverage] fencedTaskCount>0 & 모든 D=0 → depthBudgetSum=0 → confinementRatio=null, breachCount 1차.
+  // T10(fencedTaskCount=0 no-fence)와 구별: 여기선 fence는 있으나 예산이 0이라 ratio 미정의이고 breach가 신호를 나른다.
+  {
+    const root = tmp('t16'); cleanups.push(root); const w = join(root, 'work');
+    baseRoot(w, [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }, { taskGroupId: 'tg-ch', versionId: 'tgv-ch-v1' }]);
+    task(w, 'tg-root', 'tgv-root-v1', 'p', { order: 1, childTaskGroupId: 'tg-ch', childTaskGroupVersionId: 'tgv-ch-v1', expectedPlan: { expectedDepth: 0 } });
+    group(w, 'tg-ch', 'tgv-ch-v1'); version(w, 'tg-ch', 'tgv-ch-v1');
+    task(w, 'tg-ch', 'tgv-ch-v1', 'c', { order: 1 });
+    const l = ledger(w);
+    assert.equal(l.confinement.fencedTaskCount, 1, 'T16: p declared an expectedDepth=0 fence');
+    assert.equal(l.confinement.depthBudgetSum, 0, 'T16: ΣD = 0');
+    assert.equal(l.confinement.depthRealizedSum, 1, 'T16: p→c realized depth 1');
+    assert.equal(l.confinement.breachCount, 1, 'T16: realized 1 > 0 = breach (primary signal when budget=0)');
+    assert.equal(l.confinement.confinementRatio, null, 'T16: depthBudgetSum=0 → null (distinct from T10 no-fence null; NOT 0-good)');
+  }
+
+  console.log('progress-ledger: OK (T1-T16)');
 } finally {
   for (const root of cleanups) rmSync(root, { recursive: true, force: true });
 }

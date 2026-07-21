@@ -431,6 +431,39 @@ export function auditParsedWork(parsed, options = {}) {
     && parsed.closure?.policyApprovedComplete === true
     && unresolvedPartialCount === 0
     && repeatedReviewTaskCount === 0;
+  // Progress axis (P1-P6; spec docs/theory/divergence-convergence-v0.md). Hoisted above the return so the P6 flags
+  // can read BOTH the ledger (kappaReabsorb) AND claimSafe WITHOUT merging them: progressFlags EXPOSES the
+  // (progress × honesty) combination as measurement-only booleans, contributes ZERO issues, and never touches the
+  // claimSafe/strictSafe/counts expressions. progressLedger stays a pure function that never sees claimSafe.
+  const progress = progressLedger(parsed);
+  let contradictedKnownPresent = false;
+  let highSurprisePresent = false; // lib-runner.js:592 high_surprise predicate mirror
+  for (const task of selectedTasks(parsed)) {
+    const history = Array.isArray(task.surpriseHistory) ? task.surpriseHistory : [];
+    for (const entry of history) {
+      if (!entry || typeof entry !== 'object') continue;
+      if (Array.isArray(entry.contradictedKnownIds) && entry.contradictedKnownIds.length > 0) contradictedKnownPresent = true;
+      if (String(entry.surpriseLevel || '').trim() === 'high' || Number(entry.surpriseScore) >= 0.67) highSurprisePresent = true;
+    }
+  }
+  const progressFlags = {
+    // §4.3/O4: 많이 접었는데(κ>=1) 정직완료 아님(claimSafe=false) = 틀린 데로 수렴 의심(canonical이 실측 앵커).
+    // κ의 규약-상대성을 상속한 heuristic suspicion SCREEN이지 원리적 수렴경계 아님 — gate/claimSafe 라우팅 금지.
+    // null 가드 필수(null>=1 의존 금지 → null=신호없음).
+    convergenceHonestyGap: progress.kappaReabsorb != null && progress.kappaReabsorb >= 1 && claimSafe === false,
+    // §3.4a/후보 C: 실제 재버전화(versions.size>taskGroups.size ⟺ 한 group이 >=2 버전)와 contradicted/high-surprise의
+    // CO-OCCURRENCE만 flag하며 인과는 주장하지 않는다(measurement-only). 원안 versions.size>1은 '분해했는가'라는
+    // 구조적 상수라 오발화 → versions.size>taskGroups.size로 교정(실측 canonical/minimal 둘 다 FALSE로 정정).
+    objectiveDriftCooccurrence: parsed.versions.size > parsed.taskGroups.size && (contradictedKnownPresent || highSurprisePresent),
+    components: {
+      kappa: progress.kappaReabsorb,
+      claimSafe,
+      taskGroupVersionCount: parsed.versions.size,
+      taskGroupCount: parsed.taskGroups.size,
+      contradictedKnownPresent,
+      highSurprisePresent,
+    },
+  };
   return {
     workId: parsed.project?.id || null,
     projectDir: parsed.projectDir,
@@ -442,7 +475,12 @@ export function auditParsedWork(parsed, options = {}) {
     // Progress ledger (divergence/convergence axis; spec docs/theory/divergence-convergence-v0.md): a sibling to
     // `assurance`, ORTHOGONAL to claimSafe — measurement only, contributes ZERO issues and never touches the
     // claimSafe/strictSafe/counts expressions. The only coupling is numeric (transport borrows DONE_TIER_RANK).
-    progress: progressLedger(parsed),
+    // P4 confinement / P5 divSplit live as additive sub-objects INSIDE progress.
+    progress,
+    // P6 progress×honesty flags (measurement-only, additive top-level sibling): EXPOSES the combination as booleans,
+    // contributes ZERO issues, never merged into a scalar and never routed into claimSafe/strictSafe. See
+    // progress.limitations for why neither flag may be used as a gate/reward (§4.3 Goodhart; drift co-occurrence≠causation).
+    progressFlags,
     counts,
     metrics: {
       selectedTaskCount: selectedTasks(parsed).length,
@@ -474,6 +512,8 @@ export function renderAuditText(audit) {
   ];
   // Progress axis (measurement-only sibling): one appended line, orthogonal to claimSafe (never routed into issues).
   lines.push(renderProgressLedgerText(audit.progress));
+  // P6 progress×honesty flags (measurement-only; never a gate). Additive line — existing line shapes above unchanged.
+  lines.push(`progressFlags convergenceHonestyGap=${audit.progressFlags?.convergenceHonestyGap === true} objectiveDriftCooccurrence=${audit.progressFlags?.objectiveDriftCooccurrence === true} (measurement-only; not a gate)`);
   if (audit.validationErrors.length > 0) {
     lines.push('validation errors:');
     for (const err of audit.validationErrors) lines.push(`- ${err}`);

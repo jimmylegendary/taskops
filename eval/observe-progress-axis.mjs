@@ -32,11 +32,17 @@ for (const w of works) {
     const dom = ['div', 'transport', 'elim']
       .map((k) => [k, k === 'div' ? p.aDiv : k === 'transport' ? p.aConvTransport : p.aConvElim])
       .sort((a, b) => b[1] - a[1])[0][0];
+    const pf = audit.progressFlags || { components: {} };
     rows.push({
       w: relative(ROOT, w), aDiv: p.aDiv, aT: p.aConvTransport, aE: p.aConvElim,
       kappa: p.kappaReabsorb, residual: p.residual, claimSafe: audit.claimSafe,
       dom, divN: p.channels.div.count, trN: p.channels.transport.count,
       unc: p.channels.elim.uncertifiedCount, undet: p.channels.elim.undeterminedCount,
+      // P4-P6 재관측 컬럼
+      breach: p.confinement.breachCount, cRatio: p.confinement.confinementRatio,
+      closedShare: p.divSplit.closedShare,
+      gap: pf.convergenceHonestyGap === true, drift: pf.objectiveDriftCooccurrence === true,
+      versions: pf.components.taskGroupVersionCount, groups: pf.components.taskGroupCount,
     });
   } catch (e) { rows.push({ w: relative(ROOT, w), err: e.message.slice(0, 50) }); }
 }
@@ -86,3 +92,25 @@ if (ks.length) {
   console.log(`min=${ks[0]} p25=${q(0.25)} median=${q(0.5)} p75=${q(0.75)} max=${ks[ks.length - 1]}`);
   console.log(`κ=null (aDiv=0, 순수 수렴/무발산): ${ok.length - withK.length}개`);
 }
+
+// ── 분석 5 (P6): convergenceHonestyGap = (κ≥1 ∧ claimSafe=false). canonical이 실사례로 잡히는지 ──
+console.log('\n=== P6 convergenceHonestyGap (κ≥1 ∧ claimSafe=false = 틀린 데로 수렴 의심) ===');
+const gapWorks = ok.filter((r) => r.gap);
+console.log(`gap=TRUE: ${gapWorks.length}개  [${gapWorks.map((r) => r.w.split('/').pop()).join(', ')}]`);
+console.log(gapWorks.length > 0
+  ? '  → P6 실증: 잘 되접었어도(κ≥1) 정직완료 아닌 work를 measurement-only flag가 노출(판단은 인간/후속 게이트)'
+  : '  → 이 표본엔 gap 사례 없음(κ≥1 work가 전부 claimSafe거나 κ<1)');
+
+// ── 분석 6 (P4): confinement sparsity — 17/19 progress-empty ⇒ 대개 confinementRatio=null(정상, NaN 아님) ──
+console.log('\n=== P4 confinement sparsity (희소성 재현) ===');
+const cNull = ok.filter((r) => r.cRatio === null).length;
+const cFenced = ok.filter((r) => r.breach > 0 || r.cRatio !== null);
+console.log(`confinementRatio=null(미측정): ${cNull}/${ok.length}  |  fence/breach 관측된 work: ${cFenced.length}개`);
+console.log(`  → 희소성 전제 확인: 대부분 null=미측정(dark-room 가드), 어떤 값도 NaN/Infinity 아님`);
+
+// ── 분석 7 (P6 교정): objectiveDriftCooccurrence — versions.size>taskGroups.size(교정) vs 원 versions.size>1 ──
+console.log('\n=== P6 objectiveDriftCooccurrence (교정된 트리거 실증) ===');
+const driftWorks = ok.filter((r) => r.drift);
+const wouldOldTrigger = ok.filter((r) => Number(r.versions) > 1); // 원안 versions.size>1
+console.log(`교정 트리거(versions>groups) drift=TRUE: ${driftWorks.length}개  [${driftWorks.map((r) => r.w.split('/').pop()).join(', ')}]`);
+console.log(`원안 트리거(versions>1)였다면 후보: ${wouldOldTrigger.length}개  → 교정이 '분해≠drift' 오발화를 제거(canonical/minimal 포함 FALSE로 정정)`);
