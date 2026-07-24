@@ -328,6 +328,16 @@ try {
     verifyChecks: true,
   });
   assert.equal(parseMarkdownFile(taskPath).status, 'done');
+  const completedExplain = explainWork(workDir);
+  assert.equal(completedExplain.complete, true);
+  assert.deepEqual(completedExplain.readinessCounts, {
+    runnable: 0,
+    needs_decomposition: 0,
+    needs_exploration: 0,
+    needs_prototype: 0,
+    blocked: 0,
+    waiting: 0,
+  });
   console.log('OK prototype state machine');
 } finally {
   delete process.env.TASKOPS_OPENCLAW_BIN;
