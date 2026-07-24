@@ -6,7 +6,8 @@ runId: run-alpha-v1
 graphType: run
 attachedToType: runNode
 attachedToId: run-landing-test
-reason: execution_path_closed
+reason: experiment_recorded
+closureRole: supporting
 declaredBy: ai
 declaredAt: 2026-05-08T04:45:00+09:00
 createdAt: 2026-05-08T04:45:00+09:00

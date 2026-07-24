@@ -110,7 +110,9 @@ try {
   assert.equal(runNode.status, 'done', 'worker turn should close successfully even when the task remains incomplete');
   assert.equal(runNode.result.partialCompletion.partialId, partialCompletion.partialId);
   const partialRunEowPath = join(workDir, 'runs', runResult.runId, 'nodes', `eow-${runResult.actions[0].runNodeId}.md`);
-  assert.equal(existsSync(partialRunEowPath), false, 'runner partial must not create canonical run-node EoW before promotion');
+  assert.equal(existsSync(partialRunEowPath), true, 'runner partial closes the completed attempt without closing the task');
+  assert.equal(parseMarkdownFile(partialRunEowPath).reason, 'partial_recorded');
+  assert.equal(parseMarkdownFile(partialRunEowPath).closureRole, 'supporting');
 
   const prePromotionRecheck = recheckBlockedTasks(workDir, { allowConcurrentTarget: true, runId: runResult.runId });
   assert.equal(prePromotionRecheck.unblocked.length, 0, 'awaiting-promotion tasks must not be unblocked before promote-partials');
@@ -129,7 +131,7 @@ try {
   assert.equal(promoted.appliedVersionPlans[0].closedSourceRunNodes.length, 1);
   assert.equal(promoted.appliedVersionPlans[0].closedSourceRunNodes[0].runNodeId, runResult.actions[0].runNodeId);
   assert.equal(existsSync(partialRunEowPath), true, 'promotion should close the successful partial source run node');
-  assert.equal(parseMarkdownFile(partialRunEowPath).reason, 'partial_follow_up_promoted');
+  assert.equal(parseMarkdownFile(partialRunEowPath).reason, 'partial_recorded', 'promotion must preserve the immutable attempt closure');
 
   const promotedSourcePath = join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'tasks', 'task-main.md');
   const promotedSource = parseMarkdownFile(promotedSourcePath);

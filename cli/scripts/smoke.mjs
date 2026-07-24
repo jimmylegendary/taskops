@@ -2157,7 +2157,7 @@ const delegatedEntrypointOut = JSON.parse(run([
 ]).stdout);
 const delegatedEntrypointCycle = delegatedEntrypointOut.cycles[0];
 const delegatedEntrypointWave = delegatedEntrypointCycle.waveDetails[0];
-if (delegatedEntrypointCycle.stopReason !== 'graph_closed_unapproved' || delegatedEntrypointCycle.claimedItems !== 1 || delegatedEntrypointWave?.releaseStatus !== 'done' || delegatedEntrypointWave?.targetCompleted !== true) {
+if (delegatedEntrypointCycle.stopReason !== 'all_closed' || delegatedEntrypointCycle.claimedItems !== 1 || delegatedEntrypointWave?.releaseStatus !== 'done' || delegatedEntrypointWave?.targetCompleted !== true) {
   console.error('high-level delegate entrypoint should reuse daemon run internals and complete the claimed task');
   console.error(delegatedEntrypointOut);
   process.exit(1);

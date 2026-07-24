@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { canonicalSha256 } from '../lib-run-closure.js';
 import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
 import { explainWork, pickNextAction } from '../lib-runner.js';
 
@@ -13,7 +14,7 @@ const now = '2026-06-26T00:00:00.000Z';
 const root = mkdtempSync(join(tmpdir(), 'taskops-a6-'));
 const w = join(root, 'work');
 const tv = 'task-groups/tg-root/versions/tgv-root-v1';
-for (const d of [`${tv}/tasks`, `${tv}/eow`, 'snapshots']) mkdirSync(join(w, d), { recursive: true });
+for (const d of [`${tv}/tasks`, `${tv}/eow`, 'snapshots', 'runs/run-main/nodes', 'runs/run-main/edges']) mkdirSync(join(w, d), { recursive: true });
 const md = (p, fm) => writeFileSync(join(w, p), `${fmBlock(fm)}# ${fm.id}\n`, 'utf8');
 
 md('index.md', { taskOpsVersion: 'v1', entityType: 'work', id: 'a6-work', title: 'A', objective: 'x', activeRootTaskGroupId: 'tg-root', activeSnapshotId: 'snapshot-root-v1', createdAt: now, status: 'active' });
@@ -21,13 +22,23 @@ md('task-groups/tg-root/index.md', { taskOpsVersion: 'v1', entityType: 'taskGrou
 md(`${tv}/index.md`, { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: 'tgv-root-v1', taskGroupId: 'tg-root', version: 'v1', summary: 's', selected: true, createdAt: now, status: 'active' });
 md('snapshots/snapshot-root-v1.md', { taskOpsVersion: 'v1', entityType: 'versionSnapshot', id: 'snapshot-root-v1', rootTaskGroupId: 'tg-root', createdAt: now, label: 'R', status: 'active', selectedVersions: [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }] });
 const taskFile = `${tv}/tasks/task-01.md`;
-md(taskFile, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-01', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'done', order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known' });
+md(taskFile, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-01', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'done', order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known', runRefs: [{ runId: 'run-main', runNodeId: 'run-node-01', role: 'primary_execution' }] });
 // P0#6 (R1B2 택1): clean baseline은 POLICY-APPROVED review EoW로 닫는다. execution_path_closed는 이제
 // structurally_complete_unapproved(미승인)로 떨어져 clean.complete=false가 되므로, A6의 discriminator를 EXACTLY
 // validation-errors로 보존하려면(clean=approved+no-error=complete vs invalid=approved+error=not-complete) clean을
 // 진짜 policy-approved로 만든다. 택2(양쪽을 graph_closed_unapproved로)는 두 극을 complete=false로 붕괴시켜 A6를
 // vacuous하게 만들므로 금지.
-md(`${tv}/eow/eow-task-01.md`, { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-01', graphType: 'task', attachedToType: 'task', attachedToId: 'task-01', taskGroupVersionId: 'tgv-root-v1', reason: 'approved_result', approvedByReviewNodeId: 'run-node-review-01', approvedReviewMode: 'runner-managed', approvedReviewReportHash: 'h-report', reviewedAcceptanceHash: 'h-acc', reviewedResultHash: 'h-res', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
+const reviewReport = { decision: 'approved', mode: 'runner-managed', reviewedAcceptanceHash: 'h-acc', reviewedResultHash: 'h-res' };
+const reviewReportHash = canonicalSha256(reviewReport);
+const approvedFields = { approvedByReviewNodeId: 'run-node-review-01', approvedReviewMode: 'runner-managed', approvedReviewReportHash: reviewReportHash, reviewedAcceptanceHash: 'h-acc', reviewedResultHash: 'h-res' };
+md(`${tv}/eow/eow-task-01.md`, { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-01', graphType: 'task', attachedToType: 'task', attachedToId: 'task-01', taskGroupVersionId: 'tgv-root-v1', reason: 'approved_result', ...approvedFields, declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
+md('runs/run-main/index.md', { taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: 'a6-work', createdAt: now, status: 'done' });
+md('runs/run-main/nodes/run-node-01.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-01', runId: 'run-main', type: 'implementation', title: 'Implementation', sourceTaskId: 'task-01', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now });
+md('runs/run-main/nodes/run-node-review-01.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review-01', runId: 'run-main', type: 'review', title: 'Review', sourceTaskId: 'task-01', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, reviewsRunNodeId: 'run-node-01', reviewedRunId: 'run-main', reviewReport, reviewReportHash });
+md('runs/run-main/nodes/eow-run-node-01.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-01', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-01', reason: 'approved_result', closureRole: 'claim-bearing', ...approvedFields, declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
+md('runs/run-main/nodes/eow-run-node-review-01.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-review-01', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-review-01', reason: 'review_recorded', closureRole: 'supporting', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
+md('runs/run-main/edges/edge-run-node-01-to-review.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-run-node-01-to-review', runId: 'run-main', fromRunNodeId: 'run-node-01', toRunNodeId: 'run-node-review-01', edgeType: 'reviews', createdAt: now, status: 'done' });
+md('runs/run-main/edges/edge-review-to-eow.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-review-to-eow', runId: 'run-main', fromRunNodeId: 'run-node-review-01', toRunNodeId: 'eow-run-node-review-01', edgeType: 'closes_with', createdAt: now, status: 'done' });
 
 // baseline: a clean structurally-complete graph reports complete/done.
 const clean = explainWork(w);

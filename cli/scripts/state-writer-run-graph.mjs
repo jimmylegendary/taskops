@@ -166,7 +166,7 @@ function applyApprovedReviewToEow(fm) {
   fm.reviewedResultHash = approvedReview.reviewedResultHash;
 }
 
-function legacyCloseRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, approvedReview: review = null }) {
+function legacyCloseRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, closureRole, approvedReview: review = null }) {
   const eowRunNodeId = `eow-${runNodeId}`;
   const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
   if (!existsSync(eowRunPath)) {
@@ -179,6 +179,7 @@ function legacyCloseRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedA
       attachedToType: 'runNode',
       attachedToId: runNodeId,
       reason,
+      closureRole,
       declaredBy: 'taskops-runner',
       declaredAt: finishedAt,
       createdAt: finishedAt,
@@ -271,7 +272,7 @@ function runLegacy(root) {
     toRunNodeId: 'run-node-review-task-a', edgeType: 'reviewed_by', createdAt: fixedNow,
     note: 'custom note',
   });
-  legacyCloseRunNodeWithEow({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', finishedAt: fixedNow, approvedReview });
+  legacyCloseRunNodeWithEow({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', closureRole: 'supporting', finishedAt: fixedNow, approvedReview });
   legacyCloseTaskWithEow({ task: { id: 'task-a', path: taskPath }, reason: 'completed', finishedAt: fixedNow, approvedReview });
 }
 
@@ -296,7 +297,7 @@ function runFacade(root) {
     toRunNodeId: 'run-node-review-task-a', edgeType: 'reviewed_by', createdAt: fixedNow,
     note: 'custom note',
   }, io);
-  closeRunNodeWithEowFiles({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', finishedAt: fixedNow, approvedReview }, io);
+  closeRunNodeWithEowFiles({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', closureRole: 'supporting', finishedAt: fixedNow, approvedReview }, io);
   closeTaskWithEowFile({ task: { id: 'task-a', path: taskPath }, reason: 'completed', finishedAt: fixedNow, approvedReview }, io);
 }
 
@@ -321,6 +322,28 @@ const facadeRoot = join(tempRoot, 'facade');
 runLegacy(legacyRoot);
 runFacade(facadeRoot);
 assert.deepEqual(treeSnapshot(facadeRoot), treeSnapshot(legacyRoot), 'run graph/EoW facade output should match legacy output byte-for-byte');
+assert.throws(
+  () => closeRunNodeWithEowFiles({
+    runDir: join(facadeRoot, 'runs', 'run-main'),
+    runId: 'run-main',
+    runNodeId: 'run-node-task-a',
+    reason: 'different-reason',
+    closureRole: 'supporting',
+    finishedAt: fixedNow,
+  }, stateWriterIo()),
+  /Immutable run EoW mismatch for run-node-task-a: reason/,
+);
+assert.throws(
+  () => closeRunNodeWithEowFiles({
+    runDir: join(facadeRoot, 'runs', 'run-main'),
+    runId: 'run-main',
+    runNodeId: 'run-node-task-a',
+    reason: 'completed',
+    closureRole: 'claim-bearing',
+    finishedAt: fixedNow,
+  }, stateWriterIo()),
+  /Immutable run EoW mismatch for run-node-task-a: closureRole/,
+);
 const persistedRunNode = parseMarkdownFile(join(facadeRoot, 'runs', 'run-main', 'nodes', 'run-node-task-a.md'));
 assert.equal(persistedRunNode.actionKind, 'execute');
 assert.equal(persistedRunNode.attempt, 1);

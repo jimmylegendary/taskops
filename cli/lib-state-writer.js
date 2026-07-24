@@ -149,10 +149,14 @@ function applyApprovedReviewToEow(fm, approvedReview) {
   if (approvedReview.oracleAccess) fm.oracleAccess = approvedReview.oracleAccess;
 }
 
-export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }, io) {
+export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, closureRole, approvedReview = null, resolvedByTaskGroupId = null }, io) {
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
+  const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
+  if (!['supporting', 'claim-bearing'].includes(closureRole)) {
+    throw new Error(`Invalid run EoW closureRole '${closureRole}' for ${runNodeId}`);
+  }
   const eowRunNodeId = `eow-${runNodeId}`;
   const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
   if (!exists(eowRunPath)) {
@@ -165,6 +169,7 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
       attachedToType: 'runNode',
       attachedToId: runNodeId,
       reason,
+      closureRole,
       declaredBy: 'taskops-runner',
       declaredAt: finishedAt,
       createdAt: finishedAt,
@@ -173,6 +178,18 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
     if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') eowFm.resolvedByTaskGroupId = resolvedByTaskGroupId;
     applyApprovedReviewToEow(eowFm, approvedReview);
     writeTextFile(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
+  } else {
+    const current = parseMarkdownFile(eowRunPath);
+    for (const [field, expected] of Object.entries({
+      runId,
+      attachedToId: runNodeId,
+      reason,
+      closureRole,
+    })) {
+      if (current[field] !== expected) {
+        throw new Error(`Immutable run EoW mismatch for ${runNodeId}: ${field}`);
+      }
+    }
   }
   const edgeId = `edge-${runNodeId}-to-eow`;
   const edgePath = join(runDir, 'edges', `${edgeId}.md`);

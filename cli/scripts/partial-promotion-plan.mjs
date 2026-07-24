@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { isPartialUnresolved, parseMarkdownFile } from '../lib-taskops.js';
+import { canonicalSha256 } from '../lib-run-closure.js';
+import { fmBlock, isPartialUnresolved, parseMarkdownFile, readBody } from '../lib-taskops.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const cli = resolve(__dirname, '..', 'bin', 'taskops.js');
@@ -48,20 +49,80 @@ function selectedVersionId(workDir) {
 
 function markTaskDoneWithApprovedEow(workDir, versionId, taskId) {
   const taskFile = taskPath(workDir, versionId, taskId);
-  let taskText = readFileSync(taskFile, 'utf8');
-  if (/status: pending/.test(taskText)) taskText = taskText.replace('status: pending', 'status: done');
-  else if (/status: blocked/.test(taskText)) taskText = taskText.replace('status: blocked', 'status: done');
-  else if (!/status: done/.test(taskText)) throw new Error(`Cannot mark ${versionId}/${taskId} done; missing status field`);
-  if (!/runReadiness: runnable/.test(taskText)) {
-    taskText = taskText.replace(/runReadiness: [^\n]+\n/, 'runReadiness: runnable\n');
-  }
-  writeFileSync(taskFile, taskText, 'utf8');
+  const runId = `run-${versionId}-${taskId}`;
+  const runNodeId = `run-node-${versionId}-${taskId}`;
+  const reviewNodeId = `review-${taskId}`;
+  const taskFm = parseMarkdownFile(taskFile);
+  taskFm.status = 'done';
+  taskFm.runReadiness = 'runnable';
+  taskFm.runRefs = [{ runId, runNodeId, role: 'primary_execution' }];
+  writeFileSync(taskFile, fmBlock(taskFm) + `${readBody(taskFile)}\n`, 'utf8');
+
+  const reviewedAcceptanceHash = `acceptance-hash-${taskId}`;
+  const reviewedResultHash = `result-hash-${taskId}`;
+  const reviewReport = {
+    decision: 'approved',
+    mode: 'guarded',
+    reviewedAcceptanceHash,
+    reviewedResultHash,
+  };
+  const reviewReportHash = canonicalSha256(reviewReport);
+  const runDir = join(workDir, 'runs', runId);
+  mkdirSync(join(runDir, 'nodes'), { recursive: true });
+  mkdirSync(join(runDir, 'edges'), { recursive: true });
+  const writeMd = (path, fm) => writeFileSync(path, `${fmBlock(fm)}# ${fm.id}\n`, 'utf8');
+  writeMd(join(runDir, 'index.md'), {
+    taskOpsVersion: 'v1', entityType: 'run', id: runId, workId: parseMarkdownFile(join(workDir, 'index.md')).id,
+    createdAt: '2026-06-27T00:00:00Z', status: 'done',
+  });
+  writeMd(join(runDir, 'nodes', `${runNodeId}.md`), {
+    taskOpsVersion: 'v1', entityType: 'runNode', id: runNodeId, runId, type: 'implementation',
+    title: `Implement ${taskId}`, sourceTaskId: taskId, sourceTaskGroupVersionId: versionId,
+    status: 'done', createdAt: '2026-06-27T00:00:00Z',
+  });
+  writeMd(join(runDir, 'nodes', `${reviewNodeId}.md`), {
+    taskOpsVersion: 'v1', entityType: 'runNode', id: reviewNodeId, runId, type: 'review',
+    title: `Review ${taskId}`, sourceTaskId: taskId, sourceTaskGroupVersionId: versionId,
+    status: 'done', createdAt: '2026-06-27T00:00:00Z', reviewsRunNodeId: runNodeId,
+    reviewedRunId: runId, reviewReport, reviewReportHash,
+  });
+  writeMd(join(runDir, 'nodes', `eow-${runNodeId}.md`), {
+    taskOpsVersion: 'v1', entityType: 'eow', id: `eow-${runNodeId}`, runId, graphType: 'run',
+    attachedToType: 'runNode', attachedToId: runNodeId, reason: 'approved_result',
+    closureRole: 'claim-bearing', declaredBy: 'smoke', declaredAt: '2026-06-27T00:00:00Z',
+    createdAt: '2026-06-27T00:00:00Z', status: 'done', approvedByReviewNodeId: reviewNodeId,
+    approvedReviewMode: 'guarded', approvedReviewReportHash: reviewReportHash,
+    reviewedAcceptanceHash, reviewedResultHash,
+  });
+  writeMd(join(runDir, 'nodes', `eow-${reviewNodeId}-${versionId}.md`), {
+    taskOpsVersion: 'v1', entityType: 'eow', id: `eow-${reviewNodeId}-${versionId}`, runId, graphType: 'run',
+    attachedToType: 'runNode', attachedToId: reviewNodeId, reason: 'review_recorded',
+    closureRole: 'supporting', declaredBy: 'smoke', declaredAt: '2026-06-27T00:00:00Z',
+    createdAt: '2026-06-27T00:00:00Z', status: 'done',
+  });
+  writeMd(join(runDir, 'edges', `edge-${runNodeId}-to-review.md`), {
+    taskOpsVersion: 'v1', entityType: 'runEdge', id: `edge-${runNodeId}-to-review`, runId,
+    fromRunNodeId: runNodeId, toRunNodeId: reviewNodeId, edgeType: 'reviews',
+    createdAt: '2026-06-27T00:00:00Z', status: 'done',
+  });
+  writeMd(join(runDir, 'edges', `edge-${reviewNodeId}-to-eow.md`), {
+    taskOpsVersion: 'v1', entityType: 'runEdge', id: `edge-${reviewNodeId}-to-eow`, runId,
+    fromRunNodeId: reviewNodeId, toRunNodeId: `eow-${reviewNodeId}-${versionId}`, edgeType: 'closes_with',
+    createdAt: '2026-06-27T00:00:00Z', status: 'done',
+  });
 
   const eowDir = join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'eow');
   mkdirSync(eowDir, { recursive: true });
   writeFileSync(
     eowPath(workDir, versionId, taskId),
-    `---\ntaskOpsVersion: v1\nentityType: eow\nid: eow-${taskId}\ngraphType: task\nattachedToType: task\nattachedToId: ${taskId}\nreason: approved_result\ndeclaredBy: smoke\ndeclaredAt: 2026-06-27T00:00:00Z\ncreatedAt: 2026-06-27T00:00:00Z\nstatus: done\ntaskGroupVersionId: ${versionId}\napprovedByReviewNodeId: review-${taskId}\napprovedReviewMode: guarded\napprovedReviewReportHash: review-hash-${taskId}\nreviewedAcceptanceHash: acceptance-hash-${taskId}\nreviewedResultHash: result-hash-${taskId}\n---\n# EoW: ${taskId}\n`,
+    fmBlock({
+      taskOpsVersion: 'v1', entityType: 'eow', id: `eow-${taskId}`, graphType: 'task',
+      attachedToType: 'task', attachedToId: taskId, reason: 'approved_result', declaredBy: 'smoke',
+      declaredAt: '2026-06-27T00:00:00Z', createdAt: '2026-06-27T00:00:00Z',
+      status: 'done', taskGroupVersionId: versionId, approvedByReviewNodeId: reviewNodeId,
+      approvedReviewMode: 'guarded', approvedReviewReportHash: reviewReportHash,
+      reviewedAcceptanceHash, reviewedResultHash,
+    }) + `# EoW: ${taskId}\n`,
     'utf8',
   );
 }

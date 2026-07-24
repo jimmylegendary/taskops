@@ -19,6 +19,7 @@ import {
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeRuntimeAdapter, executorForRuntime } from './lib-runtime-adapters.js';
 import { allocateRunNodeIdentity } from './lib-run-identity.js';
+import { canonicalSha256 } from './lib-run-closure.js';
 import {
   MUTATION_LOCK_DIR,
   DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
@@ -73,14 +74,9 @@ export const STOP_REASONS = Object.freeze({
 // audit=미완료'인 불일치를 재도입하지 않는다. 네 진입점(shapeNextAction/pickNextAction/explainWork/
 // finalizeWorkStatusForClosure)이 이 하나를 참조해 done-surface drift를 막는다.
 //
-// 정확성 주의(과장 금지): 이건 'policy-approval axis 수렴'이지 claimSafe와의 '완전 등가'가 아니다. audit claimSafe는
-// 세 conjunct를 '더' 건다 — counts.error===0(audit-issue 에러; parsed.errors와 DISJOINT), unresolvedPartialCount===0,
-// repeatedReviewTaskCount===0 (lib-audit.js:429-433). 이 셋은 audit 엔진 내부 신호라 navigation이 의존하지 않는다
-// (그래야 navigation이 audit 엔진에 결합되지 않는다 — closure에는 unresolvedPartialCount/repeatedReviewTaskCount가
-// 없고 partialCount만 있다). 결과로 policy-approved인데 '미해결 partial'을 든 그래프는 nav=done인데 audit=claimSafe:false로
-// 갈릴 수 있다(문서화된 residual; scripts/navigation-approval-parity.mjs case 4). 이 residual을 닫으려면
-// (partial/review/error axis를 이 predicate에 접어넣기) navigation을 audit 엔진에 결합해야 하므로, 7개 P0 밖의
-// 의도적 후속 선택으로 남긴다 — 그 선택을 하면 case 4의 nav 단언을 graph_closed_unapproved로 바꿔야 한다.
+// 정확성 주의(과장 금지): unresolved partial은 parser의 structuralComplete를 직접 막으므로 navigation과 audit이
+// 모두 완료를 거부한다. audit claimSafe는 여기에 counts.error와 repeatedReviewTaskCount 같은 audit 전용 신호를
+// 추가로 적용하므로, 이 predicate 자체가 claimSafe와 완전 등가인 것은 아니다.
 function isApprovedComplete(closure) {
   return Boolean(closure && closure.complete === true && closure.policyApprovedComplete === true);
 }
@@ -576,7 +572,7 @@ function activeSnapshotForParsed(parsed) {
 }
 
 function claimHash(claim) {
-  return sha256Of({ claim: compactString(claim) });
+  return canonicalSha256({ claim: compactString(claim) });
 }
 
 function surpriseHistoryForTask(task) {
@@ -652,7 +648,7 @@ function inheritedComparable(context) {
 }
 
 function inheritedSignature(context) {
-  return sha256Of(inheritedComparable(context));
+  return canonicalSha256(inheritedComparable(context));
 }
 
 function inheritedContextWithoutRuntimeFlags(context) {
@@ -812,18 +808,6 @@ function appendRunLog(runDir, line) {
   return appendRunLogViaStateWriter(runDir, line, stateWriterIo());
 }
 
-function stableForHash(value) {
-  if (Array.isArray(value)) return value.map((item) => stableForHash(item));
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableForHash(value[key])]));
-  }
-  return value ?? null;
-}
-
-function sha256Of(value) {
-  return `sha256:${createHash('sha256').update(JSON.stringify(stableForHash(value))).digest('hex')}`;
-}
-
 function asArray(value) {
   if (value == null || value === '') return [];
   return Array.isArray(value) ? value : [value];
@@ -899,7 +883,7 @@ export function computeSurpriseHistoryEntry({ task, report, runId, runNodeId, ac
     blockingNewUnknownIds: blockingUnknowns.map((item) => item.id),
     nonBlockingNewUnknownIds: nonBlockingUnknowns.map((item) => item.id),
     newKnownIds: newKnownDeltas.map((item) => item.id),
-    reportHash: sha256Of(normalizedReport),
+    reportHash: canonicalSha256(normalizedReport),
     evidenceRefs: asArray(evidenceRefs).map((item) => String(item || '').trim()).filter(Boolean),
     summary: sanitizeFmScalar(normalizedReport.summary || `surprise ${surpriseLevel(score)} (${score})`, { maxLen: 500, fallback: `surprise ${surpriseLevel(score)}` }),
   };
@@ -1671,8 +1655,8 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     unsupportedObserved,
     failedChecks,
     followUpNeeded,
-    reviewedAcceptanceHash: sha256Of(acceptance),
-    reviewedResultHash: sha256Of(result),
+    reviewedAcceptanceHash: canonicalSha256(acceptance),
+    reviewedResultHash: canonicalSha256(result),
     // Auditability: record whether this review was runner-verified (--verify-checks) or based on
     // self-reported evidence, so a downstream reader can tell how the resulting claimSafe was grounded.
     verified: verifyMode === true,
@@ -2896,7 +2880,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   }
 
   updateMarkdownFrontmatter(loopbackPath, (fm) => { fm.status = 'done'; return fm; });
-  closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: loopbackNodeId, reason: 'loopback_recorded', finishedAt });
+  closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: loopbackNodeId, reason: 'loopback_recorded', closureRole: 'supporting', finishedAt });
 
   const delegatePath = delegate.path;
   if (delegatePath && existsSync(delegatePath)) {
@@ -2911,7 +2895,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
       return fm;
     });
   }
-  closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: delegate.id, reason: 'loopback_resolved', finishedAt });
+  closeRunNodeWithEow({ runDir: loopbackRunDir, runId: loopbackRunId, runNodeId: delegate.id, reason: 'loopback_resolved', closureRole: 'supporting', finishedAt });
 
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'loopback_completed', runId,
@@ -2985,8 +2969,24 @@ function attachRunRef(taskPath, runId, runNodeId, role) {
   return attachTaskRunRefViaStateWriter(taskPath, runId, runNodeId, role, stateWriterIo());
 }
 
-function closeRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, approvedReview = null }) {
-  return closeRunNodeWithEowViaStateWriter({ runDir, runId, runNodeId, reason, finishedAt, approvedReview }, stateWriterIo());
+function closeRunNodeWithEow({
+  runDir,
+  runId,
+  runNodeId,
+  reason,
+  finishedAt,
+  closureRole,
+  approvedReview = null,
+}) {
+  return closeRunNodeWithEowViaStateWriter({
+    runDir,
+    runId,
+    runNodeId,
+    reason,
+    finishedAt,
+    closureRole,
+    approvedReview,
+  }, stateWriterIo());
 }
 
 function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }) {
@@ -3110,7 +3110,7 @@ function writeReviewForRunNode({ projectDir, task, runNode, verifyMode = false }
     attempt: Number(runNode.attempt || 1),
   });
   const report = buildReviewReport({ projectDir, task, runNode, verifyMode });
-  const reviewReportHash = sha256Of(report);
+  const reviewReportHash = canonicalSha256(report);
   updateMarkdownFrontmatter(reviewNodePath, (fm) => {
     fm.status = 'done';
     fm.reviewsRunNodeId = runNode.id;
@@ -3136,7 +3136,7 @@ function writeReviewForRunNode({ projectDir, task, runNode, verifyMode = false }
     };
     writeTextFileAtomic(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNode.id} reviewed by ${reviewNodeId}\n`);
   }
-  closeRunNodeWithEow({ runDir, runId: runNode.runId, runNodeId: reviewNodeId, reason: 'review_recorded', finishedAt: isoNow() });
+  closeRunNodeWithEow({ runDir, runId: runNode.runId, runNodeId: reviewNodeId, reason: 'review_recorded', closureRole: 'supporting', finishedAt: isoNow() });
 
   return {
     reviewNodeId,
@@ -3221,6 +3221,14 @@ function closeExecutePartial({
       partialCompletion,
     };
     return fm;
+  });
+  closeRunNodeWithEow({
+    runDir,
+    runId,
+    runNodeId,
+    reason: 'partial_recorded',
+    closureRole: 'supporting',
+    finishedAt,
   });
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'task_partial_requested', runId,
@@ -3432,6 +3440,7 @@ function closeExecuteSuccess({
       });
       logEvent(eventsPath, { timestamp: finishedAt, type: 'verify_retry', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, attempt: attempts + 1, maxRetries: ceiling, novel: isNovel, mode: withinFloor ? 'floor' : 'novel_extension' });
       appendRunLog(runDir, `${finishedAt} verify_retry taskId=${task.id} attempt=${attempts + 1} novel=${isNovel} ${withinFloor ? 'floor' : 'novel-extension'}`);
+      closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'attempt_retried', closureRole: 'supporting', finishedAt });
       return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
     }
     // Fixpoint: the floor is exhausted and the failure is no longer novel (or the ceiling was hit) — this resource
@@ -3460,6 +3469,7 @@ function closeExecuteSuccess({
         });
         logEvent(eventsPath, { timestamp: finishedAt, type: 'saturation_escalate', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, rung: 'delegate', resolver: next, afterAttempts: attempts });
         appendRunLog(runDir, `${finishedAt} saturation_escalate taskId=${task.id} rung=delegate resolver=${next} afterAttempts=${attempts}`);
+        closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'attempt_retried', closureRole: 'supporting', finishedAt });
         return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor: next, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
       }
     }
@@ -3479,6 +3489,7 @@ function closeExecuteSuccess({
       });
       logEvent(eventsPath, { timestamp: finishedAt, type: 'saturation_escalate', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, rung: 'decompose', afterAttempts: attempts });
       appendRunLog(runDir, `${finishedAt} saturation_escalate taskId=${task.id} rung=decompose afterAttempts=${attempts}`);
+      closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'attempt_retried', closureRole: 'supporting', finishedAt });
       return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'retry', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
     }
     // F-2/F-3: probes fire ONLY at the true final close — the verify_retry, rung-1 delegate and rung-2
@@ -3556,7 +3567,7 @@ function closeExecuteSuccess({
   const approvedReview = review.approvedReview;
   const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
-  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, finishedAt, approvedReview });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, closureRole: 'claim-bearing', finishedAt, approvedReview });
   // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
   if (task.verifyAttempts != null || task.lastCheckFailure != null || task.attemptLedger != null || task.saturation != null || task.executorOverride != null || task.escalatedResolvers != null || task.saturationEscalated != null || task.failureCertificate != null || task.quarantinedChecks != null) {
     updateMarkdownFrontmatter(task.path, (fm) => { delete fm.verifyAttempts; delete fm.lastCheckFailure; delete fm.attemptLedger; delete fm.saturation; delete fm.executorOverride; delete fm.escalatedResolvers; delete fm.saturationEscalated; delete fm.failureCertificate; delete fm.quarantinedChecks; return fm; });
@@ -4765,7 +4776,7 @@ function closeDecomposeSuccess({
   const runCloseReason = result.recoveredAfterAdapterFailure ? 'decomposition_recorded_after_adapter_timeout_recovery' : 'decomposition_recorded';
   closeTaskWithEow({ task, reason: taskCloseReason, finishedAt, resolvedByTaskGroupId: result.childTaskGroupId });
   updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'done'; return fm; });
-  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, finishedAt });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: runCloseReason, closureRole: 'supporting', finishedAt });
   const inheritedBirthSnapshot = applyInheritedBirthSnapshotToChildVersion({
     projectDir,
     childTaskGroupId: result.childTaskGroupId,
@@ -5141,7 +5152,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     };
     return fm;
   });
-  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'exploration_recorded', finishedAt });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'exploration_recorded', closureRole: 'supporting', finishedAt });
 
   logEvent(eventsPath, {
     timestamp: finishedAt, type: 'exploration_completed', runId,
@@ -5195,9 +5206,17 @@ function executePrototypeTask({ projectDir, project, task, runDir, runId, events
 
   let result;
   try {
-    result = executor === 'dry-run'
-      ? { ok: true, artifactPath: null, message: 'dry-run prototype (external human pick set up without generated options)' }
-      : performAgentPrototype({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
+    if (executor === 'dry-run') {
+      const artifactPath = join(runDir, 'artifacts', runNodeId, 'options.md');
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeTextFileAtomic(
+        artifactPath,
+        '# Prototype options\n\n- Option 1: dry-run placeholder for external human selection.\n',
+      );
+      result = { ok: true, artifactPath, message: 'dry-run prototype options recorded for external human selection' };
+    } else {
+      result = performAgentPrototype({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
+    }
   } catch (err) { result = { ok: false, message: err instanceof Error ? err.message : String(err) }; }
 
   const finishedAt = isoNow();
@@ -5223,7 +5242,7 @@ function executePrototypeTask({ projectDir, project, task, runDir, runId, events
   appendFileSync(task.path, `\n${externalResolutionBody}\n`);
 
   updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'done'; fm.result = { artifactPath: result.artifactPath || null }; return fm; });
-  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'prototype_recorded', finishedAt });
+  closeRunNodeWithEow({ runDir, runId, runNodeId, reason: 'prototype_recorded', closureRole: 'supporting', finishedAt });
   logEvent(eventsPath, { timestamp: finishedAt, type: 'prototype_completed', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor, artifactPath: result.artifactPath || null });
   appendRunLog(runDir, `${finishedAt} prototype_completed taskId=${task.id} runNodeId=${runNodeId} artifact=${result.artifactPath || ''}`);
   return { taskId: task.id, runNodeId, kind: 'prototype', status: 'completed', executor, artifactPath: result.artifactPath || null, budget };
@@ -5428,25 +5447,53 @@ function findReviewSubject(parsed, targetId) {
   }
 
   const task = direct.task;
+  const isClaimBearingImplementation = (node) => node?.type === 'implementation'
+    && [...parsed.eowNodes.values()].some((eow) => (
+      eow.graphType === 'run'
+      && eow.runId === node.runId
+      && eow.attachedToId === node.id
+      && (
+        eow.closureRole === 'claim-bearing'
+        || (!eow.closureRole && ['approved_result', 'execution_path_closed'].includes(eow.reason))
+      )
+    ));
   const refs = normalizeRunRefs(task).slice().reverse();
   for (const ref of refs) {
     if (!ref?.runId || !ref?.runNodeId) continue;
     const node = parsed.runNodes.get(`${ref.runId}:${ref.runNodeId}`);
-    if (node && node.type !== 'review') return { task, runNode: node };
+    if (isClaimBearingImplementation(node)) return { task, runNode: node };
   }
   const node = [...parsed.runNodes.values()]
     .reverse()
-    .find((candidate) => candidate.sourceTaskId === task.id && candidate.sourceTaskGroupVersionId === task.taskGroupVersionId && candidate.type !== 'review');
+    .find((candidate) => (
+      candidate.sourceTaskId === task.id
+      && candidate.sourceTaskGroupVersionId === task.taskGroupVersionId
+      && isClaimBearingImplementation(candidate)
+    ));
   if (node) return { task, runNode: node };
-  throw new Error(`Task '${task.id}' has no run node to review`);
+  throw new Error(`Task '${task.id}' has no claim-bearing implementation run node to review`);
 }
 
 function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedReview }) {
-  if (!approvedReview) return [];
+  if (!approvedReview || runNode?.type !== 'implementation') return [];
+  const claimRunEow = [...parsed.eowNodes.values()].find((eow) => (
+    eow.graphType === 'run'
+    && eow.runId === runNode.runId
+    && eow.attachedToId === runNode.id
+    && (
+      eow.closureRole === 'claim-bearing'
+      || (!eow.closureRole && ['approved_result', 'execution_path_closed'].includes(eow.reason))
+    )
+  ));
+  if (!claimRunEow) return [];
   const touched = [];
   for (const eow of parsed.eowNodes.values()) {
-    const taskMatch = task && eow.graphType === 'task' && eow.attachedToId === task.id && eow.taskGroupVersionId === task.taskGroupVersionId;
-    const runMatch = eow.graphType === 'run' && eow.runId === runNode.runId && eow.attachedToId === runNode.id;
+    const taskMatch = task
+      && eow.graphType === 'task'
+      && eow.attachedToId === task.id
+      && eow.taskGroupVersionId === task.taskGroupVersionId
+      && ['approved_result', 'execution_path_closed'].includes(eow.reason);
+    const runMatch = eow.path === claimRunEow.path;
     if (!taskMatch && !runMatch) continue;
     updateMarkdownFrontmatter(eow.path, (fm) => {
       fm.approvedByReviewNodeId = approvedReview.reviewNodeId;
@@ -5460,7 +5507,7 @@ function attachApprovedReviewToExistingEows({ parsed, task, runNode, approvedRev
       // P0-3: SECOND stamp site (reviewTarget attach) — must mirror applyApprovedReviewToEow; guarded so a
       // reviewless legacy approvedReview never fabricates a value.
       if (approvedReview.oracleAccess) fm.oracleAccess = approvedReview.oracleAccess;
-      if (fm.reason === 'manual_close' || fm.reason === 'no_further_decomposition' || fm.reason === 'execution_path_closed') {
+      if (fm.reason === 'execution_path_closed') {
         fm.reason = 'approved_result';
       }
       return fm;
@@ -5683,6 +5730,9 @@ export function closeTarget(workDir, targetId, {
     attachedToType: 'runNode',
     attachedToId: node.id,
     reason: sanitizeFmScalar(declaredReason),
+    closureRole: node.type === 'implementation' && ['approved_result', 'execution_path_closed'].includes(declaredReason)
+      ? 'claim-bearing'
+      : 'supporting',
     declaredBy: 'taskops-close',
     declaredAt,
     createdAt: declaredAt,

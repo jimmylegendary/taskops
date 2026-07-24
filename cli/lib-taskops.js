@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSy
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
+import { classifyRunClosure } from './lib-run-closure.js';
 import {
   findSelectedRestartBlockedByIssues,
   rebaseBlockedByVersionRefs,
@@ -37,7 +38,7 @@ const DECOMPOSITION_BACKLINK_FIELDS = [
   'decomposedByRunId',
   'decomposedByRunNodeId',
 ];
-const POLICY_APPROVED_EOW_FIELDS = [
+const APPROVAL_FIELDS = [
   'approvedByReviewNodeId',
   'approvedReviewMode',
   'approvedReviewReportHash',
@@ -1123,10 +1124,6 @@ export function parseProject(projectDir) {
     }
   }
 
-  let terminalTaskCount = 0;
-  let terminalTaskEowCount = 0;
-  let policyApprovedTerminalTaskEowCount = 0;
-  let manualAttestedTerminalTaskEowCount = 0;
   const selectedPairs = activeSnapshot?.selectedVersions || [];
   const selectedTaskGroupIds = new Set(selectedPairs.map((pair) => pair.taskGroupId));
   // P0#4: active completion predicate(특히 openBlockerCount)는 selected/active version의 task만 세야 한다. superseded
@@ -1136,7 +1133,84 @@ export function parseProject(projectDir) {
   // activeSnapshot 없는 legacy fixture의 현행 closure를 보존한다. history/superseded task는 parse에 남겨 audit
   // trail을 유지하되 active completion 계산에서만 제외한다.
   const selectedVersionIdSet = new Set(selectedPairs.map((pair) => pair.versionId).filter(Boolean));
-  const inSelectedVersion = (task) => selectedVersionIdSet.size === 0 || selectedVersionIdSet.has(task.taskGroupVersionId);
+  const inSelectedVersion = (record) => {
+    const versionId = record.taskGroupVersionId || record.sourceTaskGroupVersionId;
+    return !versionId || selectedVersionIdSet.size === 0 || selectedVersionIdSet.has(versionId);
+  };
+  const runClosureClassifications = new Map();
+  let runEowClosureCount = 0;
+  let supportingRunEowClosureCount = 0;
+  let validSupportingRunEowClosureCount = 0;
+  let invalidSupportingRunEowClosureCount = 0;
+  let claimBearingRunEowClosureCount = 0;
+  let policyApprovedClaimBearingRunEowClosureCount = 0;
+  let manualAttestedRunEowClosureCount = 0;
+  for (const eow of eowNodes.values()) {
+    if (eow.graphType !== 'run' || eow.attachedToType !== 'runNode') continue;
+    runEowClosureCount += 1;
+    const node = runNodes.get(runNodeKey(eow.runId, eow.attachedToId));
+    if (!node) continue;
+    const classification = classifyRunClosure({
+      node,
+      eow,
+      runNodes,
+      runEdges,
+      versions,
+      selectedVersionIds: selectedVersionIdSet,
+    });
+    runClosureClassifications.set(eow.path, classification);
+    if (!classification.selected) continue;
+    for (const issue of classification.issues) errors.push(withPath(eow.path, issue));
+    if (classification.role === 'supporting') {
+      supportingRunEowClosureCount += 1;
+      if (classification.supportValid) validSupportingRunEowClosureCount += 1;
+      else invalidSupportingRunEowClosureCount += 1;
+    } else if (classification.role === 'claim-bearing') {
+      claimBearingRunEowClosureCount += 1;
+      if (classification.policyApproved) policyApprovedClaimBearingRunEowClosureCount += 1;
+    }
+    if (isManualAttestedEow(eow)) manualAttestedRunEowClosureCount += 1;
+  }
+
+  const approvalFieldsMatch = (left, right) => APPROVAL_FIELDS.every((field) => left?.[field] === right?.[field]);
+  const taskEowResolvesToApprovedClaim = (task, eow, { historical = false, visiting = new Set() } = {}) => {
+    if (!task || !eow || visiting.has(eow.path)) return false;
+    const nextVisiting = new Set(visiting).add(eow.path);
+    if (eow.reason === 'preserved_upstream_after_restart') {
+      if (!eow.preservedFromVersionId || !eow.preservedFromEowId) return false;
+      const sourceEow = [...eowNodes.values()].find((candidate) => (
+        candidate.graphType === 'task'
+        && candidate.taskGroupVersionId === eow.preservedFromVersionId
+        && candidate.id === eow.preservedFromEowId
+      ));
+      if (!sourceEow || sourceEow.path === eow.path || !approvalFieldsMatch(eow, sourceEow)) return false;
+      const sourceTask = tasks.get(taskKey(sourceEow.taskGroupVersionId, sourceEow.attachedToId));
+      return taskEowResolvesToApprovedClaim(sourceTask, sourceEow, {
+        historical: true,
+        visiting: nextVisiting,
+      });
+    }
+    if (eow.reason !== 'approved_result') return false;
+    for (const ref of normalizeRunRefs(task)) {
+      if (!ref?.runId || !ref?.runNodeId) continue;
+      const node = runNodes.get(runNodeKey(ref.runId, ref.runNodeId));
+      if (!node || node.type !== 'implementation') continue;
+      if (!historical && !inSelectedVersion(node)) continue;
+      const runEows = runEowsByRunNodeKey.get(runNodeKey(node.runId, node.id)) || [];
+      for (const runEow of runEows) {
+        const classification = runClosureClassifications.get(runEow.path);
+        if (!classification?.policyApproved) continue;
+        if (!historical && !classification.selected) continue;
+        if (approvalFieldsMatch(eow, runEow)) return true;
+      }
+    }
+    return false;
+  };
+
+  let terminalTaskCount = 0;
+  let terminalTaskEowCount = 0;
+  let policyApprovedTerminalTaskEowCount = 0;
+  let manualAttestedTerminalTaskEowCount = 0;
   for (const pair of selectedPairs) {
     const version = versions.get(pair.versionId);
     if (!version) continue;
@@ -1148,7 +1222,9 @@ export function parseProject(projectDir) {
       const hasEow = terminalEows.length > 0;
       if (hasEow) terminalTaskEowCount += 1;
       else warnings.push(withPath(task.path, t.terminalTaskMissingEow(task.id)));
-      if (terminalEows.some(isPolicyApprovedEow)) policyApprovedTerminalTaskEowCount += 1;
+      if (terminalEows.some((eow) => taskEowResolvesToApprovedClaim(task, eow))) {
+        policyApprovedTerminalTaskEowCount += 1;
+      }
       if (terminalEows.some(isManualAttestedEow)) manualAttestedTerminalTaskEowCount += 1;
     }
   }
@@ -1157,8 +1233,11 @@ export function parseProject(projectDir) {
   let runTerminalEowCount = 0;
   let waitingDelegationCount = 0;
   for (const run of runs.values()) {
-    const outgoing = new Set(run.edges.map((edge) => edge.fromRunNodeId));
+    const outgoing = new Set(run.edges
+      .filter((edge) => runNodes.has(runNodeKey(run.id, edge.toRunNodeId)))
+      .map((edge) => edge.fromRunNodeId));
     for (const node of run.nodes) {
+      if (!inSelectedVersion(node)) continue;
       if (node.status === 'waiting' || (node.type === 'delegate' && !['done', 'cancelled'].includes(node.status))) waitingDelegationCount += 1;
       if (outgoing.has(node.id) || node.status === 'cancelled') continue;
       runTerminalNodeCount += 1;
@@ -1168,19 +1247,17 @@ export function parseProject(projectDir) {
       else if (node.status === 'done') warnings.push(withPath(node.path, t.runTerminalMissingEow(run.id, node.id)));
     }
   }
-  let runEowClosureCount = 0;
-  let policyApprovedRunEowClosureCount = 0;
-  let manualAttestedRunEowClosureCount = 0;
-  for (const eow of eowNodes.values()) {
-    if (eow.graphType !== 'run' || eow.attachedToType !== 'runNode') continue;
-    const node = runNodes.get(runNodeKey(eow.runId, eow.attachedToId));
-    if (node?.type === 'review') continue;
-    runEowClosureCount += 1;
-    if (isPolicyApprovedEow(eow)) policyApprovedRunEowClosureCount += 1;
-    if (isManualAttestedEow(eow)) manualAttestedRunEowClosureCount += 1;
-  }
-  const partialTaskCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'task' && partial.attachedToType === 'task').length;
-  const partialRunCount = [...partialNodes.values()].filter((partial) => partial.graphType === 'run' && partial.attachedToType === 'runNode').length;
+  const policyApprovedRunEowClosureCount = policyApprovedClaimBearingRunEowClosureCount;
+  const partialTaskCount = [...partialNodes.values()].filter((partial) => (
+    partial.graphType === 'task'
+    && partial.attachedToType === 'task'
+    && isPartialUnresolved(partial)
+  )).length;
+  const partialRunCount = [...partialNodes.values()].filter((partial) => (
+    partial.graphType === 'run'
+    && partial.attachedToType === 'runNode'
+    && isPartialUnresolved(partial)
+  )).length;
   const partialCount = partialTaskCount + partialRunCount;
   const taskBlockerResolved = (ref) => {
     if (!ref || typeof ref !== 'object') return false;
@@ -1202,11 +1279,18 @@ export function parseProject(projectDir) {
   const taskHasUnresolvedBlocker = (task) => normalizeBlockedByRefs(task.blockedBy).some((ref) => !taskBlockerResolved(ref));
   const taskIsOpenBlocked = (task) => !['done', 'cancelled'].includes(task.status)
     && (task.status === 'blocked' || task.runReadiness === 'blocked' || taskHasUnresolvedBlocker(task));
-  const openBlockerCount = [...tasks.values()].filter((task) => inSelectedVersion(task) && taskIsOpenBlocked(task)).length + [...runNodes.values()].filter((node) => node.status === 'blocked').length;
-  const structuralComplete = terminalTaskCount > 0 && terminalTaskCount === terminalTaskEowCount && runTerminalNodeCount === runTerminalEowCount && waitingDelegationCount === 0 && openBlockerCount === 0;
+  const openBlockerCount = [...tasks.values()].filter((task) => inSelectedVersion(task) && taskIsOpenBlocked(task)).length
+    + [...runNodes.values()].filter((node) => inSelectedVersion(node) && node.status === 'blocked').length;
+  const structuralComplete = terminalTaskCount > 0
+    && terminalTaskCount === terminalTaskEowCount
+    && runTerminalNodeCount === runTerminalEowCount
+    && invalidSupportingRunEowClosureCount === 0
+    && partialCount === 0
+    && waitingDelegationCount === 0
+    && openBlockerCount === 0;
   const policyApprovedComplete = structuralComplete
     && terminalTaskCount === policyApprovedTerminalTaskEowCount
-    && runEowClosureCount === policyApprovedRunEowClosureCount;
+    && claimBearingRunEowClosureCount === policyApprovedClaimBearingRunEowClosureCount;
   const manualAttestedComplete = structuralComplete
     && terminalTaskCount === manualAttestedTerminalTaskEowCount
     && runEowClosureCount === manualAttestedRunEowClosureCount;
@@ -1237,6 +1321,11 @@ export function parseProject(projectDir) {
     runTerminalEowCount,
     openRunTerminalNodeCount: Math.max(0, runTerminalNodeCount - runTerminalEowCount),
     runEowClosureCount,
+    supportingRunEowClosureCount,
+    validSupportingRunEowClosureCount,
+    invalidSupportingRunEowClosureCount,
+    claimBearingRunEowClosureCount,
+    policyApprovedClaimBearingRunEowClosureCount,
     policyApprovedRunEowClosureCount,
     manualAttestedRunEowClosureCount,
     partialTaskCount,
@@ -1997,7 +2086,7 @@ export function summarizeProject(parsed) {
     `- ${SUMMARY_LABELS.partialNodes}: ${partialNodes.length}`,
     `- ${SUMMARY_LABELS.taskEowCoverage}: ${closure.terminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}`,
     `- ${SUMMARY_LABELS.structuralClosure}: ${closure.structuralComplete === true ? 'complete' : 'open'}`,
-    `- ${SUMMARY_LABELS.policyApprovedClosure}: ${closure.policyApprovedComplete === true ? 'complete' : 'incomplete'} (tasks ${closure.policyApprovedTerminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}, run closures ${closure.policyApprovedRunEowClosureCount ?? 0}/${closure.runEowClosureCount ?? 0})`,
+    `- ${SUMMARY_LABELS.policyApprovedClosure}: ${closure.policyApprovedComplete === true ? 'complete' : 'incomplete'} (tasks ${closure.policyApprovedTerminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}, claim closures ${closure.policyApprovedClaimBearingRunEowClosureCount ?? 0}/${closure.claimBearingRunEowClosureCount ?? 0}, supporting closures ${closure.validSupportingRunEowClosureCount ?? 0}/${closure.supportingRunEowClosureCount ?? 0})`,
     `- ${SUMMARY_LABELS.manualAttestedClosure}: ${closure.manualAttestedComplete === true ? 'complete' : 'incomplete'} (tasks ${closure.manualAttestedTerminalTaskEowCount ?? 0}/${closure.terminalTaskCount ?? 0}, run closures ${closure.manualAttestedRunEowClosureCount ?? 0}/${closure.runEowClosureCount ?? 0})`,
     `- ${SUMMARY_LABELS.closureState}: ${closure.closureState || (closure.complete === true ? 'structurally_complete' : 'open')}`,
     `- ${SUMMARY_LABELS.waitingDelegations}: ${closure.waitingDelegationCount ?? 0}`,
@@ -2428,7 +2517,7 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
       status: eow.status || 'done',
       taskGroupVersionId: versionId,
     };
-    for (const key of ['preservedFromVersionId', 'preservedFromEowId', 'preservedFromReason', ...POLICY_APPROVED_EOW_FIELDS]) {
+    for (const key of ['preservedFromVersionId', 'preservedFromEowId', 'preservedFromReason', ...APPROVAL_FIELDS]) {
       if (eow[key] !== undefined && eow[key] !== null && eow[key] !== '') eowFm[key] = eow[key];
     }
     writeFileSync(join(versionDir, 'eow', `${eow.id}.md`), fmBlock(eowFm) + `# EoW: ${eow.attachedToId}\n`, 'utf8');
@@ -2819,7 +2908,7 @@ function carriedForwardTaskEow({ sourceEow, task, sourceVersion, newVersionId, d
     preservedFromEowId: sourceEow.preservedFromEowId || sourceEow.id || `eow-${task.id}`,
     preservedFromReason: sourceEow.preservedFromReason || sourceEow.reason || null,
   };
-  for (const key of POLICY_APPROVED_EOW_FIELDS) {
+  for (const key of APPROVAL_FIELDS) {
     if (sourceEow[key] !== undefined && sourceEow[key] !== null && sourceEow[key] !== '') eow[key] = sourceEow[key];
   }
   return eow;

@@ -281,7 +281,7 @@ function stateWriterIo() {
   const runDir = join(root, 'runs', 'run-main');
   mkdirSync(join(runDir, 'nodes'), { recursive: true });
   mkdirSync(join(runDir, 'edges'), { recursive: true });
-  closeRunNodeWithEowFiles({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', finishedAt: fixedNow }, io);
+  closeRunNodeWithEowFiles({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', closureRole: 'supporting', finishedAt: fixedNow }, io);
   const runEowPath = join(runDir, 'nodes', 'eow-run-node-task-a.md');
   assert.equal(
     readFileSync(runEowPath, 'utf8'),
@@ -294,6 +294,7 @@ function stateWriterIo() {
       attachedToType: 'runNode',
       attachedToId: 'run-node-task-a',
       reason: 'completed',
+      closureRole: 'supporting',
       declaredBy: 'taskops-runner',
       declaredAt: fixedNow,
       createdAt: fixedNow,

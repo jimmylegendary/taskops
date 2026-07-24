@@ -5,10 +5,10 @@
 //       semanticAssertions) must NOT be 'approved' (nothing to verify against a self-generated summary).
 //  A4 — a requiredCheck whose self-reported checkResult has NO explicit pass status must NOT count as passed.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fmBlock } from '../lib-taskops.js';
+import { fmBlock, parseProject } from '../lib-taskops.js';
 import { reviewTarget } from '../lib-runner.js';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-policy-approval-'));
@@ -23,10 +23,10 @@ function makeWork(name, { acceptance, result }) {
   md(join(w, 'task-groups/tg-root/versions/tgv-root-v1/index.md'), { taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: 'tgv-root-v1', taskGroupId: 'tg-root', version: 'v1', summary: 's', selected: true, createdAt: now, status: 'active' });
   md(join(w, 'snapshots/snapshot-root-v1.md'), { taskOpsVersion: 'v1', entityType: 'versionSnapshot', id: 'snapshot-root-v1', rootTaskGroupId: 'tg-root', createdAt: now, label: 'R', status: 'active', selectedVersions: [{ taskGroupId: 'tg-root', versionId: 'tgv-root-v1' }] });
   md(join(w, 'task-groups/tg-root/versions/tgv-root-v1/tasks/task-review.md'), { taskOpsVersion: 'v1', entityType: 'task', id: 'task-review', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'done', acceptance, order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known', runRefs: [{ runId: 'run-main', runNodeId: 'run-node-review', role: 'primary_execution' }] });
-  md(join(w, 'task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-review.md'), { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-review', graphType: 'task', attachedToType: 'task', attachedToId: 'task-review', taskGroupVersionId: 'tgv-root-v1', reason: 'manual_close', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
+  md(join(w, 'task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-review.md'), { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-review', graphType: 'task', attachedToType: 'task', attachedToId: 'task-review', taskGroupVersionId: 'tgv-root-v1', reason: 'execution_path_closed', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
   md(join(w, 'runs/run-main/index.md'), { taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: name, createdAt: now, status: 'active' });
   md(join(w, 'runs/run-main/nodes/run-node-review.md'), { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review', runId: 'run-main', type: 'implementation', title: 'T', sourceTaskId: 'task-review', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, result });
-  md(join(w, 'runs/run-main/nodes/eow-run-node-review.md'), { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-review', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-review', reason: 'manual_close', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
+  md(join(w, 'runs/run-main/nodes/eow-run-node-review.md'), { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-review', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-review', reason: 'execution_path_closed', closureRole: 'claim-bearing', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
   md(join(w, 'runs/run-main/edges/edge-review.md'), { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-review', runId: 'run-main', fromRunNodeId: 'run-node-review', toRunNodeId: 'eow-run-node-review', edgeType: 'closes_with', createdAt: now });
   return w;
 }
@@ -53,6 +53,58 @@ const ok = reviewTarget(makeWork('ok-passed', {
   result: { observed: { outcomeSummary: 'done', artifactRefs: [], evidenceRefs: [], checkResults: [{ command: 'npm test', status: 'passed' }] } },
 }), 'task-review').reviewReport;
 assert.equal(ok.decision, 'approved', 'a satisfied requiredCheck must still approve');
+
+const tamperSource = makeWork('tamper-source', {
+  acceptance: { mode: 'runner-managed', expectedOutcome: 'tests pass', requiredChecks: ['npm test'] },
+  result: { observed: { outcomeSummary: 'done', artifactRefs: [], evidenceRefs: [], checkResults: [{ command: 'npm test', status: 'passed' }] } },
+});
+const tamperReview = reviewTarget(tamperSource, 'task-review');
+assert.equal(parseProject(tamperSource).closure.policyApprovedComplete, true);
+
+const missingReviewDir = join(tempRoot, 'missing-review');
+cpSync(tamperSource, missingReviewDir, { recursive: true });
+rmSync(join(missingReviewDir, 'runs/run-main/nodes', `${tamperReview.reviewNodeId}.md`));
+
+const wrongTargetDir = join(tempRoot, 'wrong-target');
+cpSync(tamperSource, wrongTargetDir, { recursive: true });
+const wrongTargetReviewPath = join(wrongTargetDir, 'runs/run-main/nodes', `${tamperReview.reviewNodeId}.md`);
+writeFileSync(
+  wrongTargetReviewPath,
+  readFileSync(wrongTargetReviewPath, 'utf8').replace(
+    'reviewsRunNodeId: run-node-review',
+    'reviewsRunNodeId: run-node-other',
+  ),
+  'utf8',
+);
+
+const reportHashMismatchDir = join(tempRoot, 'report-hash-mismatch');
+cpSync(tamperSource, reportHashMismatchDir, { recursive: true });
+const reportHashReviewPath = join(reportHashMismatchDir, 'runs/run-main/nodes', `${tamperReview.reviewNodeId}.md`);
+writeFileSync(
+  reportHashReviewPath,
+  readFileSync(reportHashReviewPath, 'utf8').replace(
+    tamperReview.reviewReportHash,
+    'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+  ),
+  'utf8',
+);
+
+const resultHashMismatchDir = join(tempRoot, 'result-hash-mismatch');
+cpSync(tamperSource, resultHashMismatchDir, { recursive: true });
+const resultHashRunEowPath = join(resultHashMismatchDir, 'runs/run-main/nodes/eow-run-node-review.md');
+writeFileSync(
+  resultHashRunEowPath,
+  readFileSync(resultHashRunEowPath, 'utf8').replace(
+    /^reviewedResultHash: .*$/m,
+    'reviewedResultHash: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  ),
+  'utf8',
+);
+
+assert.equal(parseProject(missingReviewDir).closure.policyApprovedComplete, false);
+assert.equal(parseProject(wrongTargetDir).closure.policyApprovedComplete, false);
+assert.equal(parseProject(reportHashMismatchDir).closure.policyApprovedComplete, false);
+assert.equal(parseProject(resultHashMismatchDir).closure.policyApprovedComplete, false);
 
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK policy-approval evidence');

@@ -99,7 +99,7 @@ md('task-groups/tg-root/versions/tgv-root-v1/tasks/task-accepted.md', {
   order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known',
   runRefs: [{ runId: 'run-main', runNodeId: 'run-node-accepted', role: 'primary_execution' }],
 });
-md('task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-accepted.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-accepted', graphType: 'task', attachedToType: 'task', attachedToId: 'task-accepted', taskGroupVersionId: 'tgv-root-v1', reason: 'manual_close', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
+md('task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-accepted.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-accepted', graphType: 'task', attachedToType: 'task', attachedToId: 'task-accepted', taskGroupVersionId: 'tgv-root-v1', reason: 'execution_path_closed', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
 md('runs/run-main/index.md', { taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: 'review-work', createdAt: now, status: 'active' });
 md('runs/run-main/nodes/run-node-accepted.md', {
   taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-accepted', runId: 'run-main', type: 'implementation',
@@ -114,7 +114,7 @@ md('runs/run-main/nodes/run-node-accepted.md', {
     },
   },
 });
-md('runs/run-main/nodes/eow-run-node-accepted.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-accepted', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-accepted', reason: 'manual_close', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
+md('runs/run-main/nodes/eow-run-node-accepted.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-accepted', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-accepted', reason: 'execution_path_closed', closureRole: 'claim-bearing', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
 md('runs/run-main/edges/edge-accepted-to-eow.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-accepted-to-eow', runId: 'run-main', fromRunNodeId: 'run-node-accepted', toRunNodeId: 'eow-run-node-accepted', edgeType: 'closes_with', createdAt: now, status: 'done' });
 
 assert.deepEqual(parseProject(reviewWork).errors, [], 'review fixture is canonically valid');

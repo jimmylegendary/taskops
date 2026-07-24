@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { canonicalSha256 } from '../lib-run-closure.js';
 import { fmBlock, parseProject, summarizeProject } from '../lib-taskops.js';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-closure-policy-'));
@@ -24,7 +25,7 @@ function ensureDirs(workDir) {
   }
 }
 
-function makeClosedWork(name, { workStatus = 'done', taskEow = {}, runEow = {} } = {}) {
+function makeClosedWork(name, { workStatus = 'done', taskEow = {}, runEow = {}, reviewReport = null } = {}) {
   const workDir = join(tempRoot, name);
   ensureDirs(workDir);
   writeMd(join(workDir, 'index.md'), {
@@ -146,21 +147,83 @@ function makeClosedWork(name, { workStatus = 'done', taskEow = {}, runEow = {} }
     createdAt: now,
     status: 'done',
   });
+  if (reviewReport) {
+    writeMd(join(workDir, 'runs/run-main/nodes/review-run-node-one.md'), {
+      taskOpsVersion: 'v1',
+      entityType: 'runNode',
+      id: 'review-run-node-one',
+      runId: 'run-main',
+      type: 'review',
+      title: 'Review run node one',
+      sourceTaskId: 'task-one',
+      sourceTaskGroupVersionId: 'tgv-root-v1',
+      status: 'done',
+      createdAt: now,
+      reviewsRunNodeId: 'run-node-one',
+      reviewedRunId: 'run-main',
+      reviewReport,
+      reviewReportHash: canonicalSha256(reviewReport),
+    });
+    writeMd(join(workDir, 'runs/run-main/nodes/eow-review-run-node-one.md'), {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: 'eow-review-run-node-one',
+      runId: 'run-main',
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: 'review-run-node-one',
+      reason: 'review_recorded',
+      closureRole: 'supporting',
+      declaredBy: 'test',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    });
+    writeMd(join(workDir, 'runs/run-main/edges/edge-run-node-one-to-review.md'), {
+      taskOpsVersion: 'v1',
+      entityType: 'runEdge',
+      id: 'edge-run-node-one-to-review',
+      runId: 'run-main',
+      fromRunNodeId: 'run-node-one',
+      toRunNodeId: 'review-run-node-one',
+      edgeType: 'reviews',
+      createdAt: now,
+      status: 'done',
+    });
+    writeMd(join(workDir, 'runs/run-main/edges/edge-review-run-node-one-to-eow.md'), {
+      taskOpsVersion: 'v1',
+      entityType: 'runEdge',
+      id: 'edge-review-run-node-one-to-eow',
+      runId: 'run-main',
+      fromRunNodeId: 'review-run-node-one',
+      toRunNodeId: 'eow-review-run-node-one',
+      edgeType: 'closes_with',
+      createdAt: now,
+      status: 'done',
+    });
+  }
   return workDir;
 }
 
 try {
+  const reviewReport = {
+    decision: 'approved',
+    mode: 'runner-managed',
+    reviewedAcceptanceHash: 'acceptance-hash',
+    reviewedResultHash: 'result-hash',
+  };
   const approvedFields = {
     reason: 'approved_result',
     approvedByReviewNodeId: 'review-run-node-one',
     approvedReviewMode: 'runner-managed',
-    approvedReviewReportHash: 'review-hash',
+    approvedReviewReportHash: canonicalSha256(reviewReport),
     reviewedAcceptanceHash: 'acceptance-hash',
     reviewedResultHash: 'result-hash',
   };
   const approved = parseProject(makeClosedWork('policy-approved-work', {
     taskEow: approvedFields,
     runEow: approvedFields,
+    reviewReport,
   }));
   assert.equal(approved.errors.length, 0);
   assert.equal(approved.closure.complete, true);
@@ -181,13 +244,13 @@ try {
   assert.equal(manual.closure.closureState, 'manual_attested_complete');
   assert.ok(manual.warnings.some((warning) => warning.includes('manual_verified/manual_close EoW attests structural closure but is not policy-approved review closure')));
   const manualSummary = summarizeProject(manual);
-  assert.ok(manualSummary.includes('- Policy-approved closure: incomplete (tasks 0/1, run closures 0/1)'));
+  assert.ok(manualSummary.includes('- Policy-approved closure: incomplete (tasks 0/1, claim closures 0/0, supporting closures 1/1)'));
   assert.ok(manualSummary.includes('- Manual-attested closure: complete (tasks 1/1, run closures 1/1)'));
   assert.ok(manualSummary.includes('- Closure state: manual_attested_complete'));
 
   const informationalApproved = parseProject(makeClosedWork('informational-approved-work', {
-    taskEow: { ...approvedFields, approvedReviewMode: 'informational' },
-    runEow: { ...approvedFields, approvedReviewMode: 'informational' },
+    taskEow: { reason: 'execution_path_closed' },
+    runEow: { reason: 'execution_path_closed' },
   }));
   assert.equal(informationalApproved.errors.length, 0);
   assert.equal(informationalApproved.closure.complete, true);
