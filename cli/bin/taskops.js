@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   classifyTaskReadiness,
   discoverProjects,
@@ -82,9 +84,26 @@ function parseArgs(argv) {
   return { positional, flags };
 }
 
+export async function writeAll(stream, text) {
+  const value = String(text);
+  if (stream.write(value)) return;
+  await once(stream, 'drain');
+}
+
+export async function writeJson(value, stream = process.stdout) {
+  await writeAll(stream, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+class CliExitError extends Error {
+  constructor(message, exitCode = 1) {
+    super(message);
+    this.name = 'CliExitError';
+    this.exitCode = exitCode;
+  }
+}
+
 function fail(message, code = 1) {
-  console.error(message);
-  process.exit(code);
+  throw new CliExitError(message, code);
 }
 
 function flagHasValue(flags, key) {
@@ -120,15 +139,15 @@ function daemonExitCode(result) {
   return Array.isArray(result?.cycles) && result.cycles.some((cycle) => failureReasons.has(cycle.stopReason)) ? 1 : 0;
 }
 
-const { positional, flags } = parseArgs(process.argv.slice(2));
-const cmd = positional[0];
+export async function main(argv = process.argv.slice(2)) {
+  const { positional, flags } = parseArgs(argv);
+  const cmd = positional[0];
+  try {
+    if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+      usage();
+      return 0;
+    }
 
-if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
-  usage();
-  process.exit(0);
-}
-
-try {
   if (cmd === 'init') {
     const dir = positional[1];
     if (!dir) fail('Missing init target directory');
@@ -139,7 +158,7 @@ try {
       language: flags.language && flags.language !== true ? String(flags.language) : null,
     });
     console.log(root);
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'vault-init') {
@@ -153,8 +172,8 @@ try {
       debounceMs: flags['debounce-ms'] ? Number(flags['debounce-ms']) : 5000,
       commitMessage: flags['commit-message'] && flags['commit-message'] !== true ? String(flags['commit-message']) : 'TaskOps auto-sync',
     });
-    console.log(JSON.stringify(result, null, 2));
-    process.exit(0);
+    await writeJson(result);
+    return 0;
   }
 
   if (cmd === 'validate') {
@@ -173,7 +192,7 @@ try {
       }
       for (const warning of parsed.warnings) console.error(`WARN ${warning}`);
     }
-    process.exit(errorCount === 0 ? 0 : 1);
+    return errorCount === 0 ? 0 : 1;
   }
 
   if (cmd === 'audit') {
@@ -187,10 +206,10 @@ try {
       fail(`Invalid --max-tasks-flat value: ${flags['max-tasks-flat']}`);
     }
     const audit = auditParsedWork(parsed, { maxFlatTasks });
-    if (flags.json) console.log(JSON.stringify(audit, null, 2));
+    if (flags.json) await writeJson(audit);
     else process.stdout.write(renderAuditText(audit));
     const strict = flags.strict === true;
-    process.exit(strict && !audit.claimSafe ? 1 : 0);
+    return strict && !audit.claimSafe ? 1 : 0;
   }
 
   if (cmd === 'trainingdata') {
@@ -198,12 +217,12 @@ try {
     if (!pathArg) fail('Missing trainingdata work-dir');
     const trajectories = extractTrainingData(resolve(pathArg));
     if (flags.summary) {
-      console.log(JSON.stringify(summarizeTrainingData(trajectories), null, 2));
+      await writeJson(summarizeTrainingData(trajectories));
     } else {
       // JSONL: one labeled trajectory per line — a drop-in dataset shard.
       for (const t of trajectories) console.log(JSON.stringify(t));
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'summary') {
@@ -217,7 +236,7 @@ try {
     } else {
       process.stdout.write(summary);
     }
-    process.exit(parsed.errors.length === 0 ? 0 : 1);
+    return parsed.errors.length === 0 ? 0 : 1;
   }
 
   if (cmd === 'show') {
@@ -243,9 +262,9 @@ try {
       errors: parsed.errors,
       warnings: parsed.warnings,
     };
-    if (flags.json) console.log(JSON.stringify(plain, null, 2));
+    if (flags.json) await writeJson(plain);
     else process.stdout.write(summarizeProject(parsed));
-    process.exit(parsed.errors.length === 0 ? 0 : 1);
+    return parsed.errors.length === 0 ? 0 : 1;
   }
 
   if (cmd === 'classify-runnable') {
@@ -257,7 +276,7 @@ try {
     const task = findTaskById(parsed, taskId);
     const classification = classifyTaskReadiness(task);
     const payload = { projectId: parsed.project.id, task, classification };
-    if (flags.json) console.log(JSON.stringify(payload, null, 2));
+    if (flags.json) await writeJson(payload);
     else {
       console.log(`${task.id}: ${classification.runReadiness}`);
       if (classification.originalRunReadiness) console.log(`original_runReadiness: ${classification.originalRunReadiness}`);
@@ -267,14 +286,14 @@ try {
         console.log(`${issue.severity || 'warning'}: ${issue.message}`);
       }
     }
-    process.exit(parsed.errors.length === 0 ? 0 : 1);
+    return parsed.errors.length === 0 ? 0 : 1;
   }
 
   if (cmd === 'next') {
     const workDir = positional[1];
     if (!workDir) fail('Missing next work-dir');
     const result = computeNextAction(workDir);
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`work=${result.workId} action=${result.action}`);
       if (result.target) {
@@ -286,14 +305,14 @@ try {
       if (result.stopReason) console.log(`stopReason=${result.stopReason}`);
       console.log(`command=${result.command}`);
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'explain') {
     const workDir = positional[1];
     if (!workDir) fail('Missing explain work-dir');
     const result = explainWork(workDir);
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       const c = result.closure || {};
       console.log(`work=${result.workId} status=${result.status} complete=${result.complete}`);
@@ -316,7 +335,7 @@ try {
         for (const e of result.validationErrors) console.log(`- ${e}`);
       }
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'close') {
@@ -338,7 +357,7 @@ try {
       followUpNeeded,
       budget,
     });
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       const t = result.target;
       const targetStr = t.type === 'runNode' ? `runNode ${t.runId}/${t.id}` : `task ${t.id} (version ${t.taskGroupVersionId})`;
@@ -350,7 +369,7 @@ try {
         console.log(result.eowPath);
       }
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'review') {
@@ -359,7 +378,7 @@ try {
     if (!workDir) fail('Missing review work-dir');
     if (!targetId) fail('Missing review target id');
     const result = reviewTarget(workDir, targetId);
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`Reviewed ${result.target.runId}/${result.target.runNodeId} with ${result.reviewNodeId}`);
       console.log(`decision: ${result.reviewReport.decision}`);
@@ -376,7 +395,7 @@ try {
         for (const item of result.reviewReport.failedChecks) console.log(`- ${item}`);
       }
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'promote-partials') {
@@ -400,7 +419,7 @@ try {
     const result = apply
       ? promotePartialCompletions(workDir, { partialId, maxFollowUpDepth, partialRepeatThreshold, dryRun: false })
       : planPartialPromotions(workDir, { partialId, maxFollowUpDepth, partialRepeatThreshold });
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`workId=${result.workId} dryRun=${result.dryRun === true} promotionCount=${result.promotionCount} skippedCount=${result.skippedCount}`);
       if (result.waveBudget) {
@@ -434,20 +453,20 @@ try {
         }
       }
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'unblock-check') {
     const workDir = positional[1];
     if (!workDir) fail('Missing unblock-check work-dir');
     const result = recheckBlockedTasks(workDir, { dryRun: flags['dry-run'] === true });
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`checked=${result.checked.length} unblocked=${result.unblocked.length} stillBlocked=${result.stillBlocked.length} dryRun=${result.dryRun}`);
       for (const item of result.unblocked) console.log(`- unblocked ${item.taskId}`);
       for (const item of result.stillBlocked) console.log(`- still_blocked ${item.taskId}: ${item.blockers.filter((b) => !b.resolved).map((b) => b.detail).join('; ')}`);
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'run') {
@@ -491,9 +510,9 @@ try {
           if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
         },
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else console.log(`daemon=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
-      process.exit(daemonExitCode(result));
+      return daemonExitCode(result);
     }
     const selfGuideFile = flags['self-guide-file'] && flags['self-guide-file'] !== true
       ? String(flags['self-guide-file'])
@@ -523,7 +542,7 @@ try {
       aiResolver: flags['ai-resolver'] != null && flags['ai-resolver'] !== true ? flags['ai-resolver'] : null,
     });
     if (flags.json) {
-      console.log(JSON.stringify(result, null, 2));
+      await writeJson(result);
     } else {
       console.log(`workId=${result.workId} runId=${result.runId} executor=${result.executor} stopReason=${result.stopReason} stepsRun=${result.stepsRun}`);
       if (result.maxSteps != null) console.log(`maxSteps=${result.maxSteps}`);
@@ -539,7 +558,7 @@ try {
         console.log(`- ${kind}task ${t.taskId} -> ${t.status} (runNode=${t.runNodeId})${extra}${t.message ? `: ${t.message}` : ''}`);
       }
     }
-    process.exit(result.stopReason === 'task_failed' || result.stopReason === 'validation_failed' ? 1 : 0);
+    return result.stopReason === 'task_failed' || result.stopReason === 'validation_failed' ? 1 : 0;
   }
 
   if (cmd === 'queue') {
@@ -573,7 +592,7 @@ try {
     }
     else fail(`Unknown queue subcommand: ${subcmd}`);
 
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else if (Array.isArray(result.rows)) {
       console.log(`workId=${result.workId} db=${result.dbPath} rows=${result.rows.length}`);
       for (const row of result.rows) {
@@ -591,7 +610,7 @@ try {
     } else {
       console.log(`workId=${result.workId} db=${result.dbPath} claimed=false`);
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'runner') {
@@ -626,7 +645,7 @@ try {
         ...commonOptions,
         waveId: flags['wave-id'] && flags['wave-id'] !== true ? String(flags['wave-id']) : null,
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else if (!result.claimed) {
         console.log(`workId=${result.workId} claimed=false stopReason=${result.stopReason}`);
       } else {
@@ -634,7 +653,7 @@ try {
         console.log(`stopReason=${result.runResult.stopReason} stepsRun=${result.runResult.stepsRun}`);
         if (result.report) console.log(`report=${result.report.id} sink=${result.report.report_sink}`);
       }
-      process.exit(result.releaseStatus === 'failed' ? 1 : 0);
+      return result.releaseStatus === 'failed' ? 1 : 0;
     }
     const result = await runQueueWatch(workDir, {
       ...commonOptions,
@@ -646,7 +665,7 @@ try {
       until: flags.until && flags.until !== true ? String(flags.until) : null,
       stopOnFailure: flags['continue-on-failure'] === true ? false : true,
     });
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`workId=${result.workId} watchId=${result.watchId} runtime=${result.runtimeAdapter} stopReason=${result.stopReason} waves=${result.claimedWaves} items=${result.claimedItems}`);
       if (result.stopDetail) console.log(`stopDetail=${result.stopDetail}`);
@@ -657,7 +676,7 @@ try {
         console.log(`- ${wave.waveId} queueItem=${queueItem} release=${release} stopReason=${stopReason}`);
       }
     }
-    process.exit(result.stopReason === 'wave_failed' ? 1 : 0);
+    return result.stopReason === 'wave_failed' ? 1 : 0;
   }
 
   if (cmd === 'delegate') {
@@ -710,9 +729,9 @@ try {
           if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
         },
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else console.log(`delegate=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
-      process.exit(daemonExitCode(result));
+      return daemonExitCode(result);
     }
     const result = enableDaemon(workDir, {
       ...delegateOptions,
@@ -720,14 +739,14 @@ try {
       dryRun: flags['dry-run'] === true,
       enable: flags.enable === false || flags.enable === 'false' ? false : true,
     });
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`${result.dryRun ? 'would enable delegate' : 'enabled delegate'} ${result.serviceName}`);
       console.log(result.unitPath);
       console.log(result.activationPath);
       console.log(`start=${result.startRequested ? 'yes' : 'no'} queueItems=${result.activation.syncedQueueItems ?? 'not-synced'}`);
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'daemon') {
@@ -783,18 +802,18 @@ try {
           if (entry.stopDetail) console.log(`stopDetail=${entry.stopDetail}`);
         },
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else console.log(`daemon=${result.name} runnerId=${result.runnerId} cycles=${result.cycles.length} stopped=${result.stopRequested ? 'signal' : 'bounded'}`);
-      process.exit(daemonExitCode(result));
+      return daemonExitCode(result);
     }
 
     if (subcmd === 'unit') {
       const workDir = positional[2];
       if (!workDir) fail('Missing daemon unit work-dir');
       const result = renderSystemdUnit(workDir, daemonOptions);
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else process.stdout.write(result.unit);
-      process.exit(0);
+      return 0;
     }
 
     if (subcmd === 'install') {
@@ -806,12 +825,12 @@ try {
         dryRun: flags['dry-run'] === true,
         enable: flags.enable === false || flags.enable === 'false' ? false : true,
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else {
         console.log(`${result.dryRun ? 'would install' : 'installed'} ${result.serviceName}`);
         console.log(result.unitPath);
       }
-      process.exit(0);
+      return 0;
     }
 
     if (subcmd === 'enable') {
@@ -823,27 +842,27 @@ try {
         dryRun: flags['dry-run'] === true,
         enable: flags.enable === false || flags.enable === 'false' ? false : true,
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else {
         console.log(`${result.dryRun ? 'would enable' : 'enabled'} ${result.serviceName}`);
         console.log(result.unitPath);
         console.log(result.activationPath);
         console.log(`start=${result.startRequested ? 'yes' : 'no'} queueItems=${result.activation.syncedQueueItems ?? 'not-synced'}`);
       }
-      process.exit(0);
+      return 0;
     }
 
     if (['start', 'stop', 'restart', 'status'].includes(subcmd)) {
       const name = positional[2];
       if (!name) fail(`Missing daemon ${subcmd} name`);
       const result = controlDaemon(name, subcmd);
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else {
         process.stdout.write(result.stdout || '');
         process.stderr.write(result.stderr || '');
         if (!result.stdout && !result.stderr) console.log(`${subcmd} ${result.serviceName}: ${result.ok ? 'ok' : 'failed'}`);
       }
-      process.exit(subcmd === 'status' ? 0 : (result.ok ? 0 : 1));
+      return subcmd === 'status' ? 0 : (result.ok ? 0 : 1);
     }
 
     if (subcmd === 'logs') {
@@ -852,31 +871,31 @@ try {
       const result = daemonLogs(name, {
         lines: flags.lines && flags.lines !== true ? flags.lines : 100,
       });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else {
         process.stdout.write(result.stdout || '');
         process.stderr.write(result.stderr || '');
       }
-      process.exit(result.ok ? 0 : 1);
+      return result.ok ? 0 : 1;
     }
 
     if (subcmd === 'uninstall') {
       const name = positional[2];
       if (!name) fail('Missing daemon uninstall name');
       const result = uninstallDaemon(name, { dryRun: flags['dry-run'] === true });
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else console.log(`${result.dryRun ? 'would uninstall' : 'uninstalled'} ${result.serviceName}`);
-      process.exit(0);
+      return 0;
     }
 
     if (subcmd === 'read-unit') {
       const name = positional[2];
       if (!name) fail('Missing daemon read-unit name');
       const result = readDaemonUnit(name);
-      if (flags.json) console.log(JSON.stringify(result, null, 2));
+      if (flags.json) await writeJson(result);
       else if (result.exists) process.stdout.write(result.unit);
       else fail(`No unit installed at ${result.unitPath}`, 1);
-      process.exit(0);
+      return 0;
     }
 
     fail(`Unknown daemon subcommand: ${subcmd}`);
@@ -891,14 +910,14 @@ try {
     if (!instruction && !instructionFile) fail('Missing --instruction or --instruction-file');
     const reason = flags.reason && flags.reason !== true ? String(flags.reason) : null;
     const result = restartFromTask(workDir, { fromTaskId, instruction, instructionFile, reason });
-    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    if (flags.json) await writeJson(result);
     else {
       console.log(`workId=${result.workId} taskGroup=${result.taskGroupId} from=${result.fromVersionId} to=${result.toVersionId} fromTask=${result.fromTaskId}`);
       console.log(`preservedTasks=${result.preservedTaskCount} resetTasks=${result.resetTaskCount} snapshot=${result.snapshotId}`);
       if (result.reason) console.log(`reason=${result.reason}`);
       console.log(`newVersionDir=${result.newVersionDir}`);
     }
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'decompose' || cmd === 'refactor') {
@@ -910,14 +929,14 @@ try {
     const supersedes = cmd === 'refactor' ? requireFlag(flags, 'supersedes') : null;
     const out = writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedesVersionId: supersedes });
     console.log(out);
-    process.exit(0);
+    return 0;
   }
 
   if (cmd === 'git-status') {
     const dir = positional[1];
     if (!dir) fail('Missing git-status vault dir');
-    console.log(JSON.stringify(gitStatus(dir, { branch: flags.branch ? String(flags.branch) : null }), null, 2));
-    process.exit(0);
+    await writeJson(gitStatus(dir, { branch: flags.branch ? String(flags.branch) : null }));
+    return 0;
   }
 
   if (cmd === 'git-sync') {
@@ -927,8 +946,8 @@ try {
       message: flags.message && flags.message !== true ? String(flags.message) : 'TaskOps sync',
       branch: flags.branch ? String(flags.branch) : null,
     });
-    console.log(JSON.stringify(result, null, 2));
-    process.exit(0);
+    await writeJson(result);
+    return 0;
   }
 
   if (cmd === 'watch-sync') {
@@ -944,7 +963,26 @@ try {
     await new Promise(() => {});
   }
 
-  fail(`Unknown command: ${cmd}`);
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+    fail(`Unknown command: ${cmd}`);
+  } catch (error) {
+    const exitCode = error instanceof CliExitError ? error.exitCode : 1;
+    await writeAll(
+      process.stderr,
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return exitCode;
+  }
+}
+
+function isDirectEntry() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectEntry()) {
+  process.exitCode = await main();
 }
