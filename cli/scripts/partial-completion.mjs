@@ -61,7 +61,7 @@ function makePartialWork(name) {
 try {
   const workDir = makePartialWork('partial-work');
   const taskPath = join(workDir, 'task-groups/tg-root/versions/tgv-root-v2/tasks/task-partial.md');
-  const canonicalEowPath = join(workDir, 'task-groups/tg-root/versions/tgv-root-v2/eow/eow-task-partial.md');
+  const canonicalEowPath = join(workDir, 'task-groups/tg-root/versions/tgv-root-v2/eow/eow-task-partial-tgv-root-v2.md');
   const beforeStatus = parseMarkdownFile(taskPath).status;
 
   const partial = JSON.parse(run([
@@ -77,7 +77,7 @@ try {
   assert.equal(partial.closed, false, 'partial close must not claim terminal closure');
   assert.equal(partial.statusFlipped, false, 'partial close must not flip task status');
   assert.equal(parseMarkdownFile(taskPath).status, beforeStatus, 'partial close must preserve task status');
-  assert.equal(existsSync(canonicalEowPath), false, 'partial close must not create canonical eow-${id}.md');
+  assert.equal(existsSync(canonicalEowPath), false, 'partial close must not create a version-qualified canonical task EoW');
 
   let parsed = parseProject(workDir);
   assert.equal(parsed.errors.length, 0, parsed.errors.join('\n'));
@@ -110,7 +110,7 @@ try {
 
   parsed = parseProject(workDir);
   assert.equal(parsed.errors.length, 0, parsed.errors.join('\n'));
-  assert.equal(parsed.eowNodes.has('eow-task-partial'), true, 'canonical EoW should be parsed as an EoW node');
+  assert.equal(parsed.eowNodes.has('eow-task-partial-tgv-root-v2'), true, 'canonical EoW should be parsed as an EoW node');
   assert.equal(parsed.partialNodes.has(partial.partialId), true, 'partial marker should remain separate evidence');
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

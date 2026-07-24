@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   fmBlock,
@@ -167,7 +167,7 @@ function applyApprovedReviewToEow(fm) {
 }
 
 function legacyCloseRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedAt, closureRole, approvedReview: review = null }) {
-  const eowRunNodeId = `eow-${runNodeId}`;
+  const eowRunNodeId = `eow-${runNodeId}-${runId}`;
   const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
   if (!existsSync(eowRunPath)) {
     const eowFm = {
@@ -208,7 +208,8 @@ function legacyCloseRunNodeWithEow({ runDir, runId, runNodeId, reason, finishedA
 
 function legacyCloseTaskWithEow({ task, reason, finishedAt, approvedReview: review = null }) {
   const versionDir = dirname(dirname(task.path));
-  const eowTaskId = `eow-${task.id}`;
+  const taskGroupVersionId = basename(versionDir);
+  const eowTaskId = `eow-${task.id}-${taskGroupVersionId}`;
   const eowTaskDir = join(versionDir, 'eow');
   mkdirSync(eowTaskDir, { recursive: true });
   const eowTaskPath = join(eowTaskDir, `${eowTaskId}.md`);
@@ -220,6 +221,7 @@ function legacyCloseTaskWithEow({ task, reason, finishedAt, approvedReview: revi
       graphType: 'task',
       attachedToType: 'task',
       attachedToId: task.id,
+      taskGroupVersionId,
       reason,
       declaredBy: 'taskops-runner',
       declaredAt: finishedAt,

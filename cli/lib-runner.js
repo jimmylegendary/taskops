@@ -18,7 +18,11 @@ import {
   isPartialUnresolved,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeExecutorSpec } from './lib-runtime-adapters.js';
-import { allocateRunNodeIdentity } from './lib-run-identity.js';
+import {
+  allocateRunNodeIdentity,
+  runEowId,
+  taskEowId,
+} from './lib-run-identity.js';
 import { inspectNonEmptyUtf8File } from './lib-artifact-contract.js';
 import { canonicalSha256 } from './lib-run-closure.js';
 import {
@@ -5141,8 +5145,18 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   // 한해 사후 검증한다(정상 경로에서는 절대 발화하지 않음).
   if (POLICY_APPROVING_ACCEPTANCE_MODES.has(normalizeAcceptance(task).mode)) {
     const postExplorationFm = parseMarkdownFile(task.path);
-    const sourceTaskEowPath = join(dirname(dirname(task.path)), 'eow', `eow-${task.id}.md`);
-    if (postExplorationFm.status === 'done' || existsSync(sourceTaskEowPath)) {
+    const sourceTaskEowDir = join(dirname(dirname(task.path)), 'eow');
+    const sourceTaskEowPaths = [
+      join(sourceTaskEowDir, `${taskEowId({
+        taskGroupVersionId: task.taskGroupVersionId,
+        taskId: task.id,
+      })}.md`),
+      join(sourceTaskEowDir, `eow-${task.id}.md`),
+    ];
+    if (
+      postExplorationFm.status === 'done'
+      || sourceTaskEowPaths.some((path) => existsSync(path))
+    ) {
       throw new Error(`P0#2 invariant violated: exploration must not close acceptance-bearing task ${task.id} (acceptance requires verified/reviewed closure, not an exploration pass)`);
     }
   }
@@ -5673,7 +5687,10 @@ export function closeTarget(workDir, targetId, {
       });
     }
 
-    const eowId = `eow-${task.id}`;
+    const eowId = taskEowId({
+      taskGroupVersionId: task.taskGroupVersionId,
+      taskId: task.id,
+    });
     const versionDir = dirname(dirname(task.path));
     const eowDir = join(versionDir, 'eow');
     ensureDir(eowDir);
@@ -5739,7 +5756,10 @@ export function closeTarget(workDir, targetId, {
   }
 
   const runDir = join(projectDir, 'runs', node.runId);
-  const eowId = `eow-${node.id}`;
+  const eowId = runEowId({
+    runId: node.runId,
+    runNodeId: node.id,
+  });
   const eowPath = join(runDir, 'nodes', `${eowId}.md`);
   if (existsSync(eowPath)) throw new Error(`Refusing to overwrite existing EoW file at ${eowPath}`);
   const eowFm = {

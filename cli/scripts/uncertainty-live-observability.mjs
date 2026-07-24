@@ -263,7 +263,7 @@ try {
   assert.equal(exploreTask.status, 'pending', 'exploration must not close the source objective task (stays pending, never done)');
   assert.equal(exploreTask.runReadiness, 'needs_decomposition');
   assert.equal(String(exploreTask.uncertaintyState || '').trim(), 'known_unknown', 'exploration success promotes uncertaintyState exactly one rung unknown_unknown→known_unknown');
-  assert.equal(existsSync(join(exploreWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore-valid.md')), false, 'exploration must not attach a task-EoW to the source objective');
+  assert.equal(existsSync(join(exploreWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore-valid-tgv-root-v2.md')), false, 'exploration must not attach a task-EoW to the source objective');
   assert.equal(exploreTask.surpriseHistory.length, 1);
   assert.equal(exploreTask.surpriseHistory[0].actionKind, 'explore');
   assert.deepEqual(exploreTask.surpriseHistory[0].contradictedKnownIds, ['k-explore-assumption']);
@@ -301,7 +301,7 @@ try {
   assert.equal(malformedExecuteTask.needsManualReview, true);
   assert.equal(malformedExecuteTask.malformedSurpriseReport, true);
   assert.equal(malformedExecuteTask.surpriseHistory, undefined);
-  assert.equal(existsSync(join(malformedExecuteWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-execute-malformed.md')), false);
+  assert.equal(existsSync(join(malformedExecuteWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-execute-malformed-tgv-root-v2.md')), false);
 
   const malformedExploreWorkDir = makeWork('explore-malformed-work', baseTask('task-explore-malformed', 'malformed exploration report', {
     runReadiness: 'needs_exploration',
@@ -318,7 +318,7 @@ try {
   assert.equal(malformedExploreTask.needsManualReview, true);
   assert.equal(malformedExploreTask.malformedSurpriseReport, true);
   assert.equal(malformedExploreTask.surpriseHistory, undefined);
-  assert.equal(existsSync(join(malformedExploreWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore-malformed.md')), false);
+  assert.equal(existsSync(join(malformedExploreWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore-malformed-tgv-root-v2.md')), false);
 
   if (previousClaudeBin == null) delete process.env.TASKOPS_CLAUDE_BIN;
   else process.env.TASKOPS_CLAUDE_BIN = previousClaudeBin;

@@ -17,6 +17,20 @@ function inferredActionKind(node) {
   }[node.type] || node.type || 'unknown';
 }
 
+export function runEowId({ runId, runNodeId } = {}) {
+  if (!runId || !runNodeId) {
+    throw new Error('runId and runNodeId are required');
+  }
+  return `eow-${safePart(runNodeId)}-${safePart(runId)}`;
+}
+
+export function taskEowId({ taskGroupVersionId, taskId } = {}) {
+  if (!taskGroupVersionId || !taskId) {
+    throw new Error('taskGroupVersionId and taskId are required');
+  }
+  return `eow-${safePart(taskId)}-${safePart(taskGroupVersionId)}`;
+}
+
 export function allocateRunNodeIdentity({
   taskId,
   taskGroupVersionId,

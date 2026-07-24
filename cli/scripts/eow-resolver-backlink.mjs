@@ -259,36 +259,37 @@ function stateWriterIo() {
   const taskPath = join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'tasks', 'task-a.md');
   writeFm(taskPath, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-a' }, '# Task A\n');
   closeTaskWithEowFile({ task: { id: 'task-a', path: taskPath }, reason: 'completed', finishedAt: fixedNow }, io);
-  const taskEowPath = join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'eow', 'eow-task-a.md');
+  const taskEowPath = join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'eow', 'eow-task-a-tgv-root-v1.md');
   assert.equal(
     readFileSync(taskEowPath, 'utf8'),
     fmBlock({
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: 'eow-task-a',
+      id: 'eow-task-a-tgv-root-v1',
       graphType: 'task',
       attachedToType: 'task',
       attachedToId: 'task-a',
+      taskGroupVersionId: 'tgv-root-v1',
       reason: 'completed',
       declaredBy: 'taskops-runner',
       declaredAt: fixedNow,
       createdAt: fixedNow,
       status: 'done',
     }) + '# EoW: task-a\n',
-    'task EoW output should remain byte-identical when resolvedByTaskGroupId is omitted',
+    'task EoW output should include its version-qualified identity when resolvedByTaskGroupId is omitted',
   );
 
   const runDir = join(root, 'runs', 'run-main');
   mkdirSync(join(runDir, 'nodes'), { recursive: true });
   mkdirSync(join(runDir, 'edges'), { recursive: true });
   closeRunNodeWithEowFiles({ runDir, runId: 'run-main', runNodeId: 'run-node-task-a', reason: 'completed', closureRole: 'supporting', finishedAt: fixedNow }, io);
-  const runEowPath = join(runDir, 'nodes', 'eow-run-node-task-a.md');
+  const runEowPath = join(runDir, 'nodes', 'eow-run-node-task-a-run-main.md');
   assert.equal(
     readFileSync(runEowPath, 'utf8'),
     fmBlock({
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: 'eow-run-node-task-a',
+      id: 'eow-run-node-task-a-run-main',
       runId: 'run-main',
       graphType: 'run',
       attachedToType: 'runNode',
@@ -300,7 +301,7 @@ function stateWriterIo() {
       createdAt: fixedNow,
       status: 'done',
     }) + '# EoW: run-node-task-a\n',
-    'run EoW output should remain byte-identical when resolvedByTaskGroupId is omitted',
+    'run EoW output should include its run-qualified identity when resolvedByTaskGroupId is omitted',
   );
 
   const withResolverRoot = mkdtempSync(join(tmpdir(), 'taskops-eow-writer-resolver-'));
@@ -313,7 +314,7 @@ function stateWriterIo() {
     resolvedByTaskGroupId: 'tg-child',
   }, io);
   assert.match(
-    readFileSync(join(withResolverRoot, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'eow', 'eow-task-b.md'), 'utf8'),
+    readFileSync(join(withResolverRoot, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'eow', 'eow-task-b-tgv-root-v1.md'), 'utf8'),
     /^resolvedByTaskGroupId: tg-child$/m,
     'state writer should include resolvedByTaskGroupId when provided',
   );

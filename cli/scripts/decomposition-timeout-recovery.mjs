@@ -192,9 +192,9 @@ try {
   assert.equal(recoveredTask.childTaskGroupId, 'tg-open-depth');
   assert.equal(recoveredTask.lastRunFailureReason, undefined);
   assert.match(recoveredTask.runReadinessReason, /adapter timeout recovery/);
-  assert.equal(existsSync(join(recoveryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth.md')), true);
-  assert.equal(parseMarkdownFile(join(recoveryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth.md')).reason, 'decomposed_by_runner_after_adapter_timeout_recovery');
-  assert.equal(parseMarkdownFile(join(recoveryWorkDir, 'runs', recoveredRun.runId, 'nodes', `eow-${recoveredRun.actions[0].runNodeId}.md`)).reason, 'decomposition_recorded_after_adapter_timeout_recovery');
+  assert.equal(existsSync(join(recoveryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth-tgv-root-v2.md')), true);
+  assert.equal(parseMarkdownFile(join(recoveryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth-tgv-root-v2.md')).reason, 'decomposed_by_runner_after_adapter_timeout_recovery');
+  assert.equal(parseMarkdownFile(join(recoveryWorkDir, 'runs', recoveredRun.runId, 'nodes', `eow-${recoveredRun.actions[0].runNodeId}-${recoveredRun.runId}.md`)).reason, 'decomposition_recorded_after_adapter_timeout_recovery');
   const recoveredEvents = readEvents(recoveryWorkDir, recoveredRun.runId);
   assert.equal(recoveredEvents.some((event) => event.type === 'decomposition_recovered_after_adapter_failure'), true);
   assert.equal(recoveredEvents.find((event) => event.type === 'decomposition_recovered_after_adapter_failure').adapterStatus, 'timeout');
@@ -225,7 +225,7 @@ try {
   assert.equal(rejectedTask.status, 'blocked');
   assert.equal(rejectedTask.childTaskGroupId, undefined);
   assert.match(rejectedTask.lastRunFailureReason, /timeout recovery rejected/);
-  assert.equal(existsSync(join(rejectWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth.md')), false);
+  assert.equal(existsSync(join(rejectWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth-tgv-root-v2.md')), false);
   const rejectedEvents = readEvents(rejectWorkDir, rejectedRun.runId);
   assert.equal(rejectedEvents.some((event) => event.type === 'decomposition_recovered_after_adapter_failure'), false);
   assert.equal(rejectedEvents.some((event) => event.type === 'decomposition_completed'), false);

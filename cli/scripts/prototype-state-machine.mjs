@@ -176,13 +176,13 @@ try {
   });
   const action = validRun.actions[0];
   const taskPath = validCase.taskPath;
-  const taskEowPath = join(validCase.versionDir, 'eow', 'eow-prototype.md');
+  const taskEowPath = join(validCase.versionDir, 'eow', 'eow-prototype-tgv-root-v1.md');
   const runEowPath = join(
     validCase.workDir,
     'runs',
     validRun.runId,
     'nodes',
-    `eow-${action.runNodeId}.md`,
+    `eow-${action.runNodeId}-${validRun.runId}.md`,
   );
   assert.equal(action.kind, 'prototype');
   assert.equal(action.status, 'completed');
@@ -208,7 +208,7 @@ try {
       'runs',
       failedRun.runId,
       'nodes',
-      `eow-${failedAction.runNodeId}.md`,
+      `eow-${failedAction.runNodeId}-${failedRun.runId}.md`,
     );
     assert.equal(failedAction.status, 'failed');
     assert.equal(parseMarkdownFile(failedTaskPath).status, 'blocked');

@@ -3,6 +3,7 @@ import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
 import { classifyRunClosure } from './lib-run-closure.js';
+import { runEowId, taskEowId } from './lib-run-identity.js';
 import {
   findSelectedRestartBlockedByIssues,
   rebaseBlockedByVersionRefs,
@@ -2924,7 +2925,10 @@ function selectTaskEowForCarryForward(sourceVersion, task) {
 
 function carriedForwardTaskEow({ sourceEow, task, sourceVersion, newVersionId, declaredBy }) {
   const eow = {
-    id: `eow-${task.id}-${newVersionId}`,
+    id: taskEowId({
+      taskGroupVersionId: newVersionId,
+      taskId: task.id,
+    }),
     graphType: 'task',
     attachedToType: 'task',
     attachedToId: task.id,
@@ -2932,7 +2936,10 @@ function carriedForwardTaskEow({ sourceEow, task, sourceVersion, newVersionId, d
     declaredBy,
     status: 'done',
     preservedFromVersionId: sourceEow.preservedFromVersionId || sourceEow.taskGroupVersionId || sourceVersion.id,
-    preservedFromEowId: sourceEow.preservedFromEowId || sourceEow.id || `eow-${task.id}`,
+    preservedFromEowId: sourceEow.preservedFromEowId || sourceEow.id || taskEowId({
+      taskGroupVersionId: sourceVersion.id,
+      taskId: task.id,
+    }),
     preservedFromReason: sourceEow.preservedFromReason || sourceEow.reason || null,
   };
   for (const key of APPROVAL_FIELDS) {
@@ -3249,29 +3256,46 @@ function closePromotedPartialSourceRunNode(projectDir, partial, now) {
   ensureDir(join(runDir, 'nodes'));
   ensureDir(join(runDir, 'edges'));
 
-  const eowRunNodeId = `eow-${runNodeId}`;
-  const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
+  const qualifiedEowRunNodeId = runEowId({ runId, runNodeId });
+  const qualifiedEowRunPath = join(
+    runDir,
+    'nodes',
+    `${qualifiedEowRunNodeId}.md`,
+  );
+  const legacyEowRunNodeId = `eow-${runNodeId}`;
+  const legacyEowRunPath = join(
+    runDir,
+    'nodes',
+    `${legacyEowRunNodeId}.md`,
+  );
+  const existingEowRunPath = existsSync(qualifiedEowRunPath)
+    ? qualifiedEowRunPath
+    : (existsSync(legacyEowRunPath) ? legacyEowRunPath : null);
+  let eowRunNodeId = qualifiedEowRunNodeId;
   const edgeId = `edge-${runNodeId}-to-eow`;
   const edgePath = join(runDir, 'edges', `${edgeId}.md`);
   let wroteEow = false;
   let wroteEdge = false;
 
-  if (!existsSync(eowRunPath)) {
-    writeFileSync(eowRunPath, fmBlock({
+  if (!existingEowRunPath) {
+    writeFileSync(qualifiedEowRunPath, fmBlock({
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: eowRunNodeId,
+      id: qualifiedEowRunNodeId,
       runId,
       graphType: 'run',
       attachedToType: 'runNode',
       attachedToId: runNodeId,
       reason: 'partial_follow_up_promoted',
+      closureRole: 'supporting',
       declaredBy: 'taskops-promote-partials',
       declaredAt: now,
       createdAt: now,
       status: 'done',
     }) + `# EoW: ${runNodeId}\n`, 'utf8');
     wroteEow = true;
+  } else {
+    eowRunNodeId = parseMarkdownFile(existingEowRunPath).id;
   }
 
   if (!existsSync(edgePath)) {

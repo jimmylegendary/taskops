@@ -117,7 +117,7 @@ function inputRequiredChildPath(root, childTaskGroupId, versionId) {
 
   const parsed = parseProject(root);
   assert.deepEqual(parsed.errors, [], 'external resolver dry-run output should validate without errors');
-  const taskEow = parseMarkdownFile(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-parent.md'));
+  const taskEow = parseMarkdownFile(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-parent-tgv-root-v2.md'));
   assert.equal(
     taskEow.resolvedByTaskGroupId,
     action.childTaskGroupId,

@@ -82,7 +82,7 @@ assert.equal(action?.kind, 'decompose', 'runner action should be decompose');
 assert.equal(action?.status, 'completed', 'decompose action should complete');
 assert.ok(action.childTaskGroupId, 'decompose action should report childTaskGroupId');
 
-const taskEow = parseMarkdownFile(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-parent.md'));
+const taskEow = parseMarkdownFile(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-parent-tgv-root-v2.md'));
 assert.equal(
   taskEow.resolvedByTaskGroupId,
   action.childTaskGroupId,
@@ -97,7 +97,7 @@ assert.equal(
   'decompose wiring output should not emit resolver backlink warnings',
 );
 
-const runEow = parseMarkdownFile(join(root, 'runs', runResult.runId, 'nodes', `eow-${action.runNodeId}.md`));
+const runEow = parseMarkdownFile(join(root, 'runs', runResult.runId, 'nodes', `eow-${action.runNodeId}-${runResult.runId}.md`));
 assert.equal(
   runEow.resolvedByTaskGroupId,
   undefined,

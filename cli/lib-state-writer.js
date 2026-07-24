@@ -1,5 +1,6 @@
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { validateRunNodeActionIdentity } from './lib-run-closure.js';
+import { runEowId, taskEowId } from './lib-run-identity.js';
 
 function requireFn(io, name) {
   const fn = io?.[name];
@@ -173,13 +174,19 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
   if (!['supporting', 'claim-bearing'].includes(closureRole)) {
     throw new Error(`Invalid run EoW closureRole '${closureRole}' for ${runNodeId}`);
   }
-  const eowRunNodeId = `eow-${runNodeId}`;
-  const eowRunPath = join(runDir, 'nodes', `${eowRunNodeId}.md`);
-  if (!exists(eowRunPath)) {
+  const qualifiedEowId = runEowId({ runId, runNodeId });
+  const qualifiedEowPath = join(runDir, 'nodes', `${qualifiedEowId}.md`);
+  const legacyEowId = `eow-${runNodeId}`;
+  const legacyEowPath = join(runDir, 'nodes', `${legacyEowId}.md`);
+  const existingEowPath = exists(qualifiedEowPath)
+    ? qualifiedEowPath
+    : (exists(legacyEowPath) ? legacyEowPath : null);
+  let eowRunNodeId = qualifiedEowId;
+  if (!existingEowPath) {
     const eowFm = {
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: eowRunNodeId,
+      id: qualifiedEowId,
       runId,
       graphType: 'run',
       attachedToType: 'runNode',
@@ -193,15 +200,23 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
     };
     if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') eowFm.resolvedByTaskGroupId = resolvedByTaskGroupId;
     applyApprovedReviewToEow(eowFm, approvedReview);
-    writeTextFile(eowRunPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
+    writeTextFile(qualifiedEowPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
   } else {
-    const current = parseMarkdownFile(eowRunPath);
+    const current = parseMarkdownFile(existingEowPath);
+    eowRunNodeId = current.id;
     for (const [field, expected] of Object.entries({
       runId,
       attachedToId: runNodeId,
       reason,
       closureRole,
     })) {
+      if (
+        field === 'closureRole'
+        && existingEowPath === legacyEowPath
+        && current[field] == null
+      ) {
+        continue;
+      }
       if (current[field] !== expected) {
         throw new Error(`Immutable run EoW mismatch for ${runNodeId}: ${field}`);
       }
@@ -234,16 +249,18 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
   const versionDir = dirname(dirname(task.path));
   const versionIndexPath = join(versionDir, 'index.md');
   const version = exists(versionIndexPath) ? parseMarkdownFile(versionIndexPath) : null;
-  const supersedesVersion = Boolean(
-    version?.restartedFromVersionId || version?.supersedesVersionId,
-  );
-  const eowTaskId = supersedesVersion
-    ? `eow-${task.id}-${version.id || task.taskGroupVersionId}`
-    : `eow-${task.id}`;
+  const taskGroupVersionId = version?.id
+    || task.taskGroupVersionId
+    || basename(versionDir);
+  const eowTaskId = taskEowId({
+    taskGroupVersionId,
+    taskId: task.id,
+  });
   const eowTaskDir = join(versionDir, 'eow');
   ensureDir(eowTaskDir);
   const eowTaskPath = join(eowTaskDir, `${eowTaskId}.md`);
-  if (!exists(eowTaskPath)) {
+  const legacyEowTaskPath = join(eowTaskDir, `eow-${task.id}.md`);
+  if (!exists(eowTaskPath) && !exists(legacyEowTaskPath)) {
     const eowFm = {
       taskOpsVersion: 'v1',
       entityType: 'eow',
@@ -251,6 +268,7 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
       graphType: 'task',
       attachedToType: 'task',
       attachedToId: task.id,
+      taskGroupVersionId,
       reason,
       declaredBy: 'taskops-runner',
       declaredAt: finishedAt,

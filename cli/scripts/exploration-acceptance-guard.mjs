@@ -68,7 +68,7 @@ assert.equal(actions[0].kind, 'explore', 'the acceptance task was routed onto th
 const taskPath = join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-accepted-explore.md');
 const task = parseMarkdownFile(taskPath);
 // (a) source task-EoW 없음
-assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-accepted-explore.md')), false, 'exploration must NOT attach a task-EoW to an acceptance-bearing task (acceptance bypass forbidden)');
+assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-accepted-explore-tgv-root-v2.md')), false, 'exploration must NOT attach a task-EoW to an acceptance-bearing task (acceptance bypass forbidden)');
 // (b) fm.status !== 'done'
 assert.notEqual(task.status, 'done', 'exploration must NOT flip an acceptance-bearing task to done');
 assert.equal(task.status, 'pending', 'the acceptance task stays open (pending) after exploration');
