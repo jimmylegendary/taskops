@@ -2,6 +2,10 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSy
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
+import {
+  findSelectedRestartBlockedByIssues,
+  rebaseBlockedByVersionRefs,
+} from './lib-restart.js';
 
 export const STATUS_VALUES = ['pending', 'active', 'done', 'blocked', 'waiting', 'cancelled'];
 export const RUN_READINESS_VALUES = ['runnable', 'needs_decomposition', 'needs_exploration', 'needs_prototype', 'blocked'];
@@ -1061,6 +1065,21 @@ export function parseProject(projectDir) {
   if (runs.size === 0) warnings.push(withPath(projectDir, t.missingRunIndex));
 
   const activeSnapshot = project.activeSnapshotId ? snapshots.get(project.activeSnapshotId) : null;
+
+  for (const pair of activeSnapshot?.selectedVersions || []) {
+    const selectedVersion = versions.get(pair.versionId);
+    for (const issue of findSelectedRestartBlockedByIssues({
+      version: selectedVersion,
+      versions,
+    })) {
+      errors.push(withPath(
+        activeSnapshot.path,
+        `selected restart version '${selectedVersion.id}' task '${issue.taskId}' `
+        + `depends on superseded internal version '${issue.referencedVersionId}' `
+        + `task '${issue.blockedTaskId}'`,
+      ));
+    }
+  }
 
   for (const version of versions.values()) {
     validateDecompositionBacklink({ version, versions, tasks, runNodes, activeSnapshot, errors, warnings, t, taskKey, runNodeKey });
@@ -3419,7 +3438,12 @@ export function restartFromTask(workDir, { fromTaskId, instruction = null, instr
     for (const key of preserveKeys) {
       if (task[key] !== undefined && task[key] !== null) cloned[key] = task[key];
     }
-    if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') cloned.blockedBy = cloneFrontmatterValue(task.blockedBy);
+    if (task.blockedBy !== undefined && task.blockedBy !== null && task.blockedBy !== '') {
+      cloned.blockedBy = rebaseBlockedByVersionRefs(task.blockedBy, {
+        fromVersionId: sourceVersion.id,
+        toVersionId: newVersionId,
+      });
+    }
     if (Array.isArray(task.unknowns)) cloned.unknowns = [...task.unknowns];
     if (Array.isArray(task.knownList)) cloned.knownList = cloneFrontmatterValue(task.knownList);
     if (Array.isArray(task.surpriseHistory)) cloned.surpriseHistory = cloneFrontmatterValue(task.surpriseHistory);

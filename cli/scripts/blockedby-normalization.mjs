@@ -264,7 +264,9 @@ try {
 
   run(['restart', normalWorkDir, '--from', 'task-api', '--instruction', 'Verify canonical blockedBy survives restart.', '--reason', 'blockedby_preservation']);
   const restartedApiTask = parseMarkdownFile(childTaskPath(normalWorkDir, normalId, 'task-api', 'tgv-blockedby-normal-v2'));
-  assert.deepEqual(restartedApiTask.blockedBy, apiTask.blockedBy);
+  assert.equal(apiTask.blockedBy[0].taskGroupVersionId, 'tgv-blockedby-normal-v1');
+  assert.equal(restartedApiTask.blockedBy[0].taskGroupVersionId, 'tgv-blockedby-normal-v2');
+  assert.equal(restartedApiTask.blockedBy[0].id, apiTask.blockedBy[0].id);
   assert.deepEqual(parseProject(normalWorkDir).errors, []);
 
   const missingId = 'blockedby-missing';

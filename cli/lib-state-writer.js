@@ -168,8 +168,16 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
   const ensureDir = requireFn(io, 'ensureDir');
+  const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
   const versionDir = dirname(dirname(task.path));
-  const eowTaskId = `eow-${task.id}`;
+  const versionIndexPath = join(versionDir, 'index.md');
+  const version = exists(versionIndexPath) ? parseMarkdownFile(versionIndexPath) : null;
+  const supersedesVersion = Boolean(
+    version?.restartedFromVersionId || version?.supersedesVersionId,
+  );
+  const eowTaskId = supersedesVersion
+    ? `eow-${task.id}-${version.id || task.taskGroupVersionId}`
+    : `eow-${task.id}`;
   const eowTaskDir = join(versionDir, 'eow');
   ensureDir(eowTaskDir);
   const eowTaskPath = join(eowTaskDir, `${eowTaskId}.md`);

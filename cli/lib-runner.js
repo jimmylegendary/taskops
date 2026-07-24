@@ -2220,6 +2220,13 @@ function findTargetTask(parsed, target = {}) {
 }
 
 export function pickNextAction(parsed, target = {}) {
+  if (parsed.errors.length > 0) {
+    return {
+      kind: 'stop',
+      reason: STOP_REASONS.NO_RUNNABLE,
+      detail: `Work has ${parsed.errors.length} validation error(s); scheduling is disabled.`,
+    };
+  }
   for (const runNode of parsed.runNodes.values()) {
     const pause = runNodePause(runNode);
     switch (pause?.reason) {
