@@ -304,9 +304,19 @@ export function parseExecutorSpec(executor) {
   return { base: raw.slice(0, idx), variant: raw.slice(idx + 1).trim() || null };
 }
 
+const EXECUTOR_ALIASES = Object.freeze({
+  'openclaw-agent': 'openclaw-cli',
+});
+
+export function normalizeExecutorSpec(value) {
+  const { base, variant } = parseExecutorSpec(value);
+  const adapterName = normalizeRuntimeAdapter(EXECUTOR_ALIASES[base] || base);
+  return { adapterName, variant };
+}
+
 export function runtimeAdapterForExecutor(executor) {
-  const runtime = normalizeRuntimeAdapter(parseExecutorSpec(executor).base);
-  return ADAPTERS[runtime];
+  const { adapterName } = normalizeExecutorSpec(executor);
+  return ADAPTERS[adapterName];
 }
 
 export function executorForRuntime(runtimeAdapter) {
@@ -326,7 +336,8 @@ export function invokeRuntimeAdapter(runtimeAdapter, {
   env = process.env,
   cwd = process.cwd(),
 } = {}) {
-  const adapter = runtimeAdapterForExecutor(runtimeAdapter);
+  const { adapterName, variant } = normalizeExecutorSpec(runtimeAdapter);
+  const adapter = ADAPTERS[adapterName];
   if (adapter.name === 'dry-run') {
     return { ok: true, adapter: adapter.name, status: 'success', message: 'dry-run completed successfully.', stdout: '', stderr: '' };
   }
@@ -347,7 +358,6 @@ export function invokeRuntimeAdapter(runtimeAdapter, {
     };
   }
   const command = adapterCommand(adapter, env);
-  const { variant } = parseExecutorSpec(runtimeAdapter);
   const args = adapter.buildArgs({ prompt, agentId, sessionKey, timeoutMs, variant });
   const result = spawnSync(command, args, {
     encoding: 'utf8',

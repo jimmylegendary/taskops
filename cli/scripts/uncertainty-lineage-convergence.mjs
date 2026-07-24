@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -104,6 +104,19 @@ rewriteFrontmatter(childTaskPath, (fm) => {
   fm.surpriseHistory = [surprise({ id: 's-child-v1', observedAt: '2026-06-28T00:01:00Z', surpriseScore: 0.1 })];
   return fm;
 });
+writeFileSync(
+  childTaskPath,
+  readFileSync(childTaskPath, 'utf8')
+    .replace(
+      '<resolver: the concrete, downstream-consumable choice — a value, not prose>',
+      'Decompose the child once more to measure lineage convergence.',
+    )
+    .replace(
+      '<resolver: the grounds for this decision>',
+      'The convergence smoke requires a resolved human input before further decomposition.',
+    ),
+  'utf8',
+);
 
 const second = json(['run', workDir, '--executor', 'dry-run', '--max-steps', '1']);
 assert.equal(second.actions[0].kind, 'decompose');

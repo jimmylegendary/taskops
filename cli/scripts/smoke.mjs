@@ -1301,8 +1301,8 @@ if (!decomposeChildBody.includes('runReadiness: blocked')) {
 run(['validate', dispatchWorkDir]);
 
 const drainRunOut = JSON.parse(run(['run', dispatchWorkDir, '--executor', 'dry-run', '--max-steps', '5', '--json']).stdout);
-if (drainRunOut.stopReason !== 'blocked_only') {
-  console.error('Expected dispatch runner to stop with blocked_only once decomposable tasks are consumed');
+if (drainRunOut.stopReason !== 'delegation_pending') {
+  console.error('Expected dispatch runner to stop with delegation_pending once only unresolved human-input placeholders remain');
   console.error(drainRunOut);
   process.exit(1);
 }

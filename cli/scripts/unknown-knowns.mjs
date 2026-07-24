@@ -39,7 +39,7 @@ assert.equal(classifyTaskReadiness(parseMarkdownFile(taskAbs)).runReadiness, 'ne
 runTaskOps(w, { executor: 'dry-run', maxSteps: 1 });
 let task = parseMarkdownFile(taskAbs);
 assert.equal(task.resolverKind, 'human', 'prototype sets up a human pick (resolverKind=human)');
-assert.notEqual(task.status, 'done', 'the prototype does NOT close the task — it awaits the human pick');
+assert.equal(task.status, 'waiting', 'the prototype persists a literal human wait without closing the task');
 let body = readFileSync(taskAbs, 'utf8');
 assert.ok(body.includes('## QUESTION') && body.includes('which prototype option'), 'the pick question (external-resolution block) is written into the task');
 

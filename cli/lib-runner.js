@@ -17,8 +17,9 @@ import {
   deriveExternalResolutionStatus,
   isPartialUnresolved,
 } from './lib-taskops.js';
-import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeRuntimeAdapter, executorForRuntime } from './lib-runtime-adapters.js';
+import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeExecutorSpec } from './lib-runtime-adapters.js';
 import { allocateRunNodeIdentity } from './lib-run-identity.js';
+import { inspectNonEmptyUtf8File } from './lib-artifact-contract.js';
 import { canonicalSha256 } from './lib-run-closure.js';
 import {
   MUTATION_LOCK_DIR,
@@ -1842,16 +1843,38 @@ function runNodePause(runNode) {
   }
 }
 
-function taskPause(task) {
-  switch (task.status) {
-    case 'waiting':
-      return {
-        reason: STOP_REASONS.WAITING,
-        detail: `Task ${task.id} is waiting; resolve before continuing.`,
-      };
-    default:
-      return null;
+function externalResolutionStateForTask(task) {
+  const resolverKind = task?.resolverKind;
+  if (resolverKind !== 'human' && resolverKind !== 'ai') {
+    return { resolverKind, status: 'none' };
   }
+  let body = '';
+  try {
+    body = task.path ? readBody(task.path) : '';
+  } catch {
+    body = '';
+  }
+  return {
+    resolverKind,
+    status: deriveExternalResolutionStatus({ resolverKind, body }),
+  };
+}
+
+function taskPause(task) {
+  const external = externalResolutionStateForTask(task);
+  if (external.status === 'waiting' || external.status === 'invalid') {
+    return {
+      reason: STOP_REASONS.DELEGATION_PENDING,
+      detail: `Task ${task.id} awaits a valid external ${external.resolverKind} decision.`,
+    };
+  }
+  if (task.status === 'waiting' && external.status !== 'resolved') {
+    return {
+      reason: STOP_REASONS.WAITING,
+      detail: `Task ${task.id} is waiting; resolve before continuing.`,
+    };
+  }
+  return null;
 }
 
 // C1: gate task selection on external (human/ai) resolution status. A task whose resolverKind is
@@ -1879,21 +1902,6 @@ function externalResolutionDecisionPromptLines(task) {
   if (!decision) return [];
   const basis = externalResolutionSectionText(body, '## BASIS');
   return [`Resolved external ${rk} decision to HONOR (the recognize-when-seen requirement): ${decision}${basis ? ` — basis: ${basis}` : ''}`];
-}
-
-function externalResolutionPause(task) {
-  const resolverKind = task?.resolverKind;
-  if (resolverKind !== 'human' && resolverKind !== 'ai') return null;
-  let body = '';
-  try { body = task.path ? readBody(task.path) : ''; } catch { body = ''; }
-  const status = deriveExternalResolutionStatus({ resolverKind, body });
-  if (status === 'resolved' || status === 'none') return null;
-  return {
-    reason: STOP_REASONS.DELEGATION_PENDING,
-    detail: status === 'waiting'
-      ? `Task ${task.id} awaits an external ${resolverKind} decision; its DECISION/BASIS resolution block is not filled.`
-      : `Task ${task.id} has an unresolved external ${resolverKind} resolution block (DECISION/BASIS missing or only partially filled).`,
-  };
 }
 
 // D1 — the ACTIVE delegation loop for resolverKind:'ai'. Instead of only PAUSING, actively INVOKE an INDEPENDENT
@@ -1931,8 +1939,7 @@ function fillExternalResolution(taskPath, decision, basis) {
 // adapter, so aliases of the SAME runtime (e.g. executor 'openclaw-agent' vs resolver adapter 'openclaw-cli' — one
 // runtime) can't pass as independent and let a model resolve its own escalation.
 function runtimeIdentity(name) {
-  try { return normalizeRuntimeAdapter(name); } catch { /* not an adapter name — maybe an executor value */ }
-  try { return RUNTIME_ADAPTER_NAMES.find((adn) => executorForRuntime(adn) === name) || name; } catch { return name; }
+  try { return normalizeExecutorSpec(name).adapterName; } catch { return name; }
 }
 function sameRuntime(a, b) { return a === b || runtimeIdentity(a) === runtimeIdentity(b); }
 
@@ -2275,17 +2282,6 @@ export function pickNextAction(parsed, target = {}) {
         source: { type: 'task', id: task.id },
       };
     }
-    if (action === 'execute') {
-      const extPause = externalResolutionPause(task);
-      if (extPause) {
-        return {
-          kind: 'stop',
-          reason: extPause.reason,
-          detail: extPause.detail,
-          source: { type: 'task', id: task.id },
-        };
-      }
-    }
     return { kind: action, task, classification };
   }
 
@@ -2299,12 +2295,15 @@ export function pickNextAction(parsed, target = {}) {
     const pause = taskPause(task);
     switch (pause?.reason) {
       case STOP_REASONS.WAITING:
-      return {
-        kind: 'stop',
-        reason: STOP_REASONS.WAITING,
-        detail: pause.detail,
-        source: { type: 'task', id: task.id },
-      };
+        return {
+          kind: 'stop',
+          reason: STOP_REASONS.WAITING,
+          detail: pause.detail,
+          source: { type: 'task', id: task.id },
+        };
+      case STOP_REASONS.DELEGATION_PENDING:
+        anyDelegationPending = true;
+        continue;
       default:
         break;
     }
@@ -2312,10 +2311,6 @@ export function pickNextAction(parsed, target = {}) {
     if (classification.runReadiness === 'blocked') continue;
     const action = ACTION_BY_READINESS[classification.runReadiness];
     if (!action) continue;
-    if (action === 'execute') {
-      const extPause = externalResolutionPause(task);
-      if (extPause) { anyDelegationPending = true; continue; }
-    }
     onlyBlockedSeen = false;
     return { kind: action, task, classification };
   }
@@ -2714,17 +2709,22 @@ function invokeExecutor({ project, projectDir = null, task, executor, agentId, s
       ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}),
     };
   }
-  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
-  if (RUNTIME_ADAPTER_NAMES.includes(adapter)) {
+  let adapterName;
+  try {
+    adapterName = normalizeExecutorSpec(executor).adapterName;
+  } catch {
+    return { ok: false, message: `Unknown executor '${executor}'`, executor };
+  }
+  if (RUNTIME_ADAPTER_NAMES.includes(adapterName)) {
     const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, delegationMode, selfResolutionGuide });
-    const result = invokeRuntimeAdapter(adapter, {
+    const result = invokeRuntimeAdapter(executor, {
       prompt,
       agentId,
       sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'execute' }),
       timeoutMs: stepTimeoutMs,
       ...(artifactWorkspacePath ? { cwd: artifactWorkspacePath } : {}),
     });
-    return { ...result, executor, message: result.message || `${adapter} completed task ${task.id}`, ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}) };
+    return { ...result, executor, message: result.message || `${adapterName} completed task ${task.id}`, ...(artifactWorkspacePath ? { workspacePath: artifactWorkspacePath } : {}) };
   }
   return { ok: false, message: `Unknown executor '${executor}'`, executor };
 }
@@ -2777,8 +2777,7 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${loopbackNodeId}.md`);
   const prompt = buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNodeId, artifactPath, actorName, budget });
-  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
-  const result = invokeRuntimeAdapter(adapter, {
+  const result = invokeRuntimeAdapter(executor, {
     prompt,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: delegate.sourceTaskId || delegate.id, action: 'loopback' }),
@@ -2787,7 +2786,7 @@ function performAgentLoopback({ project, projectDir, delegate, executor, agentId
   });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
-    return { ok: false, message: `${adapter} did not write expected loopback artifact at ${artifactPath}; refusing to mark loopback done` };
+    return { ok: false, message: `${normalizeExecutorSpec(executor).adapterName} did not write expected loopback artifact at ${artifactPath}; refusing to mark loopback done` };
   }
   return { ok: true, artifactPath, message: result.stdout || `Agent recorded loopback at ${artifactPath}` };
 }
@@ -3588,6 +3587,12 @@ function closeExecuteSuccess({
 
 function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0, escalateOnSaturation = false, escalationResolvers = [] }) {
   const projectDir = dirname(dirname(runDir));
+  if (task.status === 'waiting' && externalResolutionStateForTask(task).status === 'resolved') {
+    updateMarkdownFrontmatter(task.path, (fm) => {
+      fm.status = 'active';
+      return fm;
+    });
+  }
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const {
@@ -4040,8 +4045,7 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
     inheritedContext,
     blockerCatalog: activeBlockerCatalogForPrompt(projectDir, task),
   });
-  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
-  const result = invokeRuntimeAdapter(adapter, {
+  const result = invokeRuntimeAdapter(executor, {
     prompt,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'decompose' }),
@@ -4050,7 +4054,7 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
   });
   if (!result.ok) return { ...result, ok: false, message: result.message };
   if (!existsSync(versionIndex)) {
-    return { ok: false, message: `${adapter} did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
+    return { ok: false, message: `${normalizeExecutorSpec(executor).adapterName} did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
   }
   return { ok: true, childTaskGroupId, versionId, message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}` };
 }
@@ -4976,8 +4980,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
   const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget, inheritedContext });
-  const adapter = executor === 'openclaw-agent' ? 'openclaw-cli' : executor;
-  const result = invokeRuntimeAdapter(adapter, {
+  const result = invokeRuntimeAdapter(executor, {
     prompt,
     agentId,
     sessionKey: openClawWorkerSessionKey({ agentId, projectId: project.id, taskId: task.id, action: 'explore' }),
@@ -4986,7 +4989,7 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
   });
   if (!result.ok) return { ok: false, message: result.message };
   if (!existsSync(artifactPath)) {
-    return { ok: false, message: `${adapter} did not write expected exploration artifact at ${artifactPath}; refusing to mark exploration done` };
+    return { ok: false, message: `${normalizeExecutorSpec(executor).adapterName} did not write expected exploration artifact at ${artifactPath}; refusing to mark exploration done` };
   }
   return { ok: true, artifactPath, message: result.stdout || `Agent recorded exploration at ${artifactPath}` };
 }
@@ -5173,6 +5176,18 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
 // the task up for a human PICK (reusing the external-resolution machinery). Unlike exploration, this does NOT close
 // the task — it stays open and, once resolverKind is set, becomes runnable and is HELD by the external-resolution
 // pause until the human fills DECISION/BASIS (which surfaces the previously-implicit requirement as a known).
+function performDryRunPrototype({ runDir, runNodeId, task }) {
+  const workspace = join(runDir, 'artifacts', runNodeId, 'workspace');
+  mkdirSync(workspace, { recursive: true });
+  const artifactPath = join(workspace, 'options.md');
+  writeFileSync(
+    artifactPath,
+    `# Prototype options for ${task.id}\n\n- Option A: smallest bounded approach\n- Option B: alternate bounded approach\n`,
+    'utf8',
+  );
+  return inspectNonEmptyUtf8File(artifactPath, { label: 'prototype options artifact' });
+}
+
 function performAgentPrototype({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget }) {
   const dims = Array.isArray(task.unknownKnowns) && task.unknownKnowns.length ? task.unknownKnowns.join(', ') : 'the recognize-when-seen dimensions of this task';
   const workspace = join(runDir, 'artifacts', runNodeId, 'workspace');
@@ -5184,7 +5199,16 @@ function performAgentPrototype({ project, projectDir, task, executor, agentId, s
     'Prototyping cheaply now surfaces the implicit requirement before it gets expensive to change.',
   ].join('\n');
   const invocation = invokeRuntimeAdapter(executor, { prompt, agentId: `${agentId}-prototype`, timeoutMs: stepTimeoutMs, cwd: workspace });
-  return { ok: invocation?.ok !== false, artifactPath: existsSync(join(workspace, 'options.md')) ? join(workspace, 'options.md') : null, message: invocation?.message || null };
+  if (invocation?.ok === false) return invocation;
+  const inspected = inspectNonEmptyUtf8File(join(workspace, 'options.md'), {
+    label: 'prototype options artifact',
+  });
+  if (!inspected.ok) return inspected;
+  return {
+    ok: true,
+    artifactPath: inspected.artifactPath,
+    message: invocation.message || null,
+  };
 }
 
 function executePrototypeTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
@@ -5209,13 +5233,7 @@ function executePrototypeTask({ projectDir, project, task, runDir, runId, events
   let result;
   try {
     if (executor === 'dry-run') {
-      const artifactPath = join(runDir, 'artifacts', runNodeId, 'options.md');
-      mkdirSync(dirname(artifactPath), { recursive: true });
-      writeTextFileAtomic(
-        artifactPath,
-        '# Prototype options\n\n- Option 1: dry-run placeholder for external human selection.\n',
-      );
-      result = { ok: true, artifactPath, message: 'dry-run prototype options recorded for external human selection' };
+      result = performDryRunPrototype({ runDir, runNodeId, task });
     } else {
       result = performAgentPrototype({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget });
     }
@@ -5236,6 +5254,7 @@ function executePrototypeTask({ projectDir, project, task, runDir, runId, events
   const question = `${task.title}: which prototype option best matches the intended${dims} approach, and why? Naming it surfaces the recognize-when-seen requirement so execution reflects the real intent.`;
   const externalResolutionBody = EXTERNAL_RESOLUTION_TEMPLATE.replace('<agent: the single decision that could not be settled — one decision unit, crisp>', question);
   updateMarkdownFrontmatter(task.path, (fm) => {
+    fm.status = 'waiting';
     fm.resolverKind = 'human';
     fm.runReadinessReason = sanitizeFmScalar('Prototype options recorded; awaiting a human pick to surface the unknown-known before execution.');
     delete fm.lastRunFailureReason;

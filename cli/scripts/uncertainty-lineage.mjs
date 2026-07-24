@@ -94,6 +94,19 @@ rewriteFrontmatter(childTaskPath, (fm) => {
   delete fm.lastRunFailureReason;
   return fm;
 });
+writeFileSync(
+  childTaskPath,
+  readFileSync(childTaskPath, 'utf8')
+    .replace(
+      '<resolver: the concrete, downstream-consumable choice — a value, not prose>',
+      'Decompose the child once more to verify lineage.',
+    )
+    .replace(
+      '<resolver: the grounds for this decision>',
+      'The lineage smoke requires a resolved human input before further decomposition.',
+    ),
+  'utf8',
+);
 
 const second = json(['run', workDir, '--executor', 'dry-run', '--max-steps', '1']);
 assert.equal(second.stopReason, 'max_steps');

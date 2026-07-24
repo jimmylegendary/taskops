@@ -6,6 +6,7 @@ import {
   detectRuntimeAdapter,
   executorForRuntime,
   invokeRuntimeAdapter,
+  normalizeExecutorSpec,
   normalizeRuntimeAdapter,
   parseExecutorSpec,
   runtimeAdapterForExecutor,
@@ -48,6 +49,14 @@ echo "late"
 
   assert.equal(normalizeRuntimeAdapter('claude-code'), 'claude-code');
   assert.equal(executorForRuntime('codex-cli'), 'codex-cli');
+  assert.deepEqual(normalizeExecutorSpec('openclaw-agent'), {
+    adapterName: 'openclaw-cli',
+    variant: null,
+  });
+  assert.deepEqual(normalizeExecutorSpec('codex-cli:high'), {
+    adapterName: 'codex-cli',
+    variant: 'high',
+  });
 
   // Executor spec parsing: a `:variant` suffix (gpt-5.6 reasoning tier) selects a build-args variant; the base
   // still resolves the adapter, and a bare name parses to variant=null (existing callers unaffected).
