@@ -147,43 +147,44 @@ export function classifyRunClosure({
     issues.push(`supporting closure cannot use claim reason '${eow.reason}'`);
   }
 
-  let supportingActionKind = node?.actionKind;
+  let actionKind = node?.actionKind;
+  if (selected && (actionKind != null && String(actionKind).trim() !== '')) {
+    const actionIdentity = validateRunNodeActionIdentity({
+      type: node?.type,
+      actionKind,
+    });
+    issues.push(...actionIdentity.issues);
+    actionKind = actionIdentity.actionKind;
+  }
+
   if (selected && role === 'supporting') {
-    if (supportingActionKind == null || String(supportingActionKind).trim() === '') {
+    if (actionKind == null || String(actionKind).trim() === '') {
       if (hasExplicitRole) {
         issues.push('explicit supporting closure is missing actionKind');
       } else {
-        supportingActionKind = LEGACY_ACTION_KIND_BY_TYPE.get(node?.type) || null;
-        if (!supportingActionKind) {
+        actionKind = LEGACY_ACTION_KIND_BY_TYPE.get(node?.type) || null;
+        if (!actionKind) {
           issues.push(`legacy supporting closure cannot infer actionKind from type '${node?.type}'`);
         }
       }
     }
-    if (supportingActionKind) {
-      const actionIdentity = validateRunNodeActionIdentity({
-        type: node?.type,
-        actionKind: supportingActionKind,
-      });
-      issues.push(...actionIdentity.issues);
-      supportingActionKind = actionIdentity.actionKind;
-    }
 
-    if (supportingActionKind === 'explore') {
+    if (actionKind === 'explore') {
       const inspected = inspectNonEmptyUtf8File(node.result?.artifactPath, { label: 'exploration artifact' });
       if (!inspected.ok) issues.push(inspected.message);
     }
-    if (supportingActionKind === 'prototype') {
+    if (actionKind === 'prototype') {
       const inspected = inspectNonEmptyUtf8File(node.result?.artifactPath, { label: 'prototype options artifact' });
       if (!inspected.ok) issues.push(inspected.message);
     }
-    if (supportingActionKind === 'decompose') {
+    if (actionKind === 'decompose') {
       const backlink = [...versions.values()].some((version) => (
         version.decomposedByRunId === node.runId
         && version.decomposedByRunNodeId === node.id
       ));
       if (!backlink) issues.push('decomposition backlink missing for supporting closure');
     }
-    if (supportingActionKind === 'review') {
+    if (actionKind === 'review') {
       const reviewedNode = runNodes.get(`${node.runId}:${node.reviewsRunNodeId}`);
       const reviewEdge = [...runEdges.values()].some((edge) => (
         edge.runId === node.runId
@@ -207,7 +208,7 @@ export function classifyRunClosure({
     schemaValid: allIssues.length === 0,
     supportValid: role !== 'supporting' || issues.length === 0,
     reviewEvidenceValid: review.valid,
-    policyApproved: role === 'claim-bearing' && review.valid,
+    policyApproved: role === 'claim-bearing' && review.valid && allIssues.length === 0,
     issues: allIssues,
   };
 }

@@ -25,7 +25,7 @@ function makeWork(name, { acceptance, result }) {
   md(join(w, 'task-groups/tg-root/versions/tgv-root-v1/tasks/task-review.md'), { taskOpsVersion: 'v1', entityType: 'task', id: 'task-review', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'done', acceptance, order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known', runRefs: [{ runId: 'run-main', runNodeId: 'run-node-review', role: 'primary_execution' }] });
   md(join(w, 'task-groups/tg-root/versions/tgv-root-v1/eow/eow-task-review.md'), { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-review', graphType: 'task', attachedToType: 'task', attachedToId: 'task-review', taskGroupVersionId: 'tgv-root-v1', reason: 'execution_path_closed', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
   md(join(w, 'runs/run-main/index.md'), { taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: name, createdAt: now, status: 'active' });
-  md(join(w, 'runs/run-main/nodes/run-node-review.md'), { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review', runId: 'run-main', type: 'implementation', title: 'T', sourceTaskId: 'task-review', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, result });
+  md(join(w, 'runs/run-main/nodes/run-node-review.md'), { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review', runId: 'run-main', type: 'implementation', actionKind: 'execute', attempt: 1, title: 'T', sourceTaskId: 'task-review', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, result });
   md(join(w, 'runs/run-main/nodes/eow-run-node-review.md'), { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-review', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-review', reason: 'execution_path_closed', closureRole: 'claim-bearing', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
   md(join(w, 'runs/run-main/edges/edge-review.md'), { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-review', runId: 'run-main', fromRunNodeId: 'run-node-review', toRunNodeId: 'eow-run-node-review', edgeType: 'closes_with', createdAt: now });
   return w;
@@ -125,6 +125,88 @@ const liveAcceptanceAfter = liveAcceptanceBefore.replace(
 );
 assert.notEqual(liveAcceptanceAfter, liveAcceptanceBefore, 'live acceptance tamper fixture must change task.acceptance');
 writeFileSync(liveAcceptanceTaskPath, liveAcceptanceAfter, 'utf8');
+
+const mismatchedClaimActionDir = join(tempRoot, 'mismatched-claim-action');
+cpSync(tamperSource, mismatchedClaimActionDir, { recursive: true });
+const mismatchedClaimNodePath = join(
+  mismatchedClaimActionDir,
+  'runs/run-main/nodes/run-node-review.md',
+);
+const mismatchedClaimBefore = readFileSync(mismatchedClaimNodePath, 'utf8');
+const mismatchedClaimAfter = mismatchedClaimBefore.replace(
+  'actionKind: execute',
+  'actionKind: explore',
+);
+assert.notEqual(
+  mismatchedClaimAfter,
+  mismatchedClaimBefore,
+  'mismatched claim fixture must change the live claim action identity',
+);
+writeFileSync(mismatchedClaimNodePath, mismatchedClaimAfter, 'utf8');
+const mismatchedClaim = parseProject(mismatchedClaimActionDir);
+assert.equal(
+  mismatchedClaim.closure.policyApprovedComplete,
+  false,
+  'a claim whose actionKind mismatches its implementation type must not remain approved',
+);
+assert.ok(
+  mismatchedClaim.errors.some((error) => /type.*does not match actionKind/i.test(error)),
+  'mismatched claim action identity must be a canonical validation error',
+);
+
+const unknownClaimActionDir = join(tempRoot, 'unknown-claim-action');
+cpSync(tamperSource, unknownClaimActionDir, { recursive: true });
+const unknownClaimNodePath = join(
+  unknownClaimActionDir,
+  'runs/run-main/nodes/run-node-review.md',
+);
+const unknownClaimBefore = readFileSync(unknownClaimNodePath, 'utf8');
+const unknownClaimAfter = unknownClaimBefore.replace(
+  'actionKind: execute',
+  'actionKind: spoofed-claim',
+);
+assert.notEqual(
+  unknownClaimAfter,
+  unknownClaimBefore,
+  'unknown claim fixture must change the live claim action identity',
+);
+writeFileSync(unknownClaimNodePath, unknownClaimAfter, 'utf8');
+const unknownClaim = parseProject(unknownClaimActionDir);
+assert.equal(
+  unknownClaim.closure.policyApprovedComplete,
+  false,
+  'a claim with an unknown actionKind must not remain approved',
+);
+assert.ok(
+  unknownClaim.errors.some((error) => /unknown run-node actionKind/i.test(error)),
+  'unknown claim action identity must be a canonical validation error',
+);
+
+const legacyClaimIdentityDir = join(tempRoot, 'legacy-claim-identity');
+cpSync(tamperSource, legacyClaimIdentityDir, { recursive: true });
+const legacyClaimNodePath = join(
+  legacyClaimIdentityDir,
+  'runs/run-main/nodes/run-node-review.md',
+);
+const legacyClaimEowPath = join(
+  legacyClaimIdentityDir,
+  'runs/run-main/nodes/eow-run-node-review.md',
+);
+writeFileSync(
+  legacyClaimNodePath,
+  readFileSync(legacyClaimNodePath, 'utf8').replace(/^actionKind: execute\n/m, ''),
+  'utf8',
+);
+writeFileSync(
+  legacyClaimEowPath,
+  readFileSync(legacyClaimEowPath, 'utf8').replace(/^closureRole: claim-bearing\n/m, ''),
+  'utf8',
+);
+assert.equal(
+  parseProject(legacyClaimIdentityDir).closure.policyApprovedComplete,
+  true,
+  'legacy claim records without explicit actionKind/closureRole retain inferred identity',
+);
 
 assert.equal(parseProject(missingReviewDir).closure.policyApprovedComplete, false);
 assert.equal(parseProject(wrongTargetDir).closure.policyApprovedComplete, false);
