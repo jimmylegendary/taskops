@@ -31,16 +31,13 @@ TaskOps keeps those layers separate so an agent or human can make honest decisio
 - `sourceTaskId` / `sourceTaskGroupVersionId` — run-side references back to the task graph.
 - `type: delegate` + `status: waiting` — explicit human/AI/agent delegation points.
 
-## Install
+## Local workspace
 
 ```bash
-npm install -g taskops
-```
-
-Then run:
-
-```bash
-taskops --help
+cd ..
+npm ci
+npm run verify
+node cli/bin/taskops.js --help
 ```
 
 ## Quick start: the smallest useful loop
@@ -486,9 +483,9 @@ The companion Obsidian plugin can read the same markdown state and export derive
 ```bash
 git clone git@github.com:jimmylegendary/taskops.git
 cd taskops
-npm install
+npm ci
 npm run verify
-npm run release:preflight
+node cli/bin/taskops.js --help
 ```
 
 ## License

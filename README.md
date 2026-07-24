@@ -15,8 +15,8 @@ Use TaskOps when a goal is too important to leave as a flat TODO list and too co
 This monorepo contains:
 
 - `skill/` — OpenClaw skill package for TaskOps guidance
-- `cli/` — installable `taskops` npm CLI
-- `obsidian-plugin/` — Obsidian explorer + derived canvas export
+- `cli/` — private TaskOps CLI workspace
+- `obsidian-plugin/` — preserved source outside the active verification surface
 - `docs/` — canonical design docs
 - `examples/` — shared fixtures and dogfood projects, including `examples/taskops-canonical-minimal-v1/` as the docs-reference v1 fixture and `examples/taskops-minimal-v1/` as a richer companion fixture
 
@@ -118,33 +118,20 @@ For a goal like **“OAuth flow refactoring”**, TaskOps keeps the work honest:
 
 That is the core promise: **TaskOps tells agents how the work is actually getting done.**
 
-## Release model
+## Local workspace
 
-One GitHub repo, one shared release source of truth, three distribution channels:
-
-- Skill → ClawHub
-- CLI → npm
-- Obsidian plugin → GitHub Release assets
-
-All three should still participate in GitHub Releases so the repo remains the canonical release timeline.
-
-Local preflight:
+TaskOps currently runs from this repository's private CLI workspace. Install the
+locked dependencies and run the core verification gate locally:
 
 ```bash
+npm ci
 npm run verify
-npm run release:preflight
+node cli/bin/taskops.js --help
 ```
 
-If you want the individual steps, use:
-
-```bash
-npm run build:release
-npm run smoke:publish-artifact
-```
-
-That emits the versioned CLI tarball, plugin zip, and skill package under `dist/release/v<version>/`, then dry-runs npm publication against the built CLI tarball artifact. The GitHub Actions release workflow now uses that same `release:preflight` path before its npm publish job consumes the tarball, and the ClawHub publish job logs in with `CLAWHUB_TOKEN` to publish the checked-out `skill/` folder at the matching version in non-interactive mode.
-
-For automated publishes, configure `NPM_TOKEN` for the CLI job and `CLAWHUB_TOKEN` for the skill job. A manual `workflow_dispatch` run still exercises verify/build/release-asset assembly, but the actual npm/ClawHub publish jobs remain tag-gated on `v*` refs.
+See [REPOSITORY_SCOPE.md](docs/REPOSITORY_SCOPE.md) for the active core surface
+and [RELEASE_MODEL.md](docs/RELEASE_MODEL.md) for the current distribution
+policy.
 
 ## Migration note
 

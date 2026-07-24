@@ -12,20 +12,15 @@ function readJson(path) {
 
 const rootPkg = readJson(join(repoRoot, 'package.json'));
 const cliPkg = readJson(join(repoRoot, 'cli', 'package.json'));
-const pluginPkg = readJson(join(repoRoot, 'obsidian-plugin', 'package.json'));
-const pluginManifest = readJson(join(repoRoot, 'obsidian-plugin', 'manifest.json'));
 const packageLock = readJson(join(repoRoot, 'package-lock.json'));
 
 const expected = rootPkg.version;
 const checks = [
   ['root package', rootPkg.version],
   ['cli package', cliPkg.version],
-  ['plugin package', pluginPkg.version],
-  ['plugin manifest', pluginManifest.version],
   ['package-lock root', packageLock.version],
   ['package-lock package root', packageLock.packages?.['']?.version],
   ['package-lock cli workspace', packageLock.packages?.cli?.version],
-  ['package-lock plugin workspace', packageLock.packages?.['obsidian-plugin']?.version]
 ];
 
 const mismatches = checks.filter(([, version]) => version !== expected);

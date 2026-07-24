@@ -19,8 +19,8 @@ Derived canvas/views are not.
 
 ## Current surfaces
 
-- `../cli/` — installable `taskops` CLI for `init / validate / summary / show / decompose / refactor / run` plus git-backed vault setup/sync
-- `../obsidian-plugin/` — Obsidian explorer + derived canvas export for TaskOps v1 projects, with desktop git auto-sync support when configured
+- `../cli/` — private local `taskops` CLI workspace for `init / validate / summary / show / decompose / refactor / run` plus git-backed vault setup/sync
+- `../obsidian-plugin/` — preserved source outside the active verification surface
 - `scripts/graph_task.py` — legacy graph-task prototype kept only as migration/source material
 
 ## Main working references
@@ -29,6 +29,16 @@ Derived canvas/views are not.
 - `../docs/MD_FIRST_FORMAT.md`
 - `../examples/taskops-canonical-minimal-v1/`
 - `SKILL.md`
+
+## Local workspace
+
+Run the private CLI from the repository root:
+
+```bash
+npm ci
+npm run verify
+node cli/bin/taskops.js --help
+```
 
 ## Core operating loop
 

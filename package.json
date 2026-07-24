@@ -4,18 +4,15 @@
   "version": "0.10.1",
   "description": "Monorepo for TaskOps skill, CLI, and Obsidian plugin.",
   "workspaces": [
-    "cli",
-    "obsidian-plugin"
+    "cli"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "build:release": "node ./scripts/build-release-assets.mjs",
-    "release:preflight": "npm run build:release && npm run smoke:publish-artifact",
-    "smoke:publish-artifact": "node ./scripts/smoke-publish-artifact.mjs",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspace cli",
+    "typecheck": "npm run typecheck --workspace cli",
+    "test": "npm run test --workspace cli",
+    "test:repository-scope": "node ./scripts/check-repository-scope.mjs",
     "test:version-sync": "node ./scripts/check-version-sync.mjs",
-    "verify": "npm run test:version-sync && npm run test:contract && npm run typecheck && npm run build && npm run test",
-    "test:contract": "node ./scripts/check-contract-docs.mjs"
+    "test:contract": "node ./scripts/check-contract-docs.mjs",
+    "verify": "npm run test:repository-scope && npm run test:version-sync && npm run test:contract && npm run typecheck && npm run build && npm run test"
   }
 }

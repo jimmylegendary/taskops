@@ -28,7 +28,6 @@ const userFacingDocs = [
   'docs/DECOMPOSITION_PROTOCOL.md',
   'docs/MD_FIRST_FORMAT.md',
   'docs/RUN_READINESS.md',
-  'obsidian-plugin/README.md',
   'skill/README.md',
   'skill/SKILL.md',
   'skill/references/core-model.md',
@@ -60,11 +59,6 @@ for (const rel of userFacingDocs) {
     }
   }
 }
-
-const pluginReadme = read('obsidian-plugin/README.md');
-if (!pluginReadme.includes('entityType: work')) failures.push('obsidian-plugin/README.md: must document entityType: work detection');
-if (!pluginReadme.includes('derived/canvases/')) failures.push('obsidian-plugin/README.md: must document derived/canvases output');
-if (!pluginReadme.includes('runs/<run-id>/')) failures.push('obsidian-plugin/README.md: must document canonical runs/<run-id>/ layout');
 
 if (failures.length) {
   console.error('Contract doc check failed:');
