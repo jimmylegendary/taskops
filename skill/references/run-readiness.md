@@ -33,7 +33,7 @@ Exploratory runs may include:
 
 - search
 - source reading
-- small prototype
+- small experiment
 - tool/API trial
 - debug attempt
 - try/error loop
@@ -48,6 +48,18 @@ Required exploratory run output:
 - failed/successful approaches
 - remaining unknowns
 - recommended next decomposition or runnable task
+
+Exploration records evidence and closes only its supporting run node; the
+source task stays open and advances to informed decomposition.
+
+### `needs_prototype`
+
+The requirement is an unknown-known: the system knows which decision is
+missing and can cheaply create concrete alternatives before asking a human.
+
+`needs_prototype` creates cheap alternatives for an unknown-known requirement.
+Success requires a non-empty UTF-8 `options.md`, closes only a supporting run
+node, and puts the source task in `status: waiting` with `resolverKind: human`.
 
 ### `blocked`
 
@@ -118,7 +130,8 @@ Downstream run paths should not continue until the delegated node is resolved, c
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runnable`            | Execute via the executor; mark task done; attach task + run EoW; write the `closes_with` edge.                                                           |
 | `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph (child task group + v1 version); set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. The runner also extends the active snapshot's `selectedVersions` with the new child task group/version so the new children become visible to later steps of the same runner invocation. |
-| `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact at `runs/<run-id>/artifacts/<run-node-id>.md`; close parent with EoW reason `exploration_recorded_by_runner` and set `runReadiness: needs_decomposition`. |
+| `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact at `runs/<run-id>/artifacts/<run-node-id>.md`; close only the supporting run node and advance the still-open source task to informed decomposition. |
+| `needs_prototype`     | Open a `type: prototype` run node and require a non-empty UTF-8 `options.md`; on success close only the supporting run node and put the source task in `status: waiting` with `resolverKind: human`. |
 | `blocked`             | Skip unless declared `blockedBy` references have all resolved; then reopen the task before selection. If only unresolved blocked tasks remain, the runner stops with `blocked_only`. |
 
 Before each selection pass, the runner rechecks `blockedBy` references. A blocker can point at a task (`type: task`, `id`, optional `taskGroupVersionId`) or a run node (`type: runNode`, `runId`, `id`). When all blockers are `done` or `cancelled`, the task is reopened with `status: pending`; `runReadiness: blocked` is cleared unless `unblockRunReadiness` provides the next readiness.
@@ -135,7 +148,8 @@ Pass `--loopback self --max-loopbacks <n>` (default `n=3`) to let the runner aut
 
 `taskops run` reports one of these when it cannot start a new step:
 
-- `all_closed` — the selected work is fully closed: every terminal task is closed by task EoW, every run terminal node is closed by run EoW, and no waiting/delegated/blocked work remains. This is the closure-complete terminal state.
+- `all_closed` — the selected graph is structurally closed, every supporting closure validates, and every claim-bearing closure has matching policy-approved review evidence.
+- `graph_closed_unapproved` — the graph is structurally closed but at least one claim lacks policy-approved evidence. It is not `all_closed`.
 - `no_runnable` — nothing is actionable but the work is not yet closed (terminal EoW coverage incomplete or otherwise inconsistent). Inspect rather than treat as success.
 - `blocked_only`, `waiting`, `delegation_pending` — open work parked on blockers/wait/delegation; resolve before continuing.
 - `max_steps`, `deadline_reached` — safety caps stopped the run before further work could begin and take precedence over `all_closed` / `no_runnable`.
@@ -149,5 +163,6 @@ Pass `--loopback self --max-loopbacks <n>` (default `n=3`) to let the runner aut
 - Upstream tasks (`order < target.order`) keep their status; done leaves get a fresh EoW with `reason: preserved_upstream_after_restart`. Each preserved task carries `preservedUpstream: true` and `preservedFromVersionId`.
 - The target task is reset to `pending` and gains `restartInstruction`, optional `restartReason`, `restartedFromVersionId`, and `restartedAt`.
 - Downstream tasks (`order >= target.order`, excluding the target) are reset to `pending`.
+- Task-valued `blockedBy` references to the restarted source version are rebased to the new selected version. External-version references and run-node blockers are preserved.
 - The prior version is rewritten with `selected: false` and `supersededByVersionId`. The active snapshot's `selectedVersions` is repointed at the new version and the parent task group's `activeVersionId` follows if it pointed at the prior. Historical run nodes/EoWs/edges remain unchanged.
-- Restart refuses if the project has validation errors or if `<task-id>` is missing from / ambiguous across selected versions.
+- Restart refuses if the project has validation errors or if `<task-id>` is missing from / ambiguous across selected versions. Validation also rejects a selected restarted lineage that still points at a superseded internal task-group version, so navigation and the runner fail closed instead of executing stale dependencies.

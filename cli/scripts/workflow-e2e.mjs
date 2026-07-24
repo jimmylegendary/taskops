@@ -1,15 +1,23 @@
 #!/usr/bin/env node
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '..', 'bin', 'taskops.js');
-const repoRoot = join(here, '..', '..');
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-workflow-e2e-'));
-const resultPath = join(repoRoot, 'test-results', 'taskops-workflow-loopback-e2e.json');
+const configuredResultPath = String(process.env.TASKOPS_WORKFLOW_RESULT_PATH || '').trim();
+const resultPath = configuredResultPath ? resolve(configuredResultPath) : null;
+
+function emitPayload(payload) {
+  if (resultPath) {
+    mkdirSync(dirname(resultPath), { recursive: true });
+    writeFileSync(resultPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  }
+  console.log(JSON.stringify(payload, null, 2));
+}
 
 function run(args, expectedStatus = 0) {
   const res = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
@@ -233,32 +241,37 @@ try {
   // P0#6: dry-run(미승인) 종결의 최종 신호는 complete=false/status=active/nextAction=graph_closed_unapproved다 —
   // navigation이 미승인 완료를 done으로 오보하지 않는다(policy-approved만 done/complete로 승격).
   const tc5Expected = {
-    complete: false, status: 'active', nextAction: 'graph_closed_unapproved', reportableStopReason: 'graph_closed_unapproved',
-    evidence: 'An unapproved structural closure reports complete=false/status=active/graph_closed_unapproved (done requires policy approval).'
+    complete: false,
+    status: 'active',
+    nextAction: 'graph_closed_unapproved',
+    reportableStopReason: 'graph_closed_unapproved',
+    claimClosures: 1,
+    approvedClaims: 0,
+    evidence: 'An unapproved claim remains graph_closed_unapproved.',
   };
   const tc5Actual = {
     complete: tc1Explain.complete,
     status: tc1Explain.status,
     nextAction: tc1Explain.next.action,
-    reportableStopReason: tc1Run.stopReason
+    reportableStopReason: tc1Run.stopReason,
+    claimClosures: tc1Explain.closure.claimBearingRunEowClosureCount,
+    approvedClaims: tc1Explain.closure.policyApprovedClaimBearingRunEowClosureCount,
   };
-  record('TC05', '5. final completion report signal', tc5Expected, tc5Actual,
-    tc5Actual.complete === false && tc5Actual.status === 'active' && tc5Actual.nextAction === 'graph_closed_unapproved' && tc5Actual.reportableStopReason === 'graph_closed_unapproved');
+  const tc5Pass = Object.entries(tc5Expected)
+    .filter(([key]) => key !== 'evidence')
+    .every(([key, value]) => tc5Actual[key] === value);
+  record('TC05', '5. final completion report signal', tc5Expected, tc5Actual, tc5Pass);
 
-  mkdirSync(dirname(resultPath), { recursive: true });
   const payload = {
     generatedAt: new Date().toISOString(),
     tempRoot,
     summary: { passed: testCases.filter((t) => t.pass).length, total: testCases.length, allPassed: testCases.every((t) => t.pass) },
     testCases
   };
-  writeFileSync(resultPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  console.log(JSON.stringify(payload, null, 2));
+  emitPayload(payload);
   process.exit(payload.summary.allPassed ? 0 : 1);
 } catch (err) {
-  mkdirSync(dirname(resultPath), { recursive: true });
   const payload = { generatedAt: new Date().toISOString(), tempRoot, error: err instanceof Error ? err.message : String(err), testCases };
-  writeFileSync(resultPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  console.error(payload.error);
+  emitPayload(payload);
   process.exit(1);
 }

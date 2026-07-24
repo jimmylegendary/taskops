@@ -37,10 +37,24 @@ The v1 working contract is now:
 - **EoW (End of Work)** is a visible terminal node attached to task branches or run paths when they are truly closed.
 - **Delegated waiting** is represented as `type: delegate` / `status: waiting` in the run graph, with delegatee, request, expected output, and optional timeout metadata.
 - **Task↔run references** are bidirectional: tasks use `runRefs`; run nodes use `sourceTaskId` / `sourceTaskGroupVersionId`.
-- **Run readiness** classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, or `blocked` before execution.
+- **Run readiness** classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, `needs_prototype`, or `blocked` before execution.
 - **Exploratory runs** are first-class feedback loops for unknown-unknowns: run/search/try/error to learn enough to decompose honestly.
 - **Task groups** are versioned decomposition units.
 - **Refactor** creates a new task-group version rather than mutating decomposition history away.
+
+Readiness and closure follow these contracts:
+
+- `needs_prototype` creates cheap alternatives for an unknown-known requirement.
+  Success requires a non-empty UTF-8 `options.md`, closes only a supporting run
+  node, and puts the source task in `status: waiting` with `resolverKind: human`.
+- Exploration records evidence and closes only its supporting run node; the
+  source task stays open and advances to informed decomposition.
+- `closureRole: supporting` records provenance and is structurally validated,
+  but it is not in the policy-approval denominator.
+- `closureRole: claim-bearing` carries an objective result and requires a real,
+  matching independent review before policy-approved completion.
+- `graph_closed_unapproved` means the graph is structurally closed but at least
+  one claim lacks policy-approved evidence. It is not `all_closed`.
 - **Snapshots** represent selected version paths, not every possible combinatorial version state.
 
 ## v1 canonical work shape
@@ -82,7 +96,7 @@ taskops summary ./oauth-refactor
 # 3. Classify what can honestly happen next
 taskops classify-runnable ./oauth-refactor task-auth-middleware --json
 
-# 4. Advance bounded work: execute, decompose, or explore depending on readiness
+# 4. Advance bounded work: execute, decompose, explore, or prototype depending on readiness
 taskops run ./oauth-refactor --executor dry-run --max-steps 3 --json
 
 # 5. Or enable a user-level daemon for this runner-managed work directory

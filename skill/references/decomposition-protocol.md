@@ -10,13 +10,15 @@ TaskOps is not a checklist store. It turns an objective into a task tree, then u
    - `runnable`
    - `needs_decomposition`
    - `needs_exploration`
+   - `needs_prototype`
    - `blocked`
 4. Send only `runnable` nodes into an independent run graph under `runs/<run-id>/`.
 5. For `needs_decomposition`, create the next task group/version.
-6. For `needs_exploration`, create an exploratory run whose purpose is understanding, not delivery.
-7. If a run needs a human, another AI, an agent, or an external system, create a `type: delegate` / `status: waiting` run node with expected output and timeout metadata.
-8. After every run, feed the result back into the task graph: update unknowns, constraints, decomposition, readiness, or task↔run refs.
-9. When a selected branch is truly terminal, attach an explicit EoW node. A branch without EoW is still open.
+6. For `needs_exploration`, create an exploratory run whose purpose is understanding, not delivery; close only that supporting run node and keep the source task open for informed decomposition.
+7. For `needs_prototype`, create cheap alternatives in a non-empty UTF-8 `options.md`; close only the supporting run node and wait for human resolution on the source task.
+8. If a run needs a human, another AI, an agent, or an external system, create a `type: delegate` / `status: waiting` run node with expected output and timeout metadata.
+9. After every run, feed the result back into the task graph: update unknowns, constraints, decomposition, readiness, or task↔run refs.
+10. When a selected branch is truly terminal, attach an explicit EoW node. A branch without EoW is still open.
 
 ## Objective discipline
 
@@ -96,3 +98,9 @@ all active-snapshot terminal task branches have EoW
 + required terminal run paths have EoW
 + no unresolved waiting/delegated/blocking nodes remain
 ```
+
+Supporting EoW records provenance and must validate structurally; it does not
+enter the policy-approval denominator. Claim-bearing EoW carries an objective
+result and needs matching independent policy review. A structurally closed
+graph with an unapproved claim reports `graph_closed_unapproved`, not
+`all_closed`.

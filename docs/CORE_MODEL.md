@@ -87,7 +87,7 @@ Fields:
 - `responsibility`
 - `completionCriteria`
 - `order`
-- `runReadiness?` (`runnable | needs_decomposition | needs_exploration | blocked`)
+- `runReadiness?` (`runnable | needs_decomposition | needs_exploration | needs_prototype | blocked`)
 - `runReadinessReason?`
 - `understandingLevel?` (`known | partial | unknown`)
 - `unknowns?`
@@ -118,6 +118,7 @@ Fields:
 - `attachedToType` (`task | runNode`)
 - `attachedToId`
 - `reason`
+- `closureRole?` (`supporting | claim-bearing`, required on runner-authored run EoW)
 - `declaredBy` (`human | ai | system | agent`)
 - `declaredAt`
 - `evidenceRefs?`
@@ -128,6 +129,10 @@ Rules:
 - A task branch is not structurally closed until a terminal task has an attached task-graph EoW node.
 - A run path is not execution-closed until its terminal run node has an attached run-graph EoW node.
 - EoW does not mean the whole work is complete by itself; it closes one branch/path.
+- `closureRole: supporting` records provenance and is structurally validated,
+  but it is not in the policy-approval denominator.
+- `closureRole: claim-bearing` carries an objective result and requires a real,
+  matching independent review before policy-approved completion.
 
 ### 2.5.1 Partial
 
@@ -174,6 +179,9 @@ Fields:
 - `status`
 - `sourceTaskId?`
 - `sourceTaskGroupVersionId?`
+- `actionKind?`
+- `attempt?`
+- `predecessorRunNodeId?`
 - `createdAt`
 
 Suggested `type` examples:
@@ -194,6 +202,11 @@ Delegation/waiting fields for `type: delegate` or `status: waiting`:
 - `onTimeout?` (`escalate | retry | cancel | create_followup`)
 
 A waiting delegated node blocks downstream execution until it is resolved, cancelled, or timed out into a follow-up decision.
+
+Runner-authored task actions persist immutable action-attempt identity. The first
+available node keeps the compatible `run-node-<task-id>` form; later actions use
+a version/task/action/attempt-qualified id. `actionKind`, `attempt`, and
+`predecessorRunNodeId` may not change when an existing node is updated.
 
 ### 2.9 RunEdge
 
@@ -309,7 +322,13 @@ Allowed in run graph:
 - human/AI/agent delegation and waiting
 - references to external run graphs
 
-Exploratory run nodes are valid execution truth when their objective is learning: search, try/error, prototype, debug, or review enough context to improve the next task-graph decision.
+Exploratory run nodes are valid execution truth when their objective is learning: search, try/error, experiment, debug, or review enough context to improve the next task-graph decision.
+
+- `needs_prototype` creates cheap alternatives for an unknown-known requirement.
+  Success requires a non-empty UTF-8 `options.md`, closes only a supporting run
+  node, and puts the source task in `status: waiting` with `resolverKind: human`.
+- Exploration records evidence and closes only its supporting run node; the
+  source task stays open and advances to informed decomposition.
 
 The run graph should tell the truth about how work actually unfolded, even when that truth is not tree-shaped.
 
@@ -333,7 +352,7 @@ Task graph answers:
 > What is the right decomposition?
 
 Run-readiness classification answers:
-> Should this task run now, decompose next, explore first, or wait on a blocker?
+> Should this task run now, decompose next, explore first, prototype alternatives, or wait on a blocker?
 
 Run graph answers:
 > What actually happened in execution?
@@ -342,6 +361,9 @@ Closure answers:
 > Is the graph structurally closed, policy-approved by review evidence, or only manually attested?
 
 Structural closure means every selected terminal task and terminal run path has EoW coverage with no waiting/delegated/blocked work left. Partial markers are not EoW coverage; a work with only partial progress remains open until real terminal closure or follow-up resolution exists. Policy-approved closure is stricter: relevant EoW nodes must carry approved review hashes, reviewed acceptance/result hashes, and a policy-bearing review mode (`enforced`, `guarded`, or `runner-managed`). Informational and manual-attested closure remain valid for legacy/manual workflows, but summaries report them separately from policy-approved closure.
+
+- `graph_closed_unapproved` means the graph is structurally closed but at least
+  one claim lacks policy-approved evidence. It is not `all_closed`.
 
 ### 7.3 Honest divergence
 

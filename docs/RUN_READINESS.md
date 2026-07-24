@@ -37,7 +37,7 @@ Exploratory runs may include:
 
 - search
 - source reading
-- small prototype
+- small experiment
 - tool/API trial
 - debug attempt
 - try/error loop
@@ -52,6 +52,18 @@ Required exploratory run output:
 - failed/successful approaches
 - remaining unknowns
 - recommended next decomposition or runnable task
+
+Exploration records evidence and closes only its supporting run node; the
+source task stays open and advances to informed decomposition.
+
+### `needs_prototype`
+
+The requirement is an unknown-known: the system knows which decision is
+missing and can cheaply create concrete alternatives before asking a human.
+
+`needs_prototype` creates cheap alternatives for an unknown-known requirement.
+Success requires a non-empty UTF-8 `options.md`, closes only a supporting run
+node, and puts the source task in `status: waiting` with `resolverKind: human`.
 
 ### `blocked`
 
@@ -124,7 +136,8 @@ Downstream run paths should not continue until the delegated node is resolved, c
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runnable`            | Execute via the executor; mark task done; attach task + run EoW; write `closes_with` edge.                                                               |
 | `needs_decomposition` | Open a `type: decomposition` run node; expand the task graph with a child task group + version; set parent `childTaskGroupId`; close parent with EoW reason `decomposed_by_runner`. The runner also extends the active snapshot's `selectedVersions` to include the new child task group/version so the new children become visible to later steps of the same runner invocation. |
-| `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact under `runs/<run-id>/artifacts/`; close parent with EoW reason `exploration_recorded_by_runner` and switch its `runReadiness` to `needs_decomposition`. |
+| `needs_exploration`   | Open a `type: exploration` run node; write a reflection artifact under `runs/<run-id>/artifacts/`; close only the supporting run node and advance the still-open source task to informed decomposition. |
+| `needs_prototype`     | Open a `type: prototype` run node and require a non-empty UTF-8 `options.md`; on success close only the supporting run node and put the source task in `status: waiting` with `resolverKind: human`. |
 | `blocked`             | Skip unless declared `blockedBy` references have all resolved; then reopen the task before selection. If only unresolved blocked tasks remain, stop with `blocked_only`. |
 
 The runner rechecks `blockedBy` references before each selection pass. A `blockedBy` entry can point at a task (`type: task`, `id`, optional `taskGroupVersionId`) or a run node (`type: runNode`, `runId`, `id`). When all referenced blockers are `done` or `cancelled`, the task is reopened with `status: pending`; `runReadiness: blocked` is cleared unless `unblockRunReadiness` provides the next readiness. `taskops unblock-check <work-dir> --dry-run --json` exposes the same check without mutating files.
@@ -139,7 +152,8 @@ When invoked with `--loopback self`, the runner treats pending self-delegate run
 
 When the runner cannot start a new step, it reports one of the following:
 
-- `all_closed` — every selected terminal task is closed by task EoW, every run terminal node is closed by run EoW, and no waiting/delegated/blocked work remains. This is the closure-complete terminal state.
+- `all_closed` — the selected graph is structurally closed, every supporting closure validates, and every claim-bearing closure has matching policy-approved review evidence.
+- `graph_closed_unapproved` — the graph is structurally closed but at least one claim lacks policy-approved evidence. It is not `all_closed`.
 - `no_runnable` — nothing is actionable but the work is not yet closed (terminal EoW coverage incomplete or otherwise inconsistent). Inspect the work before treating this as a successful finish.
 - `blocked_only` — open tasks remain but every one is `blocked`.
 - `waiting` / `delegation_pending` — a task or run node is parked waiting on something external.
@@ -154,6 +168,7 @@ When the runner cannot start a new step, it reports one of the following:
 - Upstream tasks (`order < target.order`) keep their status and gain `preservedUpstream: true` with `preservedFromVersionId`. Done leaves also get a fresh EoW with `reason: preserved_upstream_after_restart` so closure remains explicit.
 - The target task is reset to `pending` and gains `restartInstruction`, optional `restartReason`, `restartedFromVersionId`, and `restartedAt`.
 - Downstream tasks (`order >= target.order`, excluding the target) are reset to `pending`.
+- Task-valued `blockedBy` references to the restarted source version are rebased to the new selected version. External-version references and run-node blockers are preserved.
 - The prior version is marked `selected: false` with `supersededByVersionId`; historical run nodes/EoWs/edges are not modified. The active snapshot's `selectedVersions` is updated to point at the new version and the parent task group's `activeVersionId` follows if it pointed at the prior version. A `restart from task=…` line is appended to `work-log.md`.
 
-Restart refuses if the project currently has validation errors or if `<task-id>` is missing from or ambiguous across the active snapshot's selected versions.
+Restart refuses if the project currently has validation errors or if `<task-id>` is missing from or ambiguous across the active snapshot's selected versions. Validation also rejects a selected restarted lineage that still points at a superseded internal task-group version, so navigation and the runner fail closed instead of executing stale dependencies.

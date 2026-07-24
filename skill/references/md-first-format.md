@@ -255,6 +255,9 @@ Suggested fields:
 - `status`
 - `sourceTaskId?`
 - `sourceTaskGroupVersionId?`
+- `actionKind?`
+- `attempt?`
+- `predecessorRunNodeId?`
 - `createdAt`
 
 Suggested `type` values include `execute`, `explore`, `debug`, `review`, `verify`, and `delegate`.
@@ -293,12 +296,18 @@ Suggested fields:
 - `attachedToType: runNode`
 - `attachedToId`
 - `reason`
+- `closureRole: supporting | claim-bearing`
 - `declaredBy`
 - `declaredAt`
 - `createdAt`
 - `status: done`
 
 Run EoW nodes should usually be connected by a `runEdge` with `edgeType: closes_with`.
+
+- `closureRole: supporting` records provenance and is structurally validated,
+  but it is not in the policy-approval denominator.
+- `closureRole: claim-bearing` carries an objective result and requires a real,
+  matching independent review before policy-approved completion.
 
 ### RunEdge
 

@@ -75,6 +75,19 @@ taskops summary <work-dir>
 
 Use `taskops audit --strict` before treating TaskOps output as a strong paper, benchmark, release, or unattended-work completion claim. It is the work-level claim gate for shallow flat decomposition, manual EoW closure, structural-but-unapproved completion, and queue projection mismatches.
 
+Current execution contracts distinguish `needs_exploration` from
+`needs_prototype`: exploration closes only supporting evidence while the source
+task stays open; prototype success requires a non-empty UTF-8 `options.md` and
+waits for a human resolver. Supporting closures do not enter the policy
+denominator, claim-bearing closures require matching independent review, and a
+structurally closed graph with an unapproved claim reports
+`graph_closed_unapproved` rather than `all_closed`.
+
+Runner action attempts carry immutable action/attempt/predecessor identity.
+Restart rebases internal task blockers onto the new selected version and rejects
+stale selected references. CLI `--json` output is fully drained before the exit
+status is set, so piped and redirected payloads are complete.
+
 For a git-backed Obsidian vault workflow:
 
 ```bash

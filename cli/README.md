@@ -64,7 +64,7 @@ taskops classify-runnable ./my-work task-design --json
 taskops run ./my-work --executor dry-run --max-steps 1 --json
 ```
 
-`taskops run` dispatches by readiness: runnable tasks execute, `needs_decomposition` tasks expand the task graph, `needs_exploration` tasks create exploratory run evidence, and blocked/waiting/delegated work stops instead of being silently skipped.
+`taskops run` dispatches by readiness: runnable tasks execute, `needs_decomposition` tasks expand the task graph, `needs_exploration` tasks create exploratory run evidence, `needs_prototype` tasks create alternative options for human resolution, and blocked/waiting/delegated work stops instead of being silently skipped.
 
 ## Example: AI-assisted OAuth refactor
 
@@ -72,7 +72,7 @@ A large refactor should not be trusted to a flat checklist or a disappearing cha
 
 1. A `work` captures the objective: “Refactor the OAuth flow safely.”
 2. The task graph decomposes analysis, token validation changes, regression tests, migration notes, and review.
-3. The runner classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, or `blocked`.
+3. The runner classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, `needs_prototype`, or `blocked`.
 4. The run graph records what the agent actually did, which tests failed, what was delegated, and why each branch was closed.
 5. Reviewers inspect `taskops summary`, `runs/<run-id>/events.jsonl`, and EoW nodes before trusting completion.
 
@@ -117,12 +117,17 @@ taskops git-sync <vault-dir> [--message <msg>] [--branch <branch>]
 taskops watch-sync <vault-dir> [--message <msg>] [--debounce-ms <ms>] [--branch <branch>]
 ```
 
+For commands with `--json`, TaskOps awaits the complete pretty-JSON write,
+including stream backpressure/drain, before setting the process exit status.
+Successful JSON output ends with a newline and remains complete when redirected
+or piped; command failures remain on stderr.
+
 ## Honest-action commands
 
 These read-only/guarded commands are the "honest loop" surface. They never lie about progress:
 
-- `taskops next <work-dir> [--json]` — return the one next honest action: `execute`, `decompose`, `explore`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. The output also includes the target task or run node and a recommended command. It does not mutate state.
-- `taskops explain <work-dir> [--json]` — explain why the work is or is not done. Reports the closure summary, the next honest action, and the concrete reasons the work is still open (missing terminal EoW, blockers, waiting delegations, runnable/decompose/explore tasks, validation errors). It does not mutate state.
+- `taskops next <work-dir> [--json]` — return the one next honest action: `execute`, `decompose`, `explore`, `prototype`, `wait`, `delegation_pending`, `blocked`, `done`, or `no_runnable`. The output also includes the target task or run node and a recommended command. It does not mutate state.
+- `taskops explain <work-dir> [--json]` — explain why the work is or is not done. Reports the closure summary, the next honest action, and the concrete reasons the work is still open (missing terminal EoW, blockers, waiting delegations, runnable/decompose/explore/prototype tasks, validation errors). It does not mutate state.
 - `taskops review <work-dir> <run-node-id|task-id> [--json]` — write or refresh a `type: review` run node with `reviewReport`. The report compares task `acceptance` (or `completionCriteria` fallback) against the run node's observed result, records `approved | rejected | needs_verification`, and attaches approved review hashes to existing EoW nodes when possible. `acceptance.semanticAssertions` (alias: `acceptance.assertions`) supports deterministic review fields: `contentIncludes`, `contentExcludes`, `requiredUrls`, `requiredArtifactIdentities`, `requiredSources`/`requiredCitations`, `forbiddenUrls`, `forbiddenArtifacts`, and `requiredCoverage`.
 - `taskops close <work-dir> <run-node-id|task-id> [--reason <reason>] [--json]` — make EoW closure explicit and guarded. Refuses to close a task that already has an EoW, has open child branches, or is not yet `done` unless `--reason manual_verified` is supplied (in which case the task status is also flipped to `done` so closure counts stay honest). Refuses to close a run node that is not `done`/`cancelled` unless an explicit reason (`failure`, `superseded`, `cancelled`, `manual_verified`) is supplied; refuses delegated/waiting nodes unless one of `manual_verified|cancelled|superseded` is given. On success it writes an EoW file (and a `closes_with` run edge for run nodes). `--reason partial_complete` is different: it writes an `entityType: partial` marker under `partials/`, leaves status unchanged, does not create EoW coverage, and keeps later canonical EoW closure possible.
 - `taskops promote-partials <work-dir> [--dry-run|--apply] [--json]` — promote unresolved selected-version partial markers into same-task-group follow-up sibling tasks. The default path is plan-first/dry-run: it reports the new version id, source task block patch, follow-up task metadata, `supersededBy` target, and skipped partials such as already-superseded markers, non-selected versions, missing run-node source mapping, or follow-up depth cap violations. `--apply` writes the new selected version, blocks the source task on the follow-up sibling, updates the active snapshot/task-group version pointer, and fills the promoted partial marker's `supersededBy`.
@@ -286,22 +291,25 @@ taskops run ./my-work --max-steps 3 --json
 The runner:
 
 - Re-uses an existing active run when there is exactly one, else creates/uses `runs/run-main/`. Override with `--run-id`.
+- Persists immutable action-attempt identity on runner-authored execute, decompose, explore, prototype, and review nodes through `actionKind`, `attempt`, and `predecessorRunNodeId`. The first available node keeps the compatible `run-node-<task-id>` id; later attempts use a version/task/action/attempt-qualified id. An update with mismatched identity is rejected.
 - Rechecks blocked tasks that declare `blockedBy` references before selecting the next action. When every blocker is resolved, the runner reopens the task (`status: pending`) and clears `runReadiness: blocked` unless `unblockRunReadiness` says what readiness to use next. Use `taskops unblock-check <work-dir> --dry-run --json` to inspect the same transition without mutating files.
-- Picks the next task deterministically: active snapshot order, then `task.order`, then `id` lexicographic. Only tasks with status `pending`/`active` are eligible. Tasks classified as `blocked` are excluded; tasks classified as `runnable`, `needs_decomposition`, or `needs_exploration` are dispatched to the matching runner step.
+- Picks the next task deterministically: active snapshot order, then `task.order`, then `id` lexicographic. Only tasks with status `pending`/`active` are eligible. Tasks classified as `blocked` are excluded; tasks classified as `runnable`, `needs_decomposition`, `needs_exploration`, or `needs_prototype` are dispatched to the matching runner step.
 - For `runnable` tasks: creates the run node, mutates task status to done, attaches task and run EoW nodes, and writes the `closes_with` edge.
 - For `needs_decomposition` tasks: creates a `type: decomposition` run node, expands the task graph by writing a child task group and version (dry-run synthesizes a deterministic placeholder; `openclaw-agent` delegates authoring to the agent), updates the parent task's `childTaskGroupId`, marks the parent done with an EoW reason `decomposed_by_runner`, closes the run node with an EoW reason `decomposition_recorded`, and extends the active snapshot's `selectedVersions` so the new child task group/version becomes visible to subsequent steps of the same runner invocation.
-- For `needs_exploration` tasks: creates a `type: exploration` run node, writes a reflection artifact under `runs/<run-id>/artifacts/<run-node-id>.md`, marks the parent task done with an EoW reason `exploration_recorded_by_runner` and `runReadiness: needs_decomposition` (ready for an informed decomposition pass), and closes the run node with an EoW reason `exploration_recorded`.
+- For `needs_exploration` tasks: creates a `type: exploration` run node, writes a reflection artifact under `runs/<run-id>/artifacts/<run-node-id>.md`, advances the source task to informed decomposition while leaving it open, and closes only the supporting run node with EoW reason `exploration_recorded`.
+- For `needs_prototype` tasks: creates a `type: prototype` run node and requires a non-empty UTF-8 `options.md`. Success closes only the supporting run node and puts the source task in `status: waiting` with `resolverKind: human`; a missing, empty, or invalid UTF-8 artifact records `prototype_failed`, blocks the task, and writes no run EoW.
 - Pauses immediately when it encounters a `status: waiting` task or run node, or a `type: delegate` run node that is not yet `done`/`cancelled`. Delegated run nodes are classified by `type` first, so `type: delegate` + `status: waiting` reports `delegation_pending` rather than generic `waiting`.
 - Appends a JSONL event log at `runs/<run-id>/events.jsonl` plus human entries in `runs/<run-id>/run-log.md`.
 - Holds a `.taskops-runner.lock` directory under the work root and removes it on exit. A second runner against the same work refuses to start.
 
 ### Stop conditions
 
-`--max-steps` and `--until` are both optional and combine with OR semantics: the runner stops before starting a new step if either limit is reached. When neither is supplied the runner defaults to `--max-steps 1` (one bounded step). Every action — execute, decompose, or explore — counts as one step against `--max-steps`.
+`--max-steps` and `--until` are both optional and combine with OR semantics: the runner stops before starting a new step if either limit is reached. When neither is supplied the runner defaults to `--max-steps 1` (one bounded step). Every action — execute, decompose, explore, or prototype — counts as one step against `--max-steps`.
 
 | Stop reason            | Meaning                                                                                                  |
 | ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `all_closed`           | The selected work is fully closed: every terminal task is closed by task EoW, every run terminal node is closed by run EoW, and no waiting/delegated/blocked work remains. This is the closure-complete terminal state. |
+| `all_closed`           | The selected graph is structurally closed, every supporting closure validates, and every claim-bearing closure has matching policy-approved review evidence. |
+| `graph_closed_unapproved` | The graph is structurally closed, but at least one claim-bearing closure lacks matching policy-approved review evidence. It is not `all_closed`. |
 | `no_runnable`          | No remaining task is actionable (runnable, decomposable, or explorable), but the work is not yet closed (terminal EoW coverage incomplete, or otherwise inconsistent). Treat this as a state to inspect rather than a successful finish. |
 | `blocked_only`         | Open tasks remain but they are all classified as `blocked`; resolve the blockers before continuing.      |
 | `waiting`              | A task or run node is in `status: waiting`; resolve or cancel it before continuing.                      |
@@ -317,7 +325,7 @@ The runner:
 ### Executors
 
 - `--executor dry-run` (default) — no external process. Synthesises a successful result and mutates the markdown graph. For decomposition steps it writes a deterministic child task group/version with a single blocked placeholder task asking for human input. For exploration steps it writes a deterministic reflection artifact under `runs/<run-id>/artifacts/`. Intended for smoke tests, dress rehearsals, and skill reviews. **It does not perform real work.** Pass `--executor openclaw-agent` to dispatch a real run.
-- `--executor openclaw-agent` — spawns `openclaw agent --agent <agent-id> --message <prompt> --json [--timeout <seconds>]`. The prompt is tailored to the picked action — execute, decompose, or explore — and instructs the agent not to recursively invoke `taskops run`. After the agent returns the runner verifies that the expected artifact (the executed task's outcome, the decomposition version index, or the exploration artifact) was authored before marking the step done. Default `--agent` is `main`.
+- `--executor openclaw-agent` — spawns `openclaw agent --agent <agent-id> --message <prompt> --json [--timeout <seconds>]`. The prompt is tailored to the picked action — execute, decompose, explore, or prototype — and instructs the agent not to recursively invoke `taskops run`. After the agent returns the runner verifies the action-specific artifact before advancing state. Default `--agent` is `main`.
 
 ### Loopback mode
 
@@ -362,12 +370,13 @@ Restart semantics:
 - **Upstream tasks** (`order < target.order`) keep their original status (typically `done`), gain `preservedUpstream: true` and `preservedFromVersionId: <prior>`. For each preserved `done` task that was a leaf (no `childTaskGroupId`), restart writes a fresh EoW with `reason: preserved_upstream_after_restart` so closure stays explicit.
 - **The target task** is reset to `status: pending` and gains `restartInstruction`, `restartReason` (optional), `restartedFromVersionId`, and `restartedAt`.
 - **Downstream tasks** (`order >= target.order`, excluding the target) are reset to `status: pending` so the runner can re-execute them.
+- Task-valued `blockedBy` references to the restarted source version are rebased to the new selected version. External-version references and run-node blockers remain unchanged.
 - The prior version is rewritten in-place with `selected: false`, `supersededByVersionId: <new>`, and `supersededAt`. Historical run nodes/EoWs/edges in `runs/<run-id>/` are not modified — they remain as evidence of the prior execution.
 - The active snapshot's `selectedVersions` is updated to point at the new version (and the parent task group's `activeVersionId` follows if it pointed at the prior).
 - The new version index gains `selected: true`, `supersedesVersionId`, `restartedFromVersionId`, `restartedFromTaskId`, `restartInstruction`, optional `restartReason`, and `restartedAt`.
 - The work-log appends a `restart from task=…` line for traceability.
 
-`--instruction` is required (or `--instruction-file` pointing at a file with the same content). Restart refuses if the project currently has validation errors, or if `<task-id>` is missing from / ambiguous across the active snapshot's selected versions.
+`--instruction` is required (or `--instruction-file` pointing at a file with the same content). Restart refuses if the project currently has validation errors, or if `<task-id>` is missing from / ambiguous across the active snapshot's selected versions. Validation also rejects a selected restarted lineage that still references a superseded internal version, so navigation and the runner fail closed instead of executing stale dependencies.
 
 ## Canonical file layout
 
@@ -411,9 +420,16 @@ TaskOps classifies each task before execution:
 - `runnable` — send it to a run graph.
 - `needs_decomposition` — split it into a child task group/version.
 - `needs_exploration` — run/search/try/debug first to learn enough for honest decomposition.
+- `needs_prototype` — create cheap alternatives for an unknown-known requirement, then wait for a human decision.
 - `blocked` — resolve the dependency before continuing.
 
 Explicit `runReadiness: runnable` is treated as a claim, not an unconditional override. Contradictory metadata such as declared unknowns, exploration flags, blocked status, low confidence, or incomplete guarded/runner-managed acceptance downgrades the task before runner selection. Manual and legacy workflows stay readable: missing acceptance remains advisory unless the task opts into `guarded` or `runner-managed`.
+
+- `needs_prototype` creates cheap alternatives for an unknown-known requirement.
+  Success requires a non-empty UTF-8 `options.md`, closes only a supporting run
+  node, and puts the source task in `status: waiting` with `resolverKind: human`.
+- Exploration records evidence and closes only its supporting run node; the
+  source task stays open and advances to informed decomposition.
 
 ## Closure and delegation
 
@@ -433,6 +449,13 @@ Work completion: complete
 ```
 
 `Work completion` is structural: terminal task branches and terminal run paths have EoW coverage, with no waiting/delegated/blocked work left. `Closure state` adds policy meaning. `policy_approved_complete` requires EoW nodes backed by approved review metadata from a policy-bearing mode (`enforced`, `guarded`, or `runner-managed`); `informational` review remains advisory. `manual_attested_complete` means manual verification closed the graph but did not satisfy policy-approved review; `structurally_complete_unapproved` means the graph is closed only structurally. This preserves legacy/manual closure while making review policy visible.
+
+- `closureRole: supporting` records provenance and is structurally validated,
+  but it is not in the policy-approval denominator.
+- `closureRole: claim-bearing` carries an objective result and requires a real,
+  matching independent review before policy-approved completion.
+- `graph_closed_unapproved` means the graph is structurally closed but at least
+  one claim lacks policy-approved evidence. It is not `all_closed`.
 
 Delegation is represented in the run graph rather than hidden as a vague blocker:
 

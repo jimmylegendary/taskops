@@ -60,6 +60,35 @@ for (const rel of userFacingDocs) {
   }
 }
 
+const readinessDocs = [
+  'README.md',
+  'cli/README.md',
+  'docs/CORE_MODEL.md',
+  'docs/RUN_READINESS.md',
+  'skill/SKILL.md',
+  'skill/references/core-model.md',
+  'skill/references/run-readiness.md',
+];
+for (const rel of readinessDocs) {
+  const text = read(rel);
+  if (!text.includes('needs_prototype')) failures.push(`${rel}: missing needs_prototype`);
+  if (!text.includes('graph_closed_unapproved')) failures.push(`${rel}: missing graph_closed_unapproved`);
+}
+
+for (const rel of ['cli/README.md', 'docs/CORE_MODEL.md', 'docs/MD_FIRST_FORMAT.md', 'skill/SKILL.md', 'skill/references/core-model.md', 'skill/references/md-first-format.md']) {
+  const text = read(rel);
+  if (!text.includes('closureRole: supporting')) failures.push(`${rel}: missing supporting closure role`);
+  if (!text.includes('closureRole: claim-bearing')) failures.push(`${rel}: missing claim-bearing closure role`);
+}
+
+for (const rel of ['cli/README.md', 'docs/RUN_READINESS.md', 'skill/SKILL.md', 'skill/references/run-readiness.md']) {
+  const text = read(rel);
+  if (!text.includes('options.md')) failures.push(`${rel}: missing prototype artifact contract`);
+  if (!/exploration[\s\S]{0,240}source task[\s\S]{0,120}open/i.test(text)) {
+    failures.push(`${rel}: exploration must say the source task stays open`);
+  }
+}
+
 if (failures.length) {
   console.error('Contract doc check failed:');
   for (const failure of failures) console.error(`- ${failure}`);
