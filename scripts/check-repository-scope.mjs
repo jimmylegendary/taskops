@@ -11,15 +11,20 @@ const read = (rel) => readFileSync(join(repoRoot, rel), 'utf8');
 const rootPkg = readJson('package.json');
 const cliPkg = readJson('cli/package.json');
 const lock = readJson('package-lock.json');
+const expectedScripts = {
+  build: 'npm run build --workspace cli',
+  typecheck: 'npm run typecheck --workspace cli',
+  test: 'npm run test --workspace cli',
+  'test:repository-scope': 'node ./scripts/check-repository-scope.mjs',
+  'test:version-sync': 'node ./scripts/check-version-sync.mjs',
+  'test:contract': 'node ./scripts/check-contract-docs.mjs',
+  verify: 'npm run test:repository-scope && npm run test:version-sync && npm run test:contract && npm run typecheck && npm run build && npm run test',
+};
 
 assert.equal(rootPkg.private, true, 'root package must remain private');
 assert.equal(cliPkg.private, true, 'CLI package must be non-publishable');
 assert.deepEqual(rootPkg.workspaces, ['cli'], 'only the CLI is an active workspace');
-
-for (const name of ['build:release', 'release:preflight', 'smoke:publish-artifact']) {
-  assert.equal(rootPkg.scripts[name], undefined, `${name} must not be active`);
-}
-assert.equal(rootPkg.scripts.verify.startsWith('npm run test:repository-scope'), true);
+assert.deepEqual(rootPkg.scripts, expectedScripts, 'root scripts must expose only the active core surface');
 
 assert.ok(lock.packages?.cli, 'lockfile must contain the CLI workspace');
 assert.equal(lock.packages?.['obsidian-plugin'], undefined);
