@@ -72,7 +72,7 @@ A large refactor should not be trusted to a flat checklist or a disappearing cha
 
 1. A `work` captures the objective: “Refactor the OAuth flow safely.”
 2. The task graph decomposes analysis, token validation changes, regression tests, migration notes, and review.
-3. The runner classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, `needs_prototype`, or `blocked`.
+3. The runner uses the exhaustive readiness contract `runnable | needs_decomposition | needs_exploration | needs_prototype | blocked`.
 4. The run graph records what the agent actually did, which tests failed, what was delegated, and why each branch was closed.
 5. Reviewers inspect `taskops summary`, `runs/<run-id>/events.jsonl`, and EoW nodes before trusting completion.
 
@@ -298,6 +298,9 @@ The runner:
 - For `needs_decomposition` tasks: creates a `type: decomposition` run node, expands the task graph by writing a child task group and version (dry-run synthesizes a deterministic placeholder; `openclaw-agent` delegates authoring to the agent), updates the parent task's `childTaskGroupId`, marks the parent done with an EoW reason `decomposed_by_runner`, closes the run node with an EoW reason `decomposition_recorded`, and extends the active snapshot's `selectedVersions` so the new child task group/version becomes visible to subsequent steps of the same runner invocation.
 - For `needs_exploration` tasks: creates a `type: exploration` run node, writes a reflection artifact under `runs/<run-id>/artifacts/<run-node-id>.md`, advances the source task to informed decomposition while leaving it open, and closes only the supporting run node with EoW reason `exploration_recorded`.
 - For `needs_prototype` tasks: creates a `type: prototype` run node and requires a non-empty UTF-8 `options.md`. Success closes only the supporting run node and puts the source task in `status: waiting` with `resolverKind: human`; a missing, empty, or invalid UTF-8 artifact records `prototype_failed`, blocks the task, and writes no run EoW.
+- To resume execution after prototype success, fill both generated `## DECISION`
+  and `## BASIS` sections on the waiting source task. Leaving either section
+  empty keeps the task waiting and prevents execution from resuming.
 - Pauses immediately when it encounters a `status: waiting` task or run node, or a `type: delegate` run node that is not yet `done`/`cancelled`. Delegated run nodes are classified by `type` first, so `type: delegate` + `status: waiting` reports `delegation_pending` rather than generic `waiting`.
 - Appends a JSONL event log at `runs/<run-id>/events.jsonl` plus human entries in `runs/<run-id>/run-log.md`.
 - Holds a `.taskops-runner.lock` directory under the work root and removes it on exit. A second runner against the same work refuses to start.

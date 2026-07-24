@@ -132,11 +132,14 @@ TaskOps v0.9 makes strong completion claims depend on runner-owned evidence, not
 `taskops run <work-dir>` is the canonical way to advance a TaskOps work graph. The skill is passive guidance; the runner is the layer that actually mutates state.
 
 - Use `taskops run <work-dir>` instead of editing run nodes / EoW / runRefs / child task groups by hand. The runner deterministically picks the next task (active snapshot order, then `task.order`, then `id`), classifies it, and dispatches the matching action.
-- The runner handles three task readiness states each as one bounded step:
+- The runner handles four actionable task readiness states each as one bounded step:
   - `runnable` — creates the run node, executes via the executor, marks the task done, writes the task and run EoW nodes, and creates the `closes_with` edge.
   - `needs_decomposition` — creates a `type: decomposition` run node, expands the task graph with a child task group and a v1 version (dry-run synthesizes a deterministic placeholder; `openclaw-agent` delegates authoring to the agent and verifies the result), sets the parent task's `childTaskGroupId`, closes the parent task with EoW reason `decomposed_by_runner`, and extends the active snapshot's `selectedVersions` so the new child task group/version becomes visible to later steps of the same runner invocation.
   - `needs_exploration` — creates a `type: exploration` run node, writes a reflection artifact at `runs/<run-id>/artifacts/<run-node-id>.md`, closes only the supporting run node, and advances the still-open source task to informed decomposition.
   - `needs_prototype` — creates a `type: prototype` run node and requires a non-empty UTF-8 `options.md`; success closes only the supporting run node and puts the source task in `status: waiting` with `resolverKind: human`.
+- To resume execution after prototype success, fill both generated `## DECISION`
+  and `## BASIS` sections on the waiting source task. Leaving either section
+  empty keeps the task waiting and prevents execution from resuming.
 - `blocked` tasks are excluded from execution. If only blocked tasks remain the runner stops with `blocked_only`.
 - Before each selection pass, the runner rechecks blocked tasks with `blockedBy` references. If every referenced task/run node blocker is `done` or `cancelled`, it reopens the task (`status: pending`) and clears `runReadiness: blocked` unless `unblockRunReadiness` is set. Use `taskops unblock-check <work-dir> --dry-run --json` to inspect this without mutation.
 - `status: waiting` tasks and non-delegate run nodes, and `type: delegate` run nodes that are not yet `done`/`cancelled`, pause the runner with stop reason `waiting` or `delegation_pending`. Delegate type wins over generic waiting, so `type: delegate` + `status: waiting` reports `delegation_pending`. Surface the pause to the user; do not auto-skip.

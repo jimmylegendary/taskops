@@ -434,6 +434,7 @@ Validator should check at least:
 ### Policy-aware closure
 - structural closure is reported separately from policy-approved closure
 - `approved_result` EoW nodes should carry approved review node/report hashes, reviewed acceptance/result hashes, and a policy-bearing `approvedReviewMode`
+- policy approval requires a real independent review node; its reviewed acceptance/result hashes must match the current source task acceptance and the current claim-bearing run-node result
 - `manual_verified` / `manual_close` EoW nodes count as manual attestation, not policy-approved review
 - `informational` review remains advisory and does not count as policy-approved closure
 - summaries should surface mismatches such as active work with structurally complete graphs

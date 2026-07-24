@@ -2,6 +2,7 @@
 
 TaskOps classifies every task node before it enters execution.
 Execution happens in independent run graphs under `runs/<run-id>/` and should remain bidirectionally traceable to the source task when the run originates from a task.
+The exhaustive readiness contract is `runnable | needs_decomposition | needs_exploration | needs_prototype | blocked`.
 
 ## Values
 

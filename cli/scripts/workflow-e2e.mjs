@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { writeJson } from '../bin/taskops.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '..', 'bin', 'taskops.js');
@@ -11,12 +12,12 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-workflow-e2e-'));
 const configuredResultPath = String(process.env.TASKOPS_WORKFLOW_RESULT_PATH || '').trim();
 const resultPath = configuredResultPath ? resolve(configuredResultPath) : null;
 
-function emitPayload(payload) {
+async function emitPayload(payload) {
   if (resultPath) {
     mkdirSync(dirname(resultPath), { recursive: true });
     writeFileSync(resultPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   }
-  console.log(JSON.stringify(payload, null, 2));
+  await writeJson(payload);
 }
 
 function run(args, expectedStatus = 0) {
@@ -152,6 +153,7 @@ function record(id, feature, expectedResult, actualResult, pass) {
   testCases.push({ id, feature, expectedResult, actualResult, pass });
 }
 
+let exitCode = 1;
 try {
   // Expected results are declared before executing each test case.
   // P0#6: dry-run 종결은 policy 미승인이라 navigation은 all_closed/complete가 아니라 graph_closed_unapproved/
@@ -268,10 +270,13 @@ try {
     summary: { passed: testCases.filter((t) => t.pass).length, total: testCases.length, allPassed: testCases.every((t) => t.pass) },
     testCases
   };
-  emitPayload(payload);
-  process.exit(payload.summary.allPassed ? 0 : 1);
+  await emitPayload(payload);
+  exitCode = payload.summary.allPassed ? 0 : 1;
 } catch (err) {
   const payload = { generatedAt: new Date().toISOString(), tempRoot, error: err instanceof Error ? err.message : String(err), testCases };
-  emitPayload(payload);
-  process.exit(1);
+  await emitPayload(payload);
+  exitCode = 1;
+} finally {
+  rmSync(tempRoot, { recursive: true, force: true });
 }
+process.exitCode = exitCode;

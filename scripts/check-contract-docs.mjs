@@ -69,10 +69,28 @@ const readinessDocs = [
   'skill/references/core-model.md',
   'skill/references/run-readiness.md',
 ];
+const readinessContract = 'runnable | needs_decomposition | needs_exploration | needs_prototype | blocked';
 for (const rel of readinessDocs) {
   const text = read(rel);
-  if (!text.includes('needs_prototype')) failures.push(`${rel}: missing needs_prototype`);
+  if (!text.includes(readinessContract)) failures.push(`${rel}: missing exhaustive readiness contract`);
   if (!text.includes('graph_closed_unapproved')) failures.push(`${rel}: missing graph_closed_unapproved`);
+  for (const line of text.split('\n')) {
+    const normalized = line
+      .toLowerCase()
+      .replaceAll('needs decomposition', 'needs_decomposition')
+      .replaceAll('needs exploration', 'needs_exploration')
+      .replaceAll('needs prototype', 'needs_prototype');
+    const exhaustive = ['runnable', 'needs_decomposition', 'needs_exploration', 'blocked']
+      .every((value) => normalized.includes(value));
+    const declaresExhaustiveSet = /classif(?:y|ies).*task|decides whether each task|runreadiness\?|run readiness.* as /.test(normalized);
+    if (declaresExhaustiveSet && exhaustive && !normalized.includes('needs_prototype')) {
+      failures.push(`${rel}: stale exhaustive readiness list omits needs_prototype`);
+      break;
+    }
+  }
+}
+if (/handles three task readiness states/i.test(read('skill/SKILL.md'))) {
+  failures.push('skill/SKILL.md: actionable readiness count must be four');
 }
 
 for (const rel of ['cli/README.md', 'docs/CORE_MODEL.md', 'docs/MD_FIRST_FORMAT.md', 'skill/SKILL.md', 'skill/references/core-model.md', 'skill/references/md-first-format.md']) {
@@ -86,6 +104,23 @@ for (const rel of ['cli/README.md', 'docs/RUN_READINESS.md', 'skill/SKILL.md', '
   if (!text.includes('options.md')) failures.push(`${rel}: missing prototype artifact contract`);
   if (!/exploration[\s\S]{0,240}source task[\s\S]{0,120}open/i.test(text)) {
     failures.push(`${rel}: exploration must say the source task stays open`);
+  }
+}
+
+for (const rel of ['cli/README.md', 'skill/SKILL.md']) {
+  const text = read(rel);
+  if (!text.includes('## DECISION') || !text.includes('## BASIS') || !/resume execution/i.test(text)) {
+    failures.push(`${rel}: prototype resolution must require DECISION and BASIS to resume execution`);
+  }
+}
+
+for (const rel of ['docs/CORE_MODEL.md', 'docs/MD_FIRST_FORMAT.md', 'skill/references/core-model.md', 'skill/references/md-first-format.md']) {
+  const text = read(rel);
+  if (!/real independent review node/i.test(text)) {
+    failures.push(`${rel}: missing real independent review-node contract`);
+  }
+  if (!/reviewed\s+acceptance\/result hashes[\s\S]{0,240}current source task acceptance[\s\S]{0,160}current claim-bearing run-node result/i.test(text)) {
+    failures.push(`${rel}: missing live current acceptance/result hash contract`);
   }
 }
 

@@ -309,6 +309,11 @@ Run EoW nodes should usually be connected by a `runEdge` with `edgeType: closes_
 - `closureRole: claim-bearing` carries an objective result and requires a real,
   matching independent review before policy-approved completion.
 
+Policy approval requires a real independent review node. Its reviewed
+acceptance/result hashes must match the current source task acceptance and the
+current claim-bearing run-node result; copied or stale hashes do not approve
+closure.
+
 ### RunEdge
 
 Path:

@@ -37,7 +37,7 @@ The v1 working contract is now:
 - **EoW (End of Work)** is a visible terminal node attached to task branches or run paths when they are truly closed.
 - **Delegated waiting** is represented as `type: delegate` / `status: waiting` in the run graph, with delegatee, request, expected output, and optional timeout metadata.
 - **Task↔run references** are bidirectional: tasks use `runRefs`; run nodes use `sourceTaskId` / `sourceTaskGroupVersionId`.
-- **Run readiness** classifies each task as `runnable`, `needs_decomposition`, `needs_exploration`, `needs_prototype`, or `blocked` before execution.
+- **Run readiness** uses the exhaustive contract `runnable | needs_decomposition | needs_exploration | needs_prototype | blocked` before execution.
 - **Exploratory runs** are first-class feedback loops for unknown-unknowns: run/search/try/error to learn enough to decompose honestly.
 - **Task groups** are versioned decomposition units.
 - **Refactor** creates a new task-group version rather than mutating decomposition history away.
@@ -126,7 +126,7 @@ For a goal like **“OAuth flow refactoring”**, TaskOps keeps the work honest:
 
 - the **work** records the objective
 - the **task graph** breaks it into analysis, implementation, tests, migration notes, and review
-- `runReadiness` decides whether each task is runnable, needs decomposition, needs exploration, or is blocked
+- `runReadiness` uses `runnable | needs_decomposition | needs_exploration | needs_prototype | blocked`
 - the **run graph** records what the agent actually did, what failed, what was delegated, and what evidence closed the branch
 - reviewers can inspect both the intended decomposition and the execution trail before trusting the result
 

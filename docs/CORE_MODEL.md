@@ -362,6 +362,11 @@ Closure answers:
 
 Structural closure means every selected terminal task and terminal run path has EoW coverage with no waiting/delegated/blocked work left. Partial markers are not EoW coverage; a work with only partial progress remains open until real terminal closure or follow-up resolution exists. Policy-approved closure is stricter: relevant EoW nodes must carry approved review hashes, reviewed acceptance/result hashes, and a policy-bearing review mode (`enforced`, `guarded`, or `runner-managed`). Informational and manual-attested closure remain valid for legacy/manual workflows, but summaries report them separately from policy-approved closure.
 
+Policy approval requires a real independent review node. Its reviewed
+acceptance/result hashes must match the current source task acceptance and the
+current claim-bearing run-node result; copied or stale hashes do not approve
+closure.
+
 - `graph_closed_unapproved` means the graph is structurally closed but at least
   one claim lacks policy-approved evidence. It is not `all_closed`.
 
