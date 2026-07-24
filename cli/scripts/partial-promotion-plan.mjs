@@ -416,7 +416,7 @@ writeFileSync(
 );
 const followUpClose = json(['close', workDir, 'task-task-main-followup', '--reason', 'approved_result']);
 assert.equal(followUpClose.closed, true);
-assert.equal(followUpClose.eowId, 'eow-task-task-main-followup');
+assert.equal(followUpClose.eowId, 'eow-task-task-main-followup-tgv-root-v3');
 
 const recheck = json(['unblock-check', workDir]);
 assert.equal(recheck.unblocked.length, 1);
