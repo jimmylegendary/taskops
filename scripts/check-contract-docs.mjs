@@ -119,8 +119,20 @@ for (const rel of ['docs/CORE_MODEL.md', 'docs/MD_FIRST_FORMAT.md', 'skill/refer
   if (!/real independent review node/i.test(text)) {
     failures.push(`${rel}: missing real independent review-node contract`);
   }
-  if (!/reviewed\s+acceptance\/result hashes[\s\S]{0,240}current source task acceptance[\s\S]{0,160}current claim-bearing run-node result/i.test(text)) {
+  if (!/reviewed\s+acceptance\/result\s+hashes[\s\S]{0,240}current\s+source\s+task\s+acceptance[\s\S]{0,160}current\s+claim-bearing\s+run-node\s+result/i.test(text)) {
     failures.push(`${rel}: missing live current acceptance/result hash contract`);
+  }
+}
+
+for (const rel of ['skill/references/core-model.md', 'skill/references/md-first-format.md']) {
+  const policyParagraph = read(rel)
+    .split(/\n\s*\n/)
+    .find((paragraph) => /policy-approved EoW records require/i.test(paragraph)) || '';
+  if (!/approved review node\/report hash evidence/i.test(policyParagraph)) {
+    failures.push(`${rel}: policy-approved EoW contract must require approved review node/report hash evidence`);
+  }
+  if (!/policy-bearing review mode\s+\(\s*`enforced`,\s*`guarded`,\s*or\s*`runner-managed`\s*\)/i.test(policyParagraph)) {
+    failures.push(`${rel}: policy-approved EoW contract must require a policy-bearing review mode`);
   }
 }
 

@@ -348,10 +348,11 @@ Run graph answers:
 Closure answers:
 > Is the graph structurally closed and policy-approved, or only structurally closed?
 
-Policy approval requires a real independent review node. Its reviewed
-acceptance/result hashes must match the current source task acceptance and the
-current claim-bearing run-node result; copied or stale hashes do not approve
-closure.
+Policy-approved EoW records require a real independent review node. They must
+carry approved review node/report hash evidence, reviewed acceptance/result
+hashes that match the current source task acceptance and the current
+claim-bearing run-node result, and a policy-bearing review mode (`enforced`,
+`guarded`, or `runner-managed`); copied or stale hashes do not approve closure.
 
 - `graph_closed_unapproved` means the graph is structurally closed but at least
   one claim lacks policy-approved evidence. It is not `all_closed`.
