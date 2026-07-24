@@ -58,10 +58,24 @@ export function writeRunEdgeFile({ runDir, runId, edgeId, fromRunNodeId, toRunNo
   return edgePath;
 }
 
-export function ensureRunNodeFile({ runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status = 'active', kindLabel }, io) {
+export function ensureRunNodeFile({
+  runDir,
+  runId,
+  runNodeId,
+  type,
+  title,
+  sourceTaskId,
+  sourceTaskGroupVersionId,
+  status = 'active',
+  kindLabel,
+  actionKind,
+  attempt,
+  predecessorRunNodeId = null,
+}, io) {
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
+  const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
   const updateFrontmatter = requireFn(io, 'updateMarkdownFrontmatter');
   const now = requireFn(io, 'now');
   const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
@@ -78,9 +92,24 @@ export function ensureRunNodeFile({ runDir, runId, runNodeId, type, title, sourc
     };
     if (sourceTaskId != null && sourceTaskId !== '') nodeFm.sourceTaskId = sourceTaskId;
     if (sourceTaskGroupVersionId != null && sourceTaskGroupVersionId !== '') nodeFm.sourceTaskGroupVersionId = sourceTaskGroupVersionId;
+    if (actionKind != null && actionKind !== '') nodeFm.actionKind = actionKind;
+    if (attempt != null) nodeFm.attempt = attempt;
+    if (predecessorRunNodeId) nodeFm.predecessorRunNodeId = predecessorRunNodeId;
     const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
     writeTextFile(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`);
   } else {
+    const current = parseMarkdownFile(runNodePath);
+    for (const [field, expected] of Object.entries({
+      runId,
+      sourceTaskId,
+      sourceTaskGroupVersionId,
+      actionKind,
+      attempt,
+    })) {
+      if (expected != null && current[field] !== expected) {
+        throw new Error(`Immutable run-node identity mismatch for ${runNodeId}: ${field}`);
+      }
+    }
     updateFrontmatter(runNodePath, (fm) => {
       fm.status = status;
       return fm;

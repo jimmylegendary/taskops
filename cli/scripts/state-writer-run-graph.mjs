@@ -104,7 +104,20 @@ function legacyWriteRunEdge({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId,
   return edgePath;
 }
 
-function legacyEnsureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status = 'active', kindLabel }) {
+function legacyEnsureRunNode({
+  runDir,
+  runId,
+  runNodeId,
+  type,
+  title,
+  sourceTaskId,
+  sourceTaskGroupVersionId,
+  status = 'active',
+  kindLabel,
+  actionKind,
+  attempt,
+  predecessorRunNodeId = null,
+}) {
   const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
   if (!existsSync(runNodePath)) {
     const nodeFm = {
@@ -119,6 +132,9 @@ function legacyEnsureRunNode({ runDir, runId, runNodeId, type, title, sourceTask
     };
     if (sourceTaskId != null && sourceTaskId !== '') nodeFm.sourceTaskId = sourceTaskId;
     if (sourceTaskGroupVersionId != null && sourceTaskGroupVersionId !== '') nodeFm.sourceTaskGroupVersionId = sourceTaskGroupVersionId;
+    if (actionKind != null && actionKind !== '') nodeFm.actionKind = actionKind;
+    if (attempt != null) nodeFm.attempt = attempt;
+    if (predecessorRunNodeId) nodeFm.predecessorRunNodeId = predecessorRunNodeId;
     const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
     writeFileSync(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`, 'utf8');
   } else {
@@ -242,12 +258,12 @@ function runLegacy(root) {
   legacyEnsureRunNode({
     runDir, runId: 'run-main', runNodeId: 'run-node-task-a', type: 'execute',
     title: 'Execute task A', sourceTaskId: 'task-a', sourceTaskGroupVersionId: 'tgv-root-v1',
-    status: 'active', kindLabel: 'execute',
+    status: 'active', kindLabel: 'execute', actionKind: 'execute', attempt: 1,
   });
   legacyEnsureRunNode({
     runDir, runId: 'run-main', runNodeId: 'run-node-task-a', type: 'execute',
     title: 'Execute task A', sourceTaskId: 'task-a', sourceTaskGroupVersionId: 'tgv-root-v1',
-    status: 'done', kindLabel: 'execute',
+    status: 'done', kindLabel: 'execute', actionKind: 'execute', attempt: 1,
   });
   legacyAttachRunRef(taskPath, 'run-main', 'run-node-task-a', 'primary_execution');
   legacyWriteRunEdge({
@@ -267,12 +283,12 @@ function runFacade(root) {
   ensureRunNodeFile({
     runDir, runId: 'run-main', runNodeId: 'run-node-task-a', type: 'execute',
     title: 'Execute task A', sourceTaskId: 'task-a', sourceTaskGroupVersionId: 'tgv-root-v1',
-    status: 'active', kindLabel: 'execute',
+    status: 'active', kindLabel: 'execute', actionKind: 'execute', attempt: 1,
   }, io);
   ensureRunNodeFile({
     runDir, runId: 'run-main', runNodeId: 'run-node-task-a', type: 'execute',
     title: 'Execute task A', sourceTaskId: 'task-a', sourceTaskGroupVersionId: 'tgv-root-v1',
-    status: 'done', kindLabel: 'execute',
+    status: 'done', kindLabel: 'execute', actionKind: 'execute', attempt: 1,
   }, io);
   attachTaskRunRef(taskPath, 'run-main', 'run-node-task-a', 'primary_execution', io);
   writeRunEdgeFile({
@@ -305,6 +321,25 @@ const facadeRoot = join(tempRoot, 'facade');
 runLegacy(legacyRoot);
 runFacade(facadeRoot);
 assert.deepEqual(treeSnapshot(facadeRoot), treeSnapshot(legacyRoot), 'run graph/EoW facade output should match legacy output byte-for-byte');
+const persistedRunNode = parseMarkdownFile(join(facadeRoot, 'runs', 'run-main', 'nodes', 'run-node-task-a.md'));
+assert.equal(persistedRunNode.actionKind, 'execute');
+assert.equal(persistedRunNode.attempt, 1);
+assert.throws(
+  () => ensureRunNodeFile({
+    runDir: join(facadeRoot, 'runs', 'run-main'),
+    runId: 'run-main',
+    runNodeId: 'run-node-task-a',
+    type: 'execute',
+    title: 'Execute task A',
+    sourceTaskId: 'task-a',
+    sourceTaskGroupVersionId: 'tgv-root-v1',
+    status: 'done',
+    kindLabel: 'execute',
+    actionKind: 'execute',
+    attempt: 2,
+  }, stateWriterIo()),
+  /Immutable run-node identity mismatch for run-node-task-a: attempt/,
+);
 
 const runnerText = readFileSync(join(repoRoot, 'cli/lib-runner.js'), 'utf8');
 function functionBody(name) {

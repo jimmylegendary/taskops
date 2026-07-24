@@ -2163,9 +2163,12 @@ if (delegatedEntrypointCycle.stopReason !== 'graph_closed_unapproved' || delegat
   process.exit(1);
 }
 const delegatedEntrypointRunDir = join(delegatedEntrypointDir, 'runs', 'run-tgv-root-v2-task-main');
-const delegatedEntrypointReview = parseFrontmatterText(readFileSync(join(delegatedEntrypointRunDir, 'nodes', 'review-run-node-task-main.md'), 'utf8'));
-const delegatedEntrypointRunNode = parseFrontmatterText(readFileSync(join(delegatedEntrypointRunDir, 'nodes', 'run-node-task-main.md'), 'utf8'));
 const delegatedEntrypointTask = parseFrontmatterText(readFileSync(join(delegatedEntrypointDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-main.md'), 'utf8'));
+const delegatedEntrypointExecuteRef = (delegatedEntrypointTask.runRefs || [])
+  .filter((ref) => ref?.role === 'primary_execution')
+  .at(-1);
+const delegatedEntrypointRunNode = parseFrontmatterText(readFileSync(join(delegatedEntrypointRunDir, 'nodes', `${delegatedEntrypointExecuteRef.runNodeId}.md`), 'utf8'));
+const delegatedEntrypointReview = parseFrontmatterText(readFileSync(join(delegatedEntrypointRunDir, 'nodes', `review-${delegatedEntrypointExecuteRef.runNodeId}.md`), 'utf8'));
 const delegatedEntrypointEvents = readFileSync(join(delegatedEntrypointRunDir, 'events.jsonl'), 'utf8');
 const delegatedEntrypointRunnerCheck = (delegatedEntrypointRunNode.result?.observed?.checkResults || [])
   .find((check) => check.command === delegatedEntrypointCheck);

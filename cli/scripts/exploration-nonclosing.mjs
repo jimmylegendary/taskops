@@ -148,7 +148,17 @@ try {
   // ===== 변형B: no-marker success (dry-run) — anti-loop 봉쇄 =====
   {
     const workDir = seedExplorationWork('variantB-nomarker');
-    runTaskOps(workDir, { executor: 'dry-run', maxSteps: 1, maxStepsExplicit: true });
+    const step1 = runTaskOps(workDir, {
+      executor: 'dry-run',
+      maxSteps: 1,
+      maxStepsExplicit: true,
+    });
+    const exploreAction = step1.actions[0];
+    const nodesDir = join(workDir, 'runs', step1.runId, 'nodes');
+    const exploreNodePath = join(nodesDir, `${exploreAction.runNodeId}.md`);
+    const exploreEowPath = join(nodesDir, `eow-${exploreAction.runNodeId}.md`);
+    const exploreNodeBefore = readFileSync(exploreNodePath);
+    const exploreEowBefore = readFileSync(exploreEowPath);
     assertNonClosing(workDir, { expectSurprise: false });
 
     // 두 번째 스텝을 강제해도 재-exploration이 아니라 decompose로 전진해야 한다(anti-loop).
@@ -158,6 +168,19 @@ try {
     const step2Actions = step2.actions || step2.tasks || [];
     assert.equal(step2Actions.length, 1, 'a second step runs (decompose), not a no-op');
     assert.equal(step2Actions[0].kind, 'decompose', 'the second step is decompose, NEVER a second explore (anti-loop)');
+    const decomposeAction = step2Actions[0];
+    assert.notEqual(exploreAction.runNodeId, decomposeAction.runNodeId);
+    const exploreNode = parseMarkdownFile(exploreNodePath);
+    const decomposeNode = parseMarkdownFile(join(nodesDir, `${decomposeAction.runNodeId}.md`));
+    assert.deepEqual(
+      [exploreNode.actionKind, exploreNode.attempt, decomposeNode.actionKind, decomposeNode.attempt],
+      ['explore', 1, 'decompose', 1],
+    );
+    assert.ok(existsSync(exploreEowPath));
+    assert.ok(existsSync(join(nodesDir, `eow-${decomposeAction.runNodeId}.md`)));
+    assert.equal(parseMarkdownFile(taskPath(workDir)).runRefs.length, 2);
+    assert.deepEqual(readFileSync(exploreNodePath), exploreNodeBefore);
+    assert.deepEqual(readFileSync(exploreEowPath), exploreEowBefore);
     const after = parseMarkdownFile(taskPath(workDir));
     assert.equal(String(after.uncertaintyState || '').trim(), 'known_unknown', 'uncertaintyState is not re-promoted on the second step (exactly one rung)');
     const history2 = Array.isArray(after.surpriseHistory) ? after.surpriseHistory : [];

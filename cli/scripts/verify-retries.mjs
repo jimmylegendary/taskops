@@ -35,6 +35,16 @@ const markerCmd = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails onc
   const t = readTask(w);
   assert.equal(t.status, 'done', 'a retry converts the first-attempt stall into a verified completion');
   assert.ok(res.stepsRun >= 2, 'the task was executed more than once (retry consumed test-time)');
+  const executeActions = res.actions.filter((action) => action.kind === 'execute');
+  assert.ok(executeActions.length >= 2);
+  assert.equal(new Set(executeActions.map((action) => action.runNodeId)).size, executeActions.length);
+  const nodesDir = join(w, 'runs', res.runId, 'nodes');
+  const executeNodes = executeActions.map((action) => parseMarkdownFile(join(nodesDir, `${action.runNodeId}.md`)));
+  assert.deepEqual(executeNodes.map((node) => node.attempt), [1, 2]);
+  const reviewNodes = executeActions.map((action) => parseMarkdownFile(join(nodesDir, `review-${action.runNodeId}.md`)));
+  assert.notEqual(reviewNodes[0].id, reviewNodes[1].id);
+  assert.equal(reviewNodes[0].reviewReport.decision, 'rejected');
+  assert.equal(reviewNodes[1].reviewReport.decision, 'approved');
   assert.equal(t.verifyAttempts, undefined, 'retry state is cleared once the task is honestly closed');
   assert.equal(t.lastCheckFailure, undefined, 'retry feedback is cleared on success');
   rmSync(root, { recursive: true, force: true });

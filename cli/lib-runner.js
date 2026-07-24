@@ -18,6 +18,7 @@ import {
   isPartialUnresolved,
 } from './lib-taskops.js';
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeRuntimeAdapter, executorForRuntime } from './lib-runtime-adapters.js';
+import { allocateRunNodeIdentity } from './lib-run-identity.js';
 import {
   MUTATION_LOCK_DIR,
   DEFAULT_MUTATION_LOCK_READER_WAIT_MS,
@@ -2935,24 +2936,49 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
   };
 }
 
-function ensureRunNode({ runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status = 'active', kindLabel }) {
+function ensureRunNode({
+  runDir,
+  runId,
+  runNodeId,
+  type,
+  title,
+  sourceTaskId,
+  sourceTaskGroupVersionId,
+  status = 'active',
+  kindLabel,
+  actionKind,
+  attempt,
+  predecessorRunNodeId = null,
+}) {
   return ensureRunNodeViaStateWriter({
-    runDir, runId, runNodeId, type, title, sourceTaskId, sourceTaskGroupVersionId, status, kindLabel,
+    runDir,
+    runId,
+    runNodeId,
+    type,
+    title,
+    sourceTaskId,
+    sourceTaskGroupVersionId,
+    status,
+    kindLabel,
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
   }, stateWriterIo());
 }
 
-function runNodeIdForTask(runDir, task) {
-  const baseId = `run-node-${task.id}`;
-  const basePath = join(runDir, 'nodes', `${baseId}.md`);
-  if (!existsSync(basePath)) return baseId;
-  const existing = parseMarkdownFile(basePath);
-  if (
-    existing.sourceTaskId === task.id
-    && existing.sourceTaskGroupVersionId === task.taskGroupVersionId
-  ) {
-    return baseId;
-  }
-  return `run-node-${safeSessionPart(task.taskGroupVersionId, 'version')}-${safeSessionPart(task.id, 'task')}`;
+function runNodeIdentityForTask(runDir, task, actionKind) {
+  const nodesDir = join(runDir, 'nodes');
+  const existingNodes = existsSync(nodesDir)
+    ? readdirSync(nodesDir)
+        .filter((name) => name.endsWith('.md') && !name.startsWith('eow-'))
+        .map((name) => parseMarkdownFile(join(nodesDir, name)))
+    : [];
+  return allocateRunNodeIdentity({
+    taskId: task.id,
+    taskGroupVersionId: task.taskGroupVersionId,
+    actionKind,
+    existingNodes,
+  });
 }
 
 function attachRunRef(taskPath, runId, runNodeId, role) {
@@ -3080,6 +3106,8 @@ function writeReviewForRunNode({ projectDir, task, runNode, verifyMode = false }
     sourceTaskGroupVersionId: task?.taskGroupVersionId,
     status: 'done',
     kindLabel: 'review',
+    actionKind: 'review',
+    attempt: Number(runNode.attempt || 1),
   });
   const report = buildReviewReport({ projectDir, task, runNode, verifyMode });
   const reviewReportHash = sha256Of(report);
@@ -3549,8 +3577,19 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
   const projectDir = dirname(dirname(runDir));
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
-  const runNodeId = runNodeIdForTask(runDir, task);
+  const {
+    runNodeId,
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
+  } = runNodeIdentityForTask(runDir, task, 'execute');
   const artifactWorkspacePath = join(runDir, 'artifacts', runNodeId, 'workspace');
+  if (predecessorRunNodeId) {
+    const predecessorWorkspace = join(runDir, 'artifacts', predecessorRunNodeId, 'workspace');
+    if (existsSync(predecessorWorkspace) && !existsSync(artifactWorkspacePath)) {
+      cpSync(predecessorWorkspace, artifactWorkspacePath, { recursive: true });
+    }
+  }
   ensureDir(artifactWorkspacePath);
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
@@ -3560,6 +3599,9 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
     sourceTaskGroupVersionId: task.taskGroupVersionId,
     status: 'active',
     kindLabel: 'execute',
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
   });
 
   attachRunRef(task.path, runId, runNodeId, 'primary_execution');
@@ -4782,7 +4824,12 @@ function closeDecomposeSuccess({
 function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false }) {
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
-  const runNodeId = runNodeIdForTask(runDir, task);
+  const {
+    runNodeId,
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
+  } = runNodeIdentityForTask(runDir, task, 'decompose');
   const releaseMutationLock = acquireMutationLock({
     projectDir,
     runId,
@@ -4801,6 +4848,9 @@ function executeDecompositionTask({ projectDir, parsed, project, task, runDir, r
       sourceTaskGroupVersionId: task.taskGroupVersionId,
       status: 'active',
       kindLabel: 'decompose',
+      actionKind,
+      attempt,
+      predecessorRunNodeId,
     });
     attachRunRef(task.path, runId, runNodeId, 'primary_decomposition');
 
@@ -4931,7 +4981,12 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
 function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
-  const runNodeId = runNodeIdForTask(runDir, task);
+  const {
+    runNodeId,
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
+  } = runNodeIdentityForTask(runDir, task, 'explore');
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId,
     type: 'exploration',
@@ -4940,6 +4995,9 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     sourceTaskGroupVersionId: task.taskGroupVersionId,
     status: 'active',
     kindLabel: 'explore',
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
   });
   attachRunRef(task.path, runId, runNodeId, 'primary_exploration');
 
@@ -5118,12 +5176,18 @@ function performAgentPrototype({ project, projectDir, task, executor, agentId, s
 
 function executePrototypeTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
   const startedAt = isoNow();
-  const runNodeId = runNodeIdForTask(runDir, task);
+  const {
+    runNodeId,
+    actionKind,
+    attempt,
+    predecessorRunNodeId,
+  } = runNodeIdentityForTask(runDir, task, 'prototype');
   const runNodePath = ensureRunNode({
     runDir, runId, runNodeId, type: 'prototype',
     title: `Prototype: ${task.title}`,
     sourceTaskId: task.id, sourceTaskGroupVersionId: task.taskGroupVersionId,
     status: 'active', kindLabel: 'prototype',
+    actionKind, attempt, predecessorRunNodeId,
   });
   attachRunRef(task.path, runId, runNodeId, 'primary_prototype');
   logEvent(eventsPath, { timestamp: startedAt, type: 'prototype_started', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor });
