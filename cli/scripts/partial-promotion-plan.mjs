@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { canonicalSha256 } from '../lib-run-closure.js';
-import { fmBlock, isPartialUnresolved, parseMarkdownFile, readBody } from '../lib-taskops.js';
+import { fmBlock, isPartialUnresolved, parseMarkdownFile, parseProject, readBody } from '../lib-taskops.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const cli = resolve(__dirname, '..', 'bin', 'taskops.js');
@@ -58,8 +58,8 @@ function markTaskDoneWithApprovedEow(workDir, versionId, taskId) {
   taskFm.runRefs = [{ runId, runNodeId, role: 'primary_execution' }];
   writeFileSync(taskFile, fmBlock(taskFm) + `${readBody(taskFile)}\n`, 'utf8');
 
-  const reviewedAcceptanceHash = `acceptance-hash-${taskId}`;
-  const reviewedResultHash = `result-hash-${taskId}`;
+  const reviewedAcceptanceHash = canonicalSha256(taskFm.acceptance);
+  const reviewedResultHash = canonicalSha256(undefined);
   const reviewReport = {
     decision: 'approved',
     mode: 'guarded',
@@ -78,13 +78,13 @@ function markTaskDoneWithApprovedEow(workDir, versionId, taskId) {
   writeMd(join(runDir, 'nodes', `${runNodeId}.md`), {
     taskOpsVersion: 'v1', entityType: 'runNode', id: runNodeId, runId, type: 'implementation',
     title: `Implement ${taskId}`, sourceTaskId: taskId, sourceTaskGroupVersionId: versionId,
-    status: 'done', createdAt: '2026-06-27T00:00:00Z',
+    status: 'done', createdAt: '2026-06-27T00:00:00Z', actionKind: 'execute',
   });
   writeMd(join(runDir, 'nodes', `${reviewNodeId}.md`), {
     taskOpsVersion: 'v1', entityType: 'runNode', id: reviewNodeId, runId, type: 'review',
     title: `Review ${taskId}`, sourceTaskId: taskId, sourceTaskGroupVersionId: versionId,
     status: 'done', createdAt: '2026-06-27T00:00:00Z', reviewsRunNodeId: runNodeId,
-    reviewedRunId: runId, reviewReport, reviewReportHash,
+    reviewedRunId: runId, actionKind: 'review', reviewReport, reviewReportHash,
   });
   writeMd(join(runDir, 'nodes', `eow-${runNodeId}.md`), {
     taskOpsVersion: 'v1', entityType: 'eow', id: `eow-${runNodeId}`, runId, graphType: 'run',
@@ -740,5 +740,84 @@ assert.equal(multiWaveAudit.metrics.structuralComplete, true);
 assert.equal(multiWaveAudit.metrics.policyApprovedComplete, true);
 assert.equal(multiWaveAudit.metrics.unresolvedPartialCount, 0);
 assert.equal(multiWaveAudit.claimSafe, true);
+
+const approvalFields = [
+  'approvedByReviewNodeId',
+  'approvedReviewMode',
+  'approvedReviewReportHash',
+  'reviewedAcceptanceHash',
+  'reviewedResultHash',
+];
+function repointPreservedEow(workDir, {
+  selectedVersionId: selectedId,
+  selectedTaskId,
+  sourceVersionId,
+  sourceTaskId,
+}) {
+  const selectedEowPath = join(
+    workDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    selectedId,
+    'eow',
+    `eow-${selectedTaskId}-${selectedId}.md`,
+  );
+  const selectedEow = parseMarkdownFile(selectedEowPath);
+  const sourceEow = parseMarkdownFile(eowPath(workDir, sourceVersionId, sourceTaskId));
+  selectedEow.preservedFromVersionId = sourceVersionId;
+  selectedEow.preservedFromEowId = sourceEow.id;
+  for (const field of approvalFields) selectedEow[field] = sourceEow[field];
+  writeFileSync(selectedEowPath, fmBlock(selectedEow) + `${readBody(selectedEowPath)}\n`, 'utf8');
+}
+
+const wrongTaskPointerDir = join(tempRoot, 'wrong-task-preserved-eow');
+cpSync(multiWaveWorkDir, wrongTaskPointerDir, { recursive: true });
+repointPreservedEow(wrongTaskPointerDir, {
+  selectedVersionId: finalVersionId,
+  selectedTaskId: 'task-a',
+  sourceVersionId: 'tgv-root-v3',
+  sourceTaskId: 'task-b',
+});
+const wrongTaskPointer = parseProject(wrongTaskPointerDir);
+
+const wrongLineagePointerDir = join(tempRoot, 'wrong-lineage-preserved-eow');
+cpSync(multiWaveWorkDir, wrongLineagePointerDir, { recursive: true });
+const rogueSpecPath = join(tempRoot, 'wrong-lineage-spec.json');
+writeFileSync(rogueSpecPath, JSON.stringify({
+  versionId: 'tgv-root-v99',
+  version: 'v99',
+  summary: 'Non-ancestor approval source',
+  tasks: [{
+    id: 'task-a',
+    title: 'Rogue task A',
+    objective: 'Provide an unrelated same-id approval source.',
+    responsibility: 'Exercise lineage validation.',
+    completionCriteria: 'This sibling version is never an ancestor of the selected version.',
+    order: 1,
+    status: 'pending',
+    runReadiness: 'runnable',
+    understandingLevel: 'known',
+  }],
+}), 'utf8');
+run(['decompose', wrongLineagePointerDir, '--task-group-id', 'tg-root', '--spec', rogueSpecPath]);
+markTaskDoneWithApprovedEow(wrongLineagePointerDir, 'tgv-root-v99', 'task-a');
+repointPreservedEow(wrongLineagePointerDir, {
+  selectedVersionId: finalVersionId,
+  selectedTaskId: 'task-a',
+  sourceVersionId: 'tgv-root-v99',
+  sourceTaskId: 'task-a',
+});
+const wrongLineagePointer = parseProject(wrongLineagePointerDir);
+assert.equal(
+  wrongLineagePointer.closure.policyApprovedComplete,
+  false,
+  'a preserved EoW must not borrow approval from a non-ancestor version',
+);
+assert.equal(
+  wrongTaskPointer.closure.policyApprovedComplete,
+  false,
+  'a preserved EoW must not borrow approval from a different historical task',
+);
 
 console.log('partial promotion plan smoke passed');

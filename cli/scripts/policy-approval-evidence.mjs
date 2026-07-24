@@ -101,10 +101,45 @@ writeFileSync(
   'utf8',
 );
 
+const liveResultTamperDir = join(tempRoot, 'live-result-tamper');
+cpSync(tamperSource, liveResultTamperDir, { recursive: true });
+const liveResultNodePath = join(liveResultTamperDir, 'runs/run-main/nodes/run-node-review.md');
+const liveResultBefore = readFileSync(liveResultNodePath, 'utf8');
+const liveResultAfter = liveResultBefore.replace(
+  '        status: passed',
+  '        status: failed',
+);
+assert.notEqual(liveResultAfter, liveResultBefore, 'live result tamper fixture must change node.result');
+writeFileSync(liveResultNodePath, liveResultAfter, 'utf8');
+
+const liveAcceptanceTamperDir = join(tempRoot, 'live-acceptance-tamper');
+cpSync(tamperSource, liveAcceptanceTamperDir, { recursive: true });
+const liveAcceptanceTaskPath = join(
+  liveAcceptanceTamperDir,
+  'task-groups/tg-root/versions/tgv-root-v1/tasks/task-review.md',
+);
+const liveAcceptanceBefore = readFileSync(liveAcceptanceTaskPath, 'utf8');
+const liveAcceptanceAfter = liveAcceptanceBefore.replace(
+  '    - npm test',
+  '    - npm test --tampered',
+);
+assert.notEqual(liveAcceptanceAfter, liveAcceptanceBefore, 'live acceptance tamper fixture must change task.acceptance');
+writeFileSync(liveAcceptanceTaskPath, liveAcceptanceAfter, 'utf8');
+
 assert.equal(parseProject(missingReviewDir).closure.policyApprovedComplete, false);
 assert.equal(parseProject(wrongTargetDir).closure.policyApprovedComplete, false);
 assert.equal(parseProject(reportHashMismatchDir).closure.policyApprovedComplete, false);
 assert.equal(parseProject(resultHashMismatchDir).closure.policyApprovedComplete, false);
+assert.equal(
+  parseProject(liveAcceptanceTamperDir).closure.policyApprovedComplete,
+  false,
+  'mutating the current task acceptance must invalidate prior approval',
+);
+assert.equal(
+  parseProject(liveResultTamperDir).closure.policyApprovedComplete,
+  false,
+  'mutating the current implementation result must invalidate prior approval',
+);
 
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('OK policy-approval evidence');

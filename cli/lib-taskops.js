@@ -1152,6 +1152,9 @@ export function parseProject(projectDir) {
     if (!node) continue;
     const classification = classifyRunClosure({
       node,
+      task: node.sourceTaskId && node.sourceTaskGroupVersionId
+        ? tasks.get(taskKey(node.sourceTaskGroupVersionId, node.sourceTaskId))
+        : null,
       eow,
       runNodes,
       runEdges,
@@ -1173,6 +1176,26 @@ export function parseProject(projectDir) {
   }
 
   const approvalFieldsMatch = (left, right) => APPROVAL_FIELDS.every((field) => left?.[field] === right?.[field]);
+  const versionIsAncestor = (ancestorVersionId, descendantVersionId) => {
+    if (!ancestorVersionId || !descendantVersionId || ancestorVersionId === descendantVersionId) return false;
+    const ancestor = versions.get(ancestorVersionId);
+    const descendant = versions.get(descendantVersionId);
+    if (!ancestor || !descendant || ancestor.taskGroupId !== descendant.taskGroupId) return false;
+    const pending = [descendant];
+    const visited = new Set();
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (!current || visited.has(current.id)) continue;
+      visited.add(current.id);
+      for (const predecessorId of [current.restartedFromVersionId, current.supersedesVersionId]) {
+        if (!predecessorId) continue;
+        if (predecessorId === ancestorVersionId) return true;
+        const predecessor = versions.get(predecessorId);
+        if (predecessor?.taskGroupId === descendant.taskGroupId) pending.push(predecessor);
+      }
+    }
+    return false;
+  };
   const taskEowResolvesToApprovedClaim = (task, eow, { historical = false, visiting = new Set() } = {}) => {
     if (!task || !eow || visiting.has(eow.path)) return false;
     const nextVisiting = new Set(visiting).add(eow.path);
@@ -1184,6 +1207,10 @@ export function parseProject(projectDir) {
         && candidate.id === eow.preservedFromEowId
       ));
       if (!sourceEow || sourceEow.path === eow.path || !approvalFieldsMatch(eow, sourceEow)) return false;
+      if (!task.preservedFromTaskId || task.preservedFromTaskId !== task.id) return false;
+      if (sourceEow.attachedToId !== task.preservedFromTaskId) return false;
+      if (!task.preservedFromVersionId || task.preservedFromVersionId !== eow.preservedFromVersionId) return false;
+      if (!versionIsAncestor(eow.preservedFromVersionId, task.taskGroupVersionId)) return false;
       const sourceTask = tasks.get(taskKey(sourceEow.taskGroupVersionId, sourceEow.attachedToId));
       return taskEowResolvesToApprovedClaim(sourceTask, sourceEow, {
         historical: true,
@@ -2974,6 +3001,14 @@ function buildPromotionVersionPlan({ parsed, sourceVersion, taskGroup, selectedP
   const sourceTaskPatches = [];
   for (const task of orderedTasks) {
     let cloned = cloneTaskForPromotion(task);
+    const carriedForwardEow = selectTaskEowForCarryForward(sourceVersion, task);
+    if (carriedForwardEow && !task.childTaskGroupId) {
+      cloned.preservedUpstream = true;
+      cloned.preservedFromVersionId = carriedForwardEow.preservedFromVersionId
+        || carriedForwardEow.taskGroupVersionId
+        || sourceVersion.id;
+      cloned.preservedFromTaskId = carriedForwardEow.attachedToId || task.id;
+    }
     cloned.order = nextOrder;
     nextOrder += 1;
 

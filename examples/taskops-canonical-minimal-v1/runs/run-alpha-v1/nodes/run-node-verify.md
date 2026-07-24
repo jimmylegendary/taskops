@@ -4,6 +4,7 @@ entityType: runNode
 id: run-node-verify
 runId: run-alpha-v1
 type: verification
+actionKind: verify
 title: Inspect the example for coherence
 status: done
 sourceTaskId: task-verify-example

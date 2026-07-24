@@ -1,4 +1,5 @@
 import { dirname, join } from 'node:path';
+import { validateRunNodeActionIdentity } from './lib-run-closure.js';
 
 function requireFn(io, name) {
   const fn = io?.[name];
@@ -80,6 +81,12 @@ export function ensureRunNodeFile({
   const now = requireFn(io, 'now');
   const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
   if (!exists(runNodePath)) {
+    const actionIdentity = validateRunNodeActionIdentity({
+      type,
+      actionKind,
+      requireActionKind: true,
+    });
+    if (!actionIdentity.valid) throw new Error(actionIdentity.issues[0]);
     const nodeFm = {
       taskOpsVersion: 'v1',
       entityType: 'runNode',
@@ -92,15 +99,24 @@ export function ensureRunNodeFile({
     };
     if (sourceTaskId != null && sourceTaskId !== '') nodeFm.sourceTaskId = sourceTaskId;
     if (sourceTaskGroupVersionId != null && sourceTaskGroupVersionId !== '') nodeFm.sourceTaskGroupVersionId = sourceTaskGroupVersionId;
-    if (actionKind != null && actionKind !== '') nodeFm.actionKind = actionKind;
+    nodeFm.actionKind = actionIdentity.actionKind;
     if (attempt != null) nodeFm.attempt = attempt;
     if (predecessorRunNodeId) nodeFm.predecessorRunNodeId = predecessorRunNodeId;
     const heading = sourceTaskId ? `Run node: ${sourceTaskId} (${kindLabel || type})` : `Run node: ${runNodeId} (${kindLabel || type})`;
     writeTextFile(runNodePath, fmBlock(nodeFm) + `# ${heading}\n`);
   } else {
     const current = parseMarkdownFile(runNodePath);
+    if (actionKind != null && actionKind !== '') {
+      const actionIdentity = validateRunNodeActionIdentity({
+        type,
+        actionKind,
+        requireActionKind: true,
+      });
+      if (!actionIdentity.valid) throw new Error(actionIdentity.issues[0]);
+    }
     for (const [field, expected] of Object.entries({
       runId,
+      type,
       sourceTaskId,
       sourceTaskGroupVersionId,
       actionKind,

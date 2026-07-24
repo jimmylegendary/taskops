@@ -1655,8 +1655,8 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     unsupportedObserved,
     failedChecks,
     followUpNeeded,
-    reviewedAcceptanceHash: canonicalSha256(acceptance),
-    reviewedResultHash: canonicalSha256(result),
+    reviewedAcceptanceHash: canonicalSha256(task?.acceptance),
+    reviewedResultHash: canonicalSha256(runNode?.result),
     // Auditability: record whether this review was runner-verified (--verify-checks) or based on
     // self-reported evidence, so a downstream reader can tell how the resulting claimSafe was grounded.
     verified: verifyMode === true,
@@ -2810,6 +2810,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
     sourceTaskGroupVersionId: delegate.sourceTaskGroupVersionId || null,
     status: 'active',
     kindLabel: 'loopback',
+    actionKind: 'loopback',
   });
   updateMarkdownFrontmatter(loopbackPath, (fm) => {
     fm.loopbackOfRunNodeId = delegate.id;
@@ -2892,6 +2893,7 @@ function executeSelfLoopback({ projectDir, project, delegate, runDir, runId, eve
       fm.executionMode = 'loopback';
       fm.executedBy = actorName;
       fm.executedAt = finishedAt;
+      if (fm.actionKind == null || fm.actionKind === '') fm.actionKind = 'delegate';
       return fm;
     });
   }

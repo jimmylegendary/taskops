@@ -4,6 +4,7 @@ entityType: runNode
 id: run-landing-test
 runId: run-alpha-v1
 type: experiment
+actionKind: experiment
 title: Run a landing-page conversion test
 status: done
 sourceTaskId: task-improve-conversion

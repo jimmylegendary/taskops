@@ -120,6 +120,7 @@ function makeClosedWork(name, { workStatus = 'done', taskEow = {}, runEow = {}, 
     sourceTaskGroupVersionId: 'tgv-root-v1',
     status: 'done',
     createdAt: now,
+    actionKind: 'execute',
   });
   writeMd(join(workDir, 'runs/run-main/nodes/eow-run-node-one.md'), {
     taskOpsVersion: 'v1',
@@ -161,6 +162,7 @@ function makeClosedWork(name, { workStatus = 'done', taskEow = {}, runEow = {}, 
       createdAt: now,
       reviewsRunNodeId: 'run-node-one',
       reviewedRunId: 'run-main',
+      actionKind: 'review',
       reviewReport,
       reviewReportHash: canonicalSha256(reviewReport),
     });
@@ -206,19 +208,21 @@ function makeClosedWork(name, { workStatus = 'done', taskEow = {}, runEow = {}, 
 }
 
 try {
+  const reviewedAcceptanceHash = canonicalSha256(undefined);
+  const reviewedResultHash = canonicalSha256(undefined);
   const reviewReport = {
     decision: 'approved',
     mode: 'runner-managed',
-    reviewedAcceptanceHash: 'acceptance-hash',
-    reviewedResultHash: 'result-hash',
+    reviewedAcceptanceHash,
+    reviewedResultHash,
   };
   const approvedFields = {
     reason: 'approved_result',
     approvedByReviewNodeId: 'review-run-node-one',
     approvedReviewMode: 'runner-managed',
     approvedReviewReportHash: canonicalSha256(reviewReport),
-    reviewedAcceptanceHash: 'acceptance-hash',
-    reviewedResultHash: 'result-hash',
+    reviewedAcceptanceHash,
+    reviewedResultHash,
   };
   const approved = parseProject(makeClosedWork('policy-approved-work', {
     taskEow: approvedFields,

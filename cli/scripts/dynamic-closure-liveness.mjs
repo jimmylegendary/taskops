@@ -245,6 +245,78 @@ try {
   assert.equal(auditParsedWork(invalidSupport).claimSafe, false);
   assert.notEqual(computeNextAction(invalidSupportDir).stopReason, 'all_closed');
 
+  const missingActionKindDir = join(tempRoot, 'missing-action-kind-dynamic');
+  cpSync(workDir, missingActionKindDir, { recursive: true });
+  const missingActionBefore = parseProject(missingActionKindDir);
+  const missingActionNode = [...missingActionBefore.runNodes.values()]
+    .find((node) => node.actionKind === 'explore');
+  assert.ok(missingActionNode);
+  const missingActionNodePath = missingActionNode.path.replace(workDir, missingActionKindDir);
+  writeFileSync(
+    missingActionNodePath,
+    readFileSync(missingActionNodePath, 'utf8').replace(/^actionKind: explore\n/m, ''),
+    'utf8',
+  );
+  const missingAction = parseProject(missingActionKindDir);
+  assert.equal(missingAction.closure.invalidSupportingRunEowClosureCount, 1);
+  assert.ok(missingAction.errors.some((error) => /missing actionKind/i.test(error)));
+
+  const unknownActionKindDir = join(tempRoot, 'unknown-action-kind-dynamic');
+  cpSync(workDir, unknownActionKindDir, { recursive: true });
+  const unknownActionBefore = parseProject(unknownActionKindDir);
+  const unknownActionNode = [...unknownActionBefore.runNodes.values()]
+    .find((node) => node.actionKind === 'explore');
+  assert.ok(unknownActionNode);
+  const unknownActionNodePath = unknownActionNode.path.replace(workDir, unknownActionKindDir);
+  writeFileSync(
+    unknownActionNodePath,
+    readFileSync(unknownActionNodePath, 'utf8').replace('actionKind: explore', 'actionKind: unknown'),
+    'utf8',
+  );
+  const unknownAction = parseProject(unknownActionKindDir);
+  assert.equal(unknownAction.closure.invalidSupportingRunEowClosureCount, 1);
+  assert.ok(unknownAction.errors.some((error) => /unknown run-node actionKind/i.test(error)));
+
+  const mismatchedActionKindDir = join(tempRoot, 'mismatched-action-kind-dynamic');
+  cpSync(workDir, mismatchedActionKindDir, { recursive: true });
+  const mismatchedActionBefore = parseProject(mismatchedActionKindDir);
+  const mismatchedActionNode = [...mismatchedActionBefore.runNodes.values()]
+    .find((node) => node.actionKind === 'explore');
+  assert.ok(mismatchedActionNode);
+  const mismatchedActionNodePath = mismatchedActionNode.path.replace(workDir, mismatchedActionKindDir);
+  writeFileSync(
+    mismatchedActionNodePath,
+    readFileSync(mismatchedActionNodePath, 'utf8').replace('actionKind: explore', 'actionKind: prototype'),
+    'utf8',
+  );
+  const mismatchedAction = parseProject(mismatchedActionKindDir);
+  assert.equal(mismatchedAction.closure.invalidSupportingRunEowClosureCount, 1);
+  assert.ok(mismatchedAction.errors.some((error) => /actionKind.*type|type.*actionKind/i.test(error)));
+
+  const legacyInferenceDir = join(tempRoot, 'legacy-action-inference-dynamic');
+  cpSync(workDir, legacyInferenceDir, { recursive: true });
+  const legacyBefore = parseProject(legacyInferenceDir);
+  const legacyNode = [...legacyBefore.runNodes.values()]
+    .find((node) => node.actionKind === 'explore');
+  const legacyEow = [...legacyBefore.eowNodes.values()]
+    .find((eow) => eow.runId === legacyNode?.runId && eow.attachedToId === legacyNode?.id);
+  assert.ok(legacyNode && legacyEow);
+  const legacyNodePath = legacyNode.path.replace(workDir, legacyInferenceDir);
+  const legacyEowPath = legacyEow.path.replace(workDir, legacyInferenceDir);
+  writeFileSync(
+    legacyNodePath,
+    readFileSync(legacyNodePath, 'utf8').replace(/^actionKind: explore\n/m, ''),
+    'utf8',
+  );
+  writeFileSync(
+    legacyEowPath,
+    readFileSync(legacyEowPath, 'utf8').replace(/^closureRole: supporting\n/m, ''),
+    'utf8',
+  );
+  const legacyInference = parseProject(legacyInferenceDir);
+  assert.equal(legacyInference.closure.invalidSupportingRunEowClosureCount, 0);
+  assert.equal(legacyInference.closure.validSupportingRunEowClosureCount, 3);
+
   console.log('dynamic closure liveness smoke passed');
 } finally {
   rmSync(artifactRoot, { recursive: true, force: true });

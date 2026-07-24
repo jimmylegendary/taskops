@@ -347,6 +347,44 @@ assert.throws(
 const persistedRunNode = parseMarkdownFile(join(facadeRoot, 'runs', 'run-main', 'nodes', 'run-node-task-a.md'));
 assert.equal(persistedRunNode.actionKind, 'execute');
 assert.equal(persistedRunNode.attempt, 1);
+const missingActionRunDir = seedTree(join(tempRoot, 'missing-action-kind')).runDir;
+assert.throws(
+  () => ensureRunNodeFile({
+    runDir: missingActionRunDir,
+    runId: 'run-main',
+    runNodeId: 'run-node-missing-action',
+    type: 'implementation',
+    title: 'Missing action kind',
+    status: 'active',
+  }, stateWriterIo()),
+  /actionKind is required/,
+);
+const unknownActionRunDir = seedTree(join(tempRoot, 'unknown-action-kind')).runDir;
+assert.throws(
+  () => ensureRunNodeFile({
+    runDir: unknownActionRunDir,
+    runId: 'run-main',
+    runNodeId: 'run-node-unknown-action',
+    type: 'implementation',
+    title: 'Unknown action kind',
+    status: 'active',
+    actionKind: 'unknown',
+  }, stateWriterIo()),
+  /Unknown run-node actionKind 'unknown'/,
+);
+const mismatchedActionRunDir = seedTree(join(tempRoot, 'mismatched-action-kind')).runDir;
+assert.throws(
+  () => ensureRunNodeFile({
+    runDir: mismatchedActionRunDir,
+    runId: 'run-main',
+    runNodeId: 'run-node-mismatched-action',
+    type: 'exploration',
+    title: 'Mismatched action kind',
+    status: 'active',
+    actionKind: 'prototype',
+  }, stateWriterIo()),
+  /run-node type 'exploration' does not match actionKind 'prototype'/,
+);
 assert.throws(
   () => ensureRunNodeFile({
     runDir: join(facadeRoot, 'runs', 'run-main'),

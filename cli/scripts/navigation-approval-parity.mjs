@@ -36,7 +36,7 @@ function buildWork(id, eowExtra) {
   md(`${tv}/tasks/task-01.md`, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-01', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'T', objective: 'x', responsibility: 'own', completionCriteria: 'done', order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known', runRefs: [{ runId: 'run-main', runNodeId: 'run-node-01', role: 'primary_execution' }] });
   md(`${tv}/eow/eow-task-01.md`, { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-01', graphType: 'task', attachedToType: 'task', attachedToId: 'task-01', taskGroupVersionId: 'tgv-root-v1', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done', ...eowExtra });
   md('runs/run-main/index.md', { taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: id, createdAt: now, status: 'done' });
-  md('runs/run-main/nodes/run-node-01.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-01', runId: 'run-main', type: 'implementation', title: 'Implementation', sourceTaskId: 'task-01', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now });
+  md('runs/run-main/nodes/run-node-01.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-01', runId: 'run-main', type: 'implementation', title: 'Implementation', sourceTaskId: 'task-01', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, actionKind: 'execute' });
   md('runs/run-main/nodes/eow-run-node-01.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-01', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-01', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done', ...eowExtra });
   md('runs/run-main/edges/edge-run-node-01-to-eow.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-run-node-01-to-eow', runId: 'run-main', fromRunNodeId: 'run-node-01', toRunNodeId: 'eow-run-node-01', edgeType: 'closes_with', createdAt: now, status: 'done' });
   if (eowExtra.reason === 'approved_result') {
@@ -46,7 +46,7 @@ function buildWork(id, eowExtra) {
       reviewedAcceptanceHash: eowExtra.reviewedAcceptanceHash,
       reviewedResultHash: eowExtra.reviewedResultHash,
     };
-    md('runs/run-main/nodes/run-node-review-01.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review-01', runId: 'run-main', type: 'review', title: 'Review', sourceTaskId: 'task-01', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, reviewsRunNodeId: 'run-node-01', reviewedRunId: 'run-main', reviewReport, reviewReportHash: canonicalSha256(reviewReport) });
+    md('runs/run-main/nodes/run-node-review-01.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review-01', runId: 'run-main', type: 'review', title: 'Review', sourceTaskId: 'task-01', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, actionKind: 'review', reviewsRunNodeId: 'run-node-01', reviewedRunId: 'run-main', reviewReport, reviewReportHash: canonicalSha256(reviewReport) });
     md('runs/run-main/nodes/eow-run-node-review-01.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-review-01', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-review-01', reason: 'review_recorded', closureRole: 'supporting', declaredBy: 'system', declaredAt: now, createdAt: now, status: 'done' });
     md('runs/run-main/edges/edge-run-node-01-to-review.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-run-node-01-to-review', runId: 'run-main', fromRunNodeId: 'run-node-01', toRunNodeId: 'run-node-review-01', edgeType: 'reviews', createdAt: now, status: 'done' });
     md('runs/run-main/edges/edge-review-01-to-eow.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-review-01-to-eow', runId: 'run-main', fromRunNodeId: 'run-node-review-01', toRunNodeId: 'eow-run-node-review-01', edgeType: 'closes_with', createdAt: now, status: 'done' });
@@ -55,19 +55,21 @@ function buildWork(id, eowExtra) {
 }
 
 function approvedFields() {
+  const reviewedAcceptanceHash = canonicalSha256(undefined);
+  const reviewedResultHash = canonicalSha256(undefined);
   const reviewReport = {
     decision: 'approved',
     mode: 'runner-managed',
-    reviewedAcceptanceHash: 'h-acc',
-    reviewedResultHash: 'h-res',
+    reviewedAcceptanceHash,
+    reviewedResultHash,
   };
   return {
     reason: 'approved_result',
     approvedByReviewNodeId: 'run-node-review-01',
     approvedReviewMode: 'runner-managed',
     approvedReviewReportHash: canonicalSha256(reviewReport),
-    reviewedAcceptanceHash: 'h-acc',
-    reviewedResultHash: 'h-res',
+    reviewedAcceptanceHash,
+    reviewedResultHash,
   };
 }
 

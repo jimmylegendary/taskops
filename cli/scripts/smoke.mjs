@@ -1573,7 +1573,7 @@ const closeRunNodeDir = join(tempRoot, 'runner-close-run-node');
 run(['init', closeRunNodeDir, '--id', 'runner-close-run-node', '--title', 'Close run node', '--objective', 'Cover run-node close with reason override', '--language', 'en']);
 // Manually write a non-done run node that is not yet closed by EoW.
 const manualNodePath = join(closeRunNodeDir, 'runs', 'run-main', 'nodes', 'run-node-manual.md');
-writeFileSync(manualNodePath, `---\ntaskOpsVersion: v1\nentityType: runNode\nid: run-node-manual\nrunId: run-main\ntype: implementation\ntitle: Manual node\nstatus: cancelled\ncreatedAt: 2026-05-12T00:00:00Z\n---\n# Manual node\n`, 'utf8');
+writeFileSync(manualNodePath, `---\ntaskOpsVersion: v1\nentityType: runNode\nid: run-node-manual\nrunId: run-main\ntype: implementation\nactionKind: execute\ntitle: Manual node\nstatus: cancelled\ncreatedAt: 2026-05-12T00:00:00Z\n---\n# Manual node\n`, 'utf8');
 const closeRunNodeOk = JSON.parse(run(['close', closeRunNodeDir, 'run-node-manual', '--reason', 'superseded', '--json']).stdout);
 if (closeRunNodeOk.target.type !== 'runNode' || closeRunNodeOk.target.runId !== 'run-main' || closeRunNodeOk.target.id !== 'run-node-manual') {
   console.error('Expected run-node close target metadata');
