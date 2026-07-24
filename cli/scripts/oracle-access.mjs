@@ -37,7 +37,7 @@ const rewriteTask = (w, mutate) => {
   mutate(fm);
   writeFileSync(taskPath(w), `${fmBlock(fm)}# t\n`, 'utf8');
 };
-const eowPath = (w) => join(w, `${tv}/eow/eow-t.md`);
+const eowPath = (w) => join(w, `${tv}/eow/eow-t-tgv-root-v1.md`);
 const readEow = (w) => parseMarkdownFile(eowPath(w));
 const rewriteEow = (w, mutate) => {
   const fm = parseMarkdownFile(eowPath(w));
