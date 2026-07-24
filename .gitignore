@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .cache/
+.worktrees/
 .obsidian/
 .DS_Store
 *.log
