@@ -76,12 +76,12 @@ Every action attempt receives its own run-node identity. Identity is derived fro
 
 Run closures have two roles:
 
-- **Supporting/provenance closure:** exploration, decomposition, and prototype runs that produce knowledge, graph changes, or decision options.
-- **Claim-bearing closure:** execution and review runs that claim an objective result satisfies its acceptance contract.
+- **Supporting/provenance closure:** exploration, decomposition, prototype, and review-control runs that produce knowledge, graph changes, decision options, or independent evidence without carrying the objective claim themselves.
+- **Claim-bearing closure:** result-bearing execution runs whose EoW claims that an objective result satisfies its acceptance contract.
 
-All run closures must be structurally valid. Supporting closures must pass the checks appropriate to their action, including schema validity, backlinks, selected-snapshot consistency, and required action artifacts. They do not enter the policy-approval denominator and cannot carry `approved_result` merely because the runner completed them.
+Every persisted run closure must be schema-valid. Supporting closures in the selected/current lineage must also pass the checks appropriate to their action, including backlinks, selected-snapshot consistency, and required action artifacts. They do not enter the policy-approval denominator and cannot carry `approved_result` merely because the runner completed them. Failed and superseded attempts remain historical provenance without becoming completion claims.
 
-Claim-bearing closures remain subject to independent result, acceptance, review, and assurance evidence. They enter the policy-approval denominator.
+Claim-bearing closures remain subject to independent result, acceptance, review, and assurance evidence. The review node produces that evidence; the reviewed result-bearing EoW enters the policy-approval denominator.
 
 A work is eligible for `all_closed` only when:
 
@@ -96,7 +96,7 @@ The audit layer then applies all remaining assurance gates before returning `cla
 
 All runner paths use one executor-normalization function. The user-facing `openclaw-agent` alias resolves to the registered `openclaw-cli` adapter before invocation.
 
-A prototype action succeeds only if the runtime succeeds and a non-empty, valid `options.md` artifact exists in the expected workspace. Missing or invalid options are recorded as an explicit failed run with the normal failure evidence; no success EoW is created.
+A prototype action succeeds only if the runtime succeeds and `options.md` exists as a regular UTF-8 file with non-whitespace content in the expected workspace. Semantic ranking or minimum option-count validation is outside this cycle. A missing, unreadable, or empty artifact is recorded as an explicit failed run with the normal failure evidence; no success EoW is created.
 
 After successful option generation, the source task transitions to `waiting` with `resolverKind: human`. Inherited-known consistency checks cannot downgrade this state or route it back to exploration while the human resolution is outstanding. Once the selected option is recorded, normal readiness classification resumes.
 
