@@ -5865,7 +5865,13 @@ export function runTaskOps(workDir, options = {}) {
 
   const executor = options.executor || 'dry-run';
   const allowedExecutors = ['openclaw-agent', ...RUNTIME_ADAPTER_NAMES];
-  if (!allowedExecutors.includes(executor)) {
+  let executorAdapterName;
+  try {
+    executorAdapterName = normalizeExecutorSpec(executor).adapterName;
+  } catch {
+    executorAdapterName = null;
+  }
+  if (!executorAdapterName || !RUNTIME_ADAPTER_NAMES.includes(executorAdapterName)) {
     throw new Error(`Invalid --executor '${executor}'. Use ${allowedExecutors.join(', ')}.`);
   }
   const agentId = options.agent || DEFAULT_AGENT_ID;
@@ -5926,7 +5932,7 @@ export function runTaskOps(workDir, options = {}) {
   if (loopbackPolicy === 'none') maxLoopbacks = 0;
   const actorName = options.actor && String(options.actor).trim()
     ? String(options.actor).trim()
-    : (executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : 'taskops-runner');
+    : (executorAdapterName === 'openclaw-cli' ? agentId : 'taskops-runner');
   const maxStepsExplicit = options.maxStepsExplicit === true || options.maxStepsExplicit === 'true';
   const budgetEnabled = maxStepsExplicit && maxSteps != null;
   const delegationMode = options.delegate === true || options.delegate === 'true';
@@ -5980,7 +5986,7 @@ export function runTaskOps(workDir, options = {}) {
     logEvent(eventsPath, {
       timestamp: startedAt, type: 'runner_started',
       workId: parsed.project.id, runId, executor,
-      agentId: executor === 'openclaw-agent' || executor === 'openclaw-cli' ? agentId : null,
+      agentId: executorAdapterName === 'openclaw-cli' ? agentId : null,
       maxSteps, until: until != null ? new Date(until).toISOString() : null,
       maxWallClockMs,
       maxStepsExplicit, budgetEnabled,
