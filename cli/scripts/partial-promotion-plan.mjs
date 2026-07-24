@@ -47,7 +47,9 @@ function selectedVersionId(workDir) {
   return snapshot.selectedVersions.find((pair) => pair.taskGroupId === 'tg-root').versionId;
 }
 
-function markTaskDoneWithApprovedEow(workDir, versionId, taskId) {
+function markTaskDoneWithApprovedEow(workDir, versionId, taskId, {
+  taskEowId = `eow-${taskId}`,
+} = {}) {
   const taskFile = taskPath(workDir, versionId, taskId);
   const runId = `run-${versionId}-${taskId}`;
   const runNodeId = `run-node-${versionId}-${taskId}`;
@@ -114,9 +116,9 @@ function markTaskDoneWithApprovedEow(workDir, versionId, taskId) {
   const eowDir = join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'eow');
   mkdirSync(eowDir, { recursive: true });
   writeFileSync(
-    eowPath(workDir, versionId, taskId),
+    join(eowDir, `${taskEowId}.md`),
     fmBlock({
-      taskOpsVersion: 'v1', entityType: 'eow', id: `eow-${taskId}`, graphType: 'task',
+      taskOpsVersion: 'v1', entityType: 'eow', id: taskEowId, graphType: 'task',
       attachedToType: 'task', attachedToId: taskId, reason: 'approved_result', declaredBy: 'smoke',
       declaredAt: '2026-06-27T00:00:00Z', createdAt: '2026-06-27T00:00:00Z',
       status: 'done', taskGroupVersionId: versionId, approvedByReviewNodeId: reviewNodeId,
@@ -753,7 +755,14 @@ function repointPreservedEow(workDir, {
   selectedTaskId,
   sourceVersionId,
   sourceTaskId,
+  sourceEowId = `eow-${sourceTaskId}`,
 }) {
+  const selectedTaskPath = taskPath(workDir, selectedId, selectedTaskId);
+  const selectedTask = parseMarkdownFile(selectedTaskPath);
+  selectedTask.preservedFromVersionId = sourceVersionId;
+  selectedTask.preservedFromTaskId = sourceTaskId;
+  writeFileSync(selectedTaskPath, fmBlock(selectedTask) + `${readBody(selectedTaskPath)}\n`, 'utf8');
+
   const selectedEowPath = join(
     workDir,
     'task-groups',
@@ -764,22 +773,83 @@ function repointPreservedEow(workDir, {
     `eow-${selectedTaskId}-${selectedId}.md`,
   );
   const selectedEow = parseMarkdownFile(selectedEowPath);
-  const sourceEow = parseMarkdownFile(eowPath(workDir, sourceVersionId, sourceTaskId));
+  const sourceEow = parseMarkdownFile(join(
+    workDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    sourceVersionId,
+    'eow',
+    `${sourceEowId}.md`,
+  ));
   selectedEow.preservedFromVersionId = sourceVersionId;
   selectedEow.preservedFromEowId = sourceEow.id;
   for (const field of approvalFields) selectedEow[field] = sourceEow[field];
   writeFileSync(selectedEowPath, fmBlock(selectedEow) + `${readBody(selectedEowPath)}\n`, 'utf8');
 }
 
+function preservationAttackState(parsed, {
+  selectedVersionId: selectedId,
+  selectedTaskId,
+  sourceVersionId,
+  sourceTaskId,
+}) {
+  const selectedVersion = parsed.versions.get(selectedId);
+  const sourceVersion = parsed.versions.get(sourceVersionId);
+  const selectedTask = selectedVersion?.tasks.find((task) => task.id === selectedTaskId);
+  const sourceTask = sourceVersion?.tasks.find((task) => task.id === sourceTaskId);
+  const selectedEow = selectedVersion?.eows.find((eow) => (
+    eow.attachedToId === selectedTaskId
+    && eow.reason === 'preserved_upstream_after_restart'
+  ));
+  const sourceEow = sourceVersion?.eows.find((eow) => (
+    eow.attachedToId === sourceTaskId
+    && eow.id === selectedEow?.preservedFromEowId
+  ));
+  assert.ok(selectedVersion && sourceVersion && selectedTask && sourceTask && selectedEow && sourceEow);
+  return { selectedVersion, sourceVersion, selectedTask, sourceTask, selectedEow, sourceEow };
+}
+
+function assertBorrowedApprovalIsOtherwiseCoherent(state) {
+  assert.equal(state.selectedTask.preservedFromVersionId, state.sourceVersion.id);
+  assert.equal(state.selectedEow.preservedFromVersionId, state.sourceVersion.id);
+  assert.equal(state.selectedTask.preservedFromTaskId, state.sourceTask.id);
+  assert.equal(state.selectedEow.preservedFromEowId, state.sourceEow.id);
+  for (const field of approvalFields) {
+    assert.equal(
+      state.selectedEow[field],
+      state.sourceEow[field],
+      `borrowed approval field ${field} must match its historical source`,
+    );
+  }
+}
+
 const wrongTaskPointerDir = join(tempRoot, 'wrong-task-preserved-eow');
 cpSync(multiWaveWorkDir, wrongTaskPointerDir, { recursive: true });
-repointPreservedEow(wrongTaskPointerDir, {
+const wrongTaskAttack = {
   selectedVersionId: finalVersionId,
   selectedTaskId: 'task-a',
   sourceVersionId: 'tgv-root-v3',
   sourceTaskId: 'task-b',
-});
+};
+repointPreservedEow(wrongTaskPointerDir, wrongTaskAttack);
 const wrongTaskPointer = parseProject(wrongTaskPointerDir);
+assert.deepEqual(wrongTaskPointer.errors, [], 'wrong-task attack must be a policy rejection, not a parse failure');
+const wrongTaskState = preservationAttackState(wrongTaskPointer, wrongTaskAttack);
+assertBorrowedApprovalIsOtherwiseCoherent(wrongTaskState);
+assert.equal(wrongTaskState.sourceEow.attachedToId, wrongTaskState.selectedTask.preservedFromTaskId);
+assert.notEqual(
+  wrongTaskState.selectedTask.preservedFromTaskId,
+  wrongTaskState.selectedTask.id,
+  'wrong-task attack must reach the preserved task-identity guard',
+);
+assert.equal(wrongTaskPointer.versions.get('tgv-root-v5').supersedesVersionId, 'tgv-root-v4');
+assert.equal(wrongTaskPointer.versions.get('tgv-root-v4').supersedesVersionId, 'tgv-root-v3');
+assert.equal(
+  wrongTaskPointer.closure.policyApprovedComplete,
+  false,
+  'a preserved EoW must not borrow approval from a different historical task',
+);
 
 const wrongLineagePointerDir = join(tempRoot, 'wrong-lineage-preserved-eow');
 cpSync(multiWaveWorkDir, wrongLineagePointerDir, { recursive: true });
@@ -801,23 +871,32 @@ writeFileSync(rogueSpecPath, JSON.stringify({
   }],
 }), 'utf8');
 run(['decompose', wrongLineagePointerDir, '--task-group-id', 'tg-root', '--spec', rogueSpecPath]);
-markTaskDoneWithApprovedEow(wrongLineagePointerDir, 'tgv-root-v99', 'task-a');
-repointPreservedEow(wrongLineagePointerDir, {
+markTaskDoneWithApprovedEow(wrongLineagePointerDir, 'tgv-root-v99', 'task-a', {
+  taskEowId: 'eow-task-a-tgv-root-v99',
+});
+const wrongLineageAttack = {
   selectedVersionId: finalVersionId,
   selectedTaskId: 'task-a',
   sourceVersionId: 'tgv-root-v99',
   sourceTaskId: 'task-a',
-});
+  sourceEowId: 'eow-task-a-tgv-root-v99',
+};
+repointPreservedEow(wrongLineagePointerDir, wrongLineageAttack);
 const wrongLineagePointer = parseProject(wrongLineagePointerDir);
+assert.deepEqual(wrongLineagePointer.errors, [], 'wrong-lineage attack must be a policy rejection, not a parse failure');
+const wrongLineageState = preservationAttackState(wrongLineagePointer, wrongLineageAttack);
+assertBorrowedApprovalIsOtherwiseCoherent(wrongLineageState);
+assert.equal(wrongLineageState.selectedTask.preservedFromTaskId, wrongLineageState.selectedTask.id);
+assert.equal(wrongLineageState.sourceEow.attachedToId, wrongLineageState.selectedTask.id);
+assert.equal(wrongLineagePointer.versions.get('tgv-root-v5').supersedesVersionId, 'tgv-root-v4');
+assert.equal(wrongLineagePointer.versions.get('tgv-root-v4').supersedesVersionId, 'tgv-root-v3');
+assert.equal(wrongLineagePointer.versions.get('tgv-root-v3').supersedesVersionId, 'tgv-root-v2');
+assert.equal(wrongLineageState.sourceVersion.supersedesVersionId, undefined);
+assert.equal(wrongLineageState.sourceVersion.restartedFromVersionId, undefined);
 assert.equal(
   wrongLineagePointer.closure.policyApprovedComplete,
   false,
   'a preserved EoW must not borrow approval from a non-ancestor version',
-);
-assert.equal(
-  wrongTaskPointer.closure.policyApprovedComplete,
-  false,
-  'a preserved EoW must not borrow approval from a different historical task',
 );
 
 console.log('partial promotion plan smoke passed');
