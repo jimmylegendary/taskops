@@ -12,7 +12,12 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
-import { pickNextAction, runTaskOps } from '../lib-runner.js';
+import {
+  computeNextAction,
+  explainWork,
+  pickNextAction,
+  runTaskOps,
+} from '../lib-runner.js';
 import { normalizeExecutorSpec } from '../lib-runtime-adapters.js';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-prototype-state-'));
@@ -169,6 +174,90 @@ try {
   process.env.TASKOPS_PROTOTYPE_FIXTURE_MODE = 'valid';
   const validCase = seedPrototypeWork(tempRoot, 'prototype-valid');
   const workDir = validCase.workDir;
+  const expectedPrototypeCommand = `taskops run ${workDir} --executor openclaw-agent --max-steps 1`;
+  const prePrototypeNext = computeNextAction(workDir);
+  const prePrototypeExplain = explainWork(workDir);
+  assert.deepEqual(
+    {
+      next: {
+        workId: prePrototypeNext.workId,
+        projectDir: prePrototypeNext.projectDir,
+        action: prePrototypeNext.action,
+        target: prePrototypeNext.target,
+        reason: prePrototypeNext.reason,
+        stopReason: prePrototypeNext.stopReason,
+        command: prePrototypeNext.command,
+        validationErrors: prePrototypeNext.validationErrors,
+      },
+      explain: {
+        workId: prePrototypeExplain.workId,
+        projectDir: prePrototypeExplain.projectDir,
+        status: prePrototypeExplain.status,
+        complete: prePrototypeExplain.complete,
+        next: prePrototypeExplain.next,
+        openReasons: prePrototypeExplain.openReasons,
+        readinessCounts: prePrototypeExplain.readinessCounts,
+        validationErrors: prePrototypeExplain.validationErrors,
+        warnings: prePrototypeExplain.warnings,
+      },
+    },
+    {
+      next: {
+        workId: 'prototype-valid',
+        projectDir: workDir,
+        action: 'prototype',
+        target: {
+          type: 'task',
+          id: 'prototype',
+          taskGroupId: 'tg-root',
+          taskGroupVersionId: 'tgv-root-v1',
+          path: validCase.taskPath,
+        },
+        reason: 'uncertaintyState unknown_known needs cheap prototypes + a human pick to surface the recognize-when-seen requirement before execution.',
+        stopReason: null,
+        command: expectedPrototypeCommand,
+        validationErrors: [],
+      },
+      explain: {
+        workId: 'prototype-valid',
+        projectDir: workDir,
+        status: 'active',
+        complete: false,
+        next: {
+          action: 'prototype',
+          target: {
+            type: 'task',
+            id: 'prototype',
+            taskGroupId: 'tg-root',
+            taskGroupVersionId: 'tgv-root-v1',
+            path: validCase.taskPath,
+          },
+          reason: 'uncertaintyState unknown_known needs cheap prototypes + a human pick to surface the recognize-when-seen requirement before execution.',
+          stopReason: null,
+          command: expectedPrototypeCommand,
+        },
+        openReasons: [
+          '1 terminal task(s) missing EoW',
+          '1 task(s) need prototype',
+        ],
+        readinessCounts: {
+          runnable: 0,
+          needs_decomposition: 0,
+          needs_exploration: 0,
+          needs_prototype: 1,
+          blocked: 0,
+          waiting: 0,
+        },
+        validationErrors: [],
+        warnings: [
+          `${validCase.taskPath}: readiness consistency: explicit runReadiness 'runnable' differs from uncertainty readiness 'needs_prototype'`,
+          `${workDir}: missing runs/<run-id>/index.md`,
+          `${validCase.taskPath}: terminal task 'prototype' has no EoW node`,
+        ],
+      },
+    },
+    'pre-prototype next/explain payload should expose a runnable command and prototype readiness',
+  );
   const validRun = runTaskOps(validCase.workDir, {
     executor: 'openclaw-agent',
     maxSteps: 1,

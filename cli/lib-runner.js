@@ -5297,6 +5297,7 @@ function commandForAction(action, workDir) {
     case 'execute':
     case 'decompose':
     case 'explore':
+    case 'prototype':
       return `taskops run ${workDir} --executor openclaw-agent --max-steps 1`;
     case 'blocked':
       return `taskops unblock-check ${workDir} --json  # resolve blockers or supply input`;
@@ -5389,7 +5390,14 @@ export function computeNextAction(workDir) {
 }
 
 function countOpenTasksByReadiness(parsed) {
-  const counts = { runnable: 0, needs_decomposition: 0, needs_exploration: 0, blocked: 0, waiting: 0 };
+  const counts = {
+    runnable: 0,
+    needs_decomposition: 0,
+    needs_exploration: 0,
+    needs_prototype: 0,
+    blocked: 0,
+    waiting: 0,
+  };
   for (const task of parsed.tasks.values()) {
     if (['done', 'cancelled'].includes(task.status)) continue;
     if (task.status === 'waiting') {
@@ -5414,7 +5422,14 @@ export function explainWork(workDir) {
   const complete = closure.complete === true && parsed.errors.length === 0 && isApprovedComplete(closure);
   const reasons = [];
   const readinessCounts = complete
-    ? { runnable: 0, needs_decomposition: 0, needs_exploration: 0, blocked: 0, waiting: 0 }
+    ? {
+      runnable: 0,
+      needs_decomposition: 0,
+      needs_exploration: 0,
+      needs_prototype: 0,
+      blocked: 0,
+      waiting: 0,
+    }
     : countOpenTasksByReadiness(parsed);
   if (!complete) {
     if (parsed.errors.length > 0) reasons.push(`work has ${parsed.errors.length} validation error(s); cannot trust closure`);
@@ -5430,6 +5445,7 @@ export function explainWork(workDir) {
     if (readinessCounts.runnable > 0) reasons.push(`${readinessCounts.runnable} runnable task(s) remain`);
     if (readinessCounts.needs_decomposition > 0) reasons.push(`${readinessCounts.needs_decomposition} task(s) need decomposition`);
     if (readinessCounts.needs_exploration > 0) reasons.push(`${readinessCounts.needs_exploration} task(s) need exploration`);
+    if (readinessCounts.needs_prototype > 0) reasons.push(`${readinessCounts.needs_prototype} task(s) need prototype`);
   }
   return {
     workId: parsed.project.id,
