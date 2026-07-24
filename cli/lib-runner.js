@@ -6058,7 +6058,10 @@ export function runTaskOps(workDir, options = {}) {
         appendRunLog(runDir, `${isoNow()} blockedby_missing_for_blocked_task count=${missingBlockerIssues.length}`);
       }
 
-      const next = pickNextAction(parsed, {
+      const next = pickNextAction({
+        ...parsed,
+        errors: validationErrors,
+      }, {
         taskId: targetTaskId,
         taskGroupVersionId: targetTaskGroupVersionId,
       });
