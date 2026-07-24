@@ -5,7 +5,7 @@
 // cleared on success. A deterministic marker check (fails once, then passes) stands in for a model that fixes
 // its work on the retry.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fmBlock, parseMarkdownFile, classifyTaskReadiness } from '../lib-taskops.js';
@@ -30,7 +30,8 @@ const markerCmd = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails onc
 // 1) with retries + verify-checks: first verify fails, the retry passes → verified-done, and retry state is CLEARED.
 {
   const root = mkdtempSync(join(tmpdir(), 'taskops-vr-on-'));
-  const w = build(root, markerCmd(join(root, 'marker')));
+  const workspaceStateFile = '.taskops-retry-workspace-state';
+  const w = build(root, markerCmd(workspaceStateFile));
   const res = runTaskOps(w, { executor: 'dry-run', maxSteps: 6, verifyChecks: true, verifyRetries: 2, continueOnFailure: true });
   const t = readTask(w);
   assert.equal(t.status, 'done', 'a retry converts the first-attempt stall into a verified completion');
@@ -41,6 +42,23 @@ const markerCmd = (m) => `test -f ${m} || { touch ${m}; exit 1; }`; // fails onc
   const nodesDir = join(w, 'runs', res.runId, 'nodes');
   const executeNodes = executeActions.map((action) => parseMarkdownFile(join(nodesDir, `${action.runNodeId}.md`)));
   assert.deepEqual(executeNodes.map((node) => node.attempt), [1, 2]);
+  assert.equal(executeNodes[1].predecessorRunNodeId, executeActions[0].runNodeId);
+  const attemptWorkspaces = executeActions.map((action) => (
+    join(w, 'runs', res.runId, 'artifacts', action.runNodeId, 'workspace')
+  ));
+  assert.notEqual(attemptWorkspaces[0], attemptWorkspaces[1]);
+  assert.ok(existsSync(join(attemptWorkspaces[0], workspaceStateFile)), 'attempt 1 creates workspace-local repair state');
+  assert.ok(existsSync(join(attemptWorkspaces[1], workspaceStateFile)), 'attempt 2 receives the predecessor workspace state');
+  assert.deepEqual(
+    executeNodes.map((node) => node.result.executionWorkspacePath),
+    attemptWorkspaces,
+    'each attempt records its own artifact workspace',
+  );
+  assert.deepEqual(
+    executeNodes.map((node) => node.result.observed.evidenceRefs.includes(node.result.executionWorkspacePath)),
+    [true, true],
+    'each attempt records evidence against its independent workspace',
+  );
   const reviewNodes = executeActions.map((action) => parseMarkdownFile(join(nodesDir, `review-${action.runNodeId}.md`)));
   assert.notEqual(reviewNodes[0].id, reviewNodes[1].id);
   assert.equal(reviewNodes[0].reviewReport.decision, 'rejected');
