@@ -129,9 +129,10 @@ does not.
 
 ### 2. Canonical EoW v2 encoding
 
-New EoW IDs use non-empty, well-formed Unicode strings encoded as UTF-8 and
-then unpadded base64url. A literal `.` frames components because `.` is not in
-the base64url alphabet.
+New EoW IDs accept only primitive, non-empty, well-formed Unicode strings.
+Constructors do not coerce numbers, objects, or other values with `String()`.
+Each component is encoded as UTF-8 and then unpadded base64url. A literal `.`
+frames components because `.` is not in the base64url alphabet.
 
 The canonical formats are:
 
@@ -173,7 +174,7 @@ decoder behavior cannot create aliases.
 
 ### 3. Legacy-read, canonical-write compatibility
 
-Candidate lookup order is:
+Candidate helpers return the following ordered, de-duplicated IDs:
 
 1. canonical v2 ID;
 2. the current qualified but lossy ID; and
@@ -191,23 +192,40 @@ requested tuple:
   `taskGroupVersionId`, and exact `attachedToId`.
 
 An existing canonical v2 candidate with a decoding or tuple mismatch is
-corruption and fails closed. A nonmatching lossy legacy-qualified candidate
-may be the valid historical owner of a colliding old filename; it is preserved
-but does not suppress a new v2 write for the requested tuple. Existing
-relational validation continues to surface malformed legacy records.
+corruption and fails closed. A nonmatching current-qualified candidate may be
+the valid historical owner of a colliding old filename. It is treated as such
+only when its stored relational tuple is valid and regenerates that same
+legacy-qualified ID; then it is preserved but does not suppress a new v2 write
+for the requested tuple. Any other mismatch, including an ownership mismatch
+at an original unqualified candidate, fails closed. Existing relational
+validation continues to surface malformed legacy records.
 
 When an existing candidate is reused, its stored `id` becomes the edge target.
 Historical edges and provenance pointers keep their stored values. The task
 state writer, which currently treats an existing path as a silent no-op, must
 parse and verify immutable ownership before accepting reuse.
 
-Compatibility lookup applies consistently to:
+Immutable candidate reuse applies consistently to:
 
 - automatic run-node and task closure writers;
-- manual task and run-node close paths;
-- promoted-partial source run closure;
-- restart and version carry-forward materialization; and
-- the exploration non-closing guard.
+- promoted-partial source run closure; and
+- any review closure routed through the automatic run-node writer.
+
+The exploration non-closing guard uses the same candidate ownership rules for
+discovery rather than treating path existence alone as proof that its source
+task is closed.
+
+Restart, version carry-forward, and partial-promotion materialization create a
+new version directory rather than reusing an EoW in place. They generate v2
+IDs for the new task EoWs while retaining the source EoW ID verbatim in
+`preservedFromEowId`.
+
+Manual task and run-node close commands retain their current mutation
+semantics. If the parsed graph already contains a logical closure for the
+requested tuple, they return the existing “already closed” error rather than
+silently reusing it. For a genuinely open tuple they write v2 directly; an
+unrelated colliding legacy-qualified filename cannot block that canonical
+path.
 
 ### 4. Canonical parser validation
 
@@ -227,8 +245,8 @@ Work-wide duplicate EoW detection remains unchanged and strict.
 
 ### 5. Writer and edge behavior
 
-Writers resolve an immutable existing candidate before creating anything.
-They either:
+Idempotent state writers resolve an immutable existing candidate before
+creating anything. They either:
 
 1. reuse an exactly matching canonical or legacy EoW and use its stored ID;
 2. write one canonical v2 EoW and point the new edge to it; or
@@ -238,9 +256,9 @@ They either:
 Edge IDs do not need a new format because run-edge identity is scoped by
 `runId`, while the edge target carries the globally unique EoW identity.
 
-Manual close already checks the parsed graph for a logical existing closure.
-That semantic guard remains authoritative; path lookup is not allowed to
-overwrite or duplicate a logical closure.
+Manual close checks the parsed graph for a logical existing closure before
+constructing a new v2 ID. That semantic guard remains authoritative; manual
+close is not converted into an idempotent reuse operation.
 
 ## Error handling
 
@@ -252,8 +270,8 @@ overwrite or duplicate a logical closure.
 - Existing v2 path owned by another tuple: corruption error.
 - Existing lossy legacy path owned by another tuple: preserve it and continue
   with the requested v2 write.
-- Existing exact legacy closure with immutable mismatch: fail rather than
-  rewrite.
+- Existing candidate with matching tuple ownership but conflicting immutable
+  closure fields: fail rather than rewrite.
 - Invalid or over-budget new filename: fail before EoW and edge mutation.
 
 ## Verification design
@@ -328,7 +346,8 @@ The design is complete when:
 4. all newly written run and task EoW IDs use the injective v2 encoding;
 5. real run, task, review, manual, and restart collision pairs coexist without
    duplicate EoW IDs;
-6. compatible existing EoWs are reused without rename or rewrite;
+6. compatible existing EoWs are reused by idempotent writers without rename
+   or rewrite, while manual close retains its “already closed” guard;
 7. every new closure edge points to the exact created or reused EoW;
 8. malformed canonical IDs and immutable mismatches fail closed;
 9. the full repository verification gate passes; and
