@@ -272,6 +272,45 @@ for (const node of [
   assert.ok(resolved.issues.some((issue) => /actionKind is required/i.test(issue)));
 }
 
+for (const closureRole of ['claim-bearing', null, '']) {
+  const eow = { reason: 'approved_result', closureRole };
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(eow, 'closureRole'),
+    true,
+    'EoW closureRole witness must be an own-property',
+  );
+  const resolved = resolveRunNodeActionIdentity({
+    node: { type: 'implementation' },
+    eow,
+  });
+  assert.equal(resolved.mode, 'explicit');
+  assert.equal(resolved.actionKind, null);
+  assert.equal(resolved.valid, false);
+  assert.ok(resolved.issues.some((issue) => /actionKind is required/i.test(issue)));
+}
+
+const inheritedClosureRoleEow = Object.assign(
+  Object.create({ closureRole: 'claim-bearing' }),
+  { reason: 'approved_result' },
+);
+assert.equal(
+  Object.prototype.hasOwnProperty.call(inheritedClosureRoleEow, 'closureRole'),
+  false,
+  'inherited EoW closureRole must not be an own-property witness',
+);
+assert.deepEqual(
+  resolveRunNodeActionIdentity({
+    node: { type: 'implementation' },
+    eow: inheritedClosureRoleEow,
+  }),
+  {
+    mode: 'legacy-inferred',
+    actionKind: 'execute',
+    valid: true,
+    issues: [],
+  },
+);
+
 const legacyClaimIdentityDir = join(tempRoot, 'legacy-claim-identity');
 cpSync(tamperSource, legacyClaimIdentityDir, { recursive: true });
 const legacyClaimNodePath = join(
