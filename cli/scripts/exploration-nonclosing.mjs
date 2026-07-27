@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import { parseMarkdownFile } from '../lib-taskops.js';
 import { runTaskOps, computeNextAction, SURPRISE_REPORT_PREFIX } from '../lib-runner.js';
 
@@ -99,7 +100,18 @@ function taskPath(workDir) {
   return join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-root-explore.md');
 }
 function sourceEowPath(workDir) {
-  return join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-root-explore-tgv-root-v2.md');
+  return join(
+    workDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    'tgv-root-v2',
+    'eow',
+    `${taskEowId({
+      taskGroupVersionId: 'tgv-root-v2',
+      taskId: 'task-root-explore',
+    })}.md`,
+  );
 }
 
 // ---- 공통 non-closing 불변식 (양 변형이 공유) ----
@@ -156,7 +168,13 @@ try {
     const exploreAction = step1.actions[0];
     const nodesDir = join(workDir, 'runs', step1.runId, 'nodes');
     const exploreNodePath = join(nodesDir, `${exploreAction.runNodeId}.md`);
-    const exploreEowPath = join(nodesDir, `eow-${exploreAction.runNodeId}-${step1.runId}.md`);
+    const exploreEowPath = join(
+      nodesDir,
+      `${runEowId({
+        runId: step1.runId,
+        runNodeId: exploreAction.runNodeId,
+      })}.md`,
+    );
     const exploreNodeBefore = readFileSync(exploreNodePath);
     const exploreEowBefore = readFileSync(exploreEowPath);
     assertNonClosing(workDir, { expectSurprise: false });
@@ -177,7 +195,13 @@ try {
       ['explore', 1, 'decompose', 1],
     );
     assert.ok(existsSync(exploreEowPath));
-    assert.ok(existsSync(join(nodesDir, `eow-${decomposeAction.runNodeId}-${step2.runId}.md`)));
+    assert.ok(existsSync(join(
+      nodesDir,
+      `${runEowId({
+        runId: step2.runId,
+        runNodeId: decomposeAction.runNodeId,
+      })}.md`,
+    )));
     assert.equal(parseMarkdownFile(taskPath(workDir)).runRefs.length, 2);
     assert.deepEqual(readFileSync(exploreNodePath), exploreNodeBefore);
     assert.deepEqual(readFileSync(exploreEowPath), exploreEowBefore);

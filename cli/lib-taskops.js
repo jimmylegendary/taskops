@@ -1,9 +1,13 @@
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSync, watch } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
+import {
+  resolveExistingRunEowFile,
+  updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter,
+} from './lib-state-writer.js';
 import { classifyRunClosure } from './lib-run-closure.js';
 import {
+  assertEowFilenameBudget,
   decodeCanonicalEowId,
   runEowId,
   taskEowId,
@@ -2580,8 +2584,17 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
   });
   for (const eow of spec.eows || []) {
     if (!eow || !eow.id) continue;
+    const canonicalId = taskEowId({
+      taskGroupVersionId: versionId,
+      taskId: eow.attachedToId,
+    });
+    if (eow.id !== canonicalId) {
+      throw new Error(
+        `Version materializer requires canonical task EoW id '${canonicalId}', found '${eow.id}'`,
+      );
+    }
     const eowFm = {
-      taskOpsVersion: 'v1', entityType: 'eow', id: eow.id,
+      taskOpsVersion: 'v1', entityType: 'eow', id: canonicalId,
       graphType: eow.graphType || 'task',
       attachedToType: eow.attachedToType || 'task',
       attachedToId: eow.attachedToId,
@@ -2595,7 +2608,8 @@ export function writeVersionFromSpec(projectDir, taskGroupId, spec, { supersedes
     for (const key of ['preservedFromVersionId', 'preservedFromEowId', 'preservedFromReason', ...APPROVAL_FIELDS]) {
       if (eow[key] !== undefined && eow[key] !== null && eow[key] !== '') eowFm[key] = eow[key];
     }
-    writeFileSync(join(versionDir, 'eow', `${eow.id}.md`), fmBlock(eowFm) + `# EoW: ${eow.attachedToId}\n`, 'utf8');
+    assertEowFilenameBudget(canonicalId);
+    writeFileSync(join(versionDir, 'eow', `${canonicalId}.md`), fmBlock(eowFm) + `# EoW: ${eow.attachedToId}\n`, 'utf8');
   }
   return versionDir;
 }
@@ -3303,32 +3317,28 @@ function closePromotedPartialSourceRunNode(projectDir, partial, now) {
   ensureDir(join(runDir, 'nodes'));
   ensureDir(join(runDir, 'edges'));
 
-  const qualifiedEowRunNodeId = runEowId({ runId, runNodeId });
-  const qualifiedEowRunPath = join(
+  const canonicalId = runEowId({ runId, runNodeId });
+  const existing = resolveExistingRunEowFile({
     runDir,
-    'nodes',
-    `${qualifiedEowRunNodeId}.md`,
-  );
-  const legacyEowRunNodeId = `eow-${runNodeId}`;
-  const legacyEowRunPath = join(
-    runDir,
-    'nodes',
-    `${legacyEowRunNodeId}.md`,
-  );
-  const existingEowRunPath = existsSync(qualifiedEowRunPath)
-    ? qualifiedEowRunPath
-    : (existsSync(legacyEowRunPath) ? legacyEowRunPath : null);
-  let eowRunNodeId = qualifiedEowRunNodeId;
+    runId,
+    runNodeId,
+  }, {
+    exists: existsSync,
+    parseMarkdownFile,
+  });
+  const eowRunNodeId = existing?.id || canonicalId;
   const edgeId = `edge-${runNodeId}-to-eow`;
   const edgePath = join(runDir, 'edges', `${edgeId}.md`);
   let wroteEow = false;
   let wroteEdge = false;
 
-  if (!existingEowRunPath) {
-    writeFileSync(qualifiedEowRunPath, fmBlock({
+  if (!existing) {
+    const canonicalPath = join(runDir, 'nodes', `${canonicalId}.md`);
+    assertEowFilenameBudget(canonicalId);
+    writeFileSync(canonicalPath, fmBlock({
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: qualifiedEowRunNodeId,
+      id: canonicalId,
       runId,
       graphType: 'run',
       attachedToType: 'runNode',
@@ -3341,8 +3351,6 @@ function closePromotedPartialSourceRunNode(projectDir, partial, now) {
       status: 'done',
     }) + `# EoW: ${runNodeId}\n`, 'utf8');
     wroteEow = true;
-  } else {
-    eowRunNodeId = parseMarkdownFile(existingEowRunPath).id;
   }
 
   if (!existsSync(edgePath)) {

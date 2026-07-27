@@ -20,6 +20,7 @@ import {
 import { RUNTIME_ADAPTER_NAMES, invokeRuntimeAdapter, normalizeExecutorSpec } from './lib-runtime-adapters.js';
 import {
   allocateRunNodeIdentity,
+  assertEowFilenameBudget,
   runEowId,
   taskEowId,
 } from './lib-run-identity.js';
@@ -42,6 +43,7 @@ import {
   closeRunNodeWithEowFiles as closeRunNodeWithEowViaStateWriter,
   closeTaskWithEowFile as closeTaskWithEowViaStateWriter,
   ensureRunNodeFile as ensureRunNodeViaStateWriter,
+  resolveExistingTaskEowFile,
   updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter,
   writeRunEdgeFile as writeRunEdgeViaStateWriter,
 } from './lib-state-writer.js';
@@ -5145,18 +5147,16 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   // 한해 사후 검증한다(정상 경로에서는 절대 발화하지 않음).
   if (POLICY_APPROVING_ACCEPTANCE_MODES.has(normalizeAcceptance(task).mode)) {
     const postExplorationFm = parseMarkdownFile(task.path);
-    const sourceTaskEowDir = join(dirname(dirname(task.path)), 'eow');
-    const sourceTaskEowPaths = [
-      join(sourceTaskEowDir, `${taskEowId({
-        taskGroupVersionId: task.taskGroupVersionId,
-        taskId: task.id,
-      })}.md`),
-      join(sourceTaskEowDir, `eow-${task.id}.md`),
-    ];
-    if (
-      postExplorationFm.status === 'done'
-      || sourceTaskEowPaths.some((path) => existsSync(path))
-    ) {
+    const sourceTaskVersionDir = dirname(dirname(task.path));
+    const sourceTaskEow = resolveExistingTaskEowFile({
+      versionDir: sourceTaskVersionDir,
+      taskGroupVersionId: task.taskGroupVersionId,
+      taskId: task.id,
+    }, {
+      exists: existsSync,
+      parseMarkdownFile,
+    });
+    if (postExplorationFm.status === 'done' || sourceTaskEow) {
       throw new Error(`P0#2 invariant violated: exploration must not close acceptance-bearing task ${task.id} (acceptance requires verified/reviewed closure, not an exploration pass)`);
     }
   }
@@ -5726,6 +5726,7 @@ export function closeTarget(workDir, targetId, {
       createdAt: declaredAt,
       status: 'done',
     };
+    assertEowFilenameBudget(eowId);
     writeTextFileAtomic(eowPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
     return {
       workId: parsed.project.id,
@@ -5795,6 +5796,7 @@ export function closeTarget(workDir, targetId, {
     createdAt: declaredAt,
     status: 'done',
   };
+  assertEowFilenameBudget(eowId);
   writeTextFileAtomic(eowPath, fmBlock(eowFm) + `# EoW: ${node.id}\n`);
   const edgeId = `edge-${node.id}-to-eow`;
   const edgePath = join(runDir, 'edges', `${edgeId}.md`);

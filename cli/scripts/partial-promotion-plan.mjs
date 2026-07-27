@@ -6,6 +6,11 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { canonicalSha256 } from '../lib-run-closure.js';
+import {
+  legacyQualifiedRunEowId,
+  runEowId,
+  taskEowId,
+} from '../lib-run-identity.js';
 import { fmBlock, isPartialUnresolved, parseMarkdownFile, parseProject, readBody } from '../lib-taskops.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -39,7 +44,15 @@ function taskPath(workDir, versionId, taskId) {
 }
 
 function eowPath(workDir, versionId, taskId) {
-  return join(workDir, 'task-groups', 'tg-root', 'versions', versionId, 'eow', `eow-${taskId}.md`);
+  return join(
+    workDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    versionId,
+    'eow',
+    `${taskEowId({ taskGroupVersionId: versionId, taskId })}.md`,
+  );
 }
 
 function selectedVersionId(workDir) {
@@ -238,6 +251,89 @@ const primaryClose = json([
 ]);
 assert.ok(primaryClose.partialId, 'primary close should return a partial id');
 
+const sourceRunId = 'run-promoted-source';
+const sourceRunNodeId = 'run-node-promoted-source';
+const sourceRunDir = join(workDir, 'runs', sourceRunId);
+const legacySourceRunEowId = legacyQualifiedRunEowId({
+  runId: sourceRunId,
+  runNodeId: sourceRunNodeId,
+});
+const sourceCloseEdgeId = `edge-${sourceRunNodeId}-to-eow`;
+const sourceCloseEdgePath = join(sourceRunDir, 'edges', `${sourceCloseEdgeId}.md`);
+mkdirSync(join(sourceRunDir, 'nodes'), { recursive: true });
+mkdirSync(join(sourceRunDir, 'edges'), { recursive: true });
+writeFileSync(
+  join(sourceRunDir, 'index.md'),
+  fmBlock({
+    taskOpsVersion: 'v1',
+    entityType: 'run',
+    id: sourceRunId,
+    workId: 'partial-promotion-plan',
+    createdAt: '2026-06-27T00:00:00Z',
+    status: 'done',
+  }) + `# Run: ${sourceRunId}\n`,
+  'utf8',
+);
+writeFileSync(
+  join(sourceRunDir, 'nodes', `${sourceRunNodeId}.md`),
+  fmBlock({
+    taskOpsVersion: 'v1',
+    entityType: 'runNode',
+    id: sourceRunNodeId,
+    runId: sourceRunId,
+    type: 'implementation',
+    title: 'Promoted partial source',
+    sourceTaskId: 'task-main',
+    sourceTaskGroupVersionId: 'tgv-root-v2',
+    status: 'done',
+    createdAt: '2026-06-27T00:00:00Z',
+    actionKind: 'execute',
+  }) + `# Run node: ${sourceRunNodeId}\n`,
+  'utf8',
+);
+writeFileSync(
+  join(sourceRunDir, 'nodes', `${legacySourceRunEowId}.md`),
+  fmBlock({
+    taskOpsVersion: 'v1',
+    entityType: 'eow',
+    id: legacySourceRunEowId,
+    runId: sourceRunId,
+    graphType: 'run',
+    attachedToType: 'runNode',
+    attachedToId: sourceRunNodeId,
+    reason: 'partial_follow_up_promoted',
+    closureRole: 'supporting',
+    declaredBy: 'smoke',
+    declaredAt: '2026-06-27T00:00:00Z',
+    createdAt: '2026-06-27T00:00:00Z',
+    status: 'done',
+  }) + `# EoW: ${sourceRunNodeId}\n`,
+  'utf8',
+);
+writeFileSync(
+  sourceCloseEdgePath,
+  fmBlock({
+    taskOpsVersion: 'v1',
+    entityType: 'runEdge',
+    id: sourceCloseEdgeId,
+    runId: sourceRunId,
+    fromRunNodeId: sourceRunNodeId,
+    toRunNodeId: legacySourceRunEowId,
+    edgeType: 'closes_with',
+    createdAt: '2026-06-27T00:00:00Z',
+    status: 'done',
+  }) + `# Run edge: ${sourceRunNodeId} closes with EoW\n`,
+  'utf8',
+);
+const promotedSourcePartial = parseMarkdownFile(primaryClose.partialPath);
+promotedSourcePartial.sourceRunId = sourceRunId;
+promotedSourcePartial.sourceRunNodeId = sourceRunNodeId;
+writeFileSync(
+  primaryClose.partialPath,
+  fmBlock(promotedSourcePartial) + `${readBody(primaryClose.partialPath)}\n`,
+  'utf8',
+);
+
 const resolvedClose = json([
   'close',
   workDir,
@@ -371,6 +467,24 @@ assert.equal(applied.applied, true);
 assert.equal(applied.promotionCount, 1);
 assert.equal(applied.waveBudget.nextCount, 1);
 assert.equal(applied.appliedVersionPlans[0].toVersionId, 'tgv-root-v3');
+const closedSource = applied.appliedVersionPlans[0].closedSourceRunNodes[0];
+assert.equal(closedSource.wroteEow, false);
+assert.equal(
+  closedSource.eowRunNodeId,
+  legacyQualifiedRunEowId({ runId: sourceRunId, runNodeId: sourceRunNodeId }),
+);
+assert.equal(
+  parseMarkdownFile(sourceCloseEdgePath).toRunNodeId,
+  closedSource.eowRunNodeId,
+);
+assert.equal(
+  existsSync(join(
+    sourceRunDir,
+    'nodes',
+    `${runEowId({ runId: sourceRunId, runNodeId: sourceRunNodeId })}.md`,
+  )),
+  false,
+);
 assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), true, 'apply must create the planned version directory');
 const workIndexAfterApply = readFileSync(join(workDir, 'index.md'), 'utf8');
 assert.match(workIndexAfterApply, /partialPromotionWaveBudget: 10/);
@@ -416,7 +530,13 @@ writeFileSync(
 );
 const followUpClose = json(['close', workDir, 'task-task-main-followup', '--reason', 'approved_result']);
 assert.equal(followUpClose.closed, true);
-assert.equal(followUpClose.eowId, 'eow-task-task-main-followup-tgv-root-v3');
+assert.equal(
+  followUpClose.eowId,
+  taskEowId({
+    taskGroupVersionId: 'tgv-root-v3',
+    taskId: 'task-task-main-followup',
+  }),
+);
 
 const recheck = json(['unblock-check', workDir]);
 assert.equal(recheck.unblocked.length, 1);
@@ -708,27 +828,77 @@ writeFileSync(
 markTaskDoneWithApprovedEow(multiWaveWorkDir, 'tgv-root-v2', 'task-a');
 const waveOne = promotePartialAndClose(multiWaveWorkDir, 'task-b', 'partial-multi-task-b');
 assert.equal(waveOne.toVersionId, 'tgv-root-v3');
-const taskAInV3Eow = parseMarkdownFile(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'eow', 'eow-task-a-tgv-root-v3.md'));
+const taskAInV3Eow = parseMarkdownFile(join(
+  multiWaveWorkDir,
+  'task-groups',
+  'tg-root',
+  'versions',
+  'tgv-root-v3',
+  'eow',
+  `${taskEowId({ taskGroupVersionId: 'tgv-root-v3', taskId: 'task-a' })}.md`,
+));
 assert.equal(taskAInV3Eow.reason, 'preserved_upstream_after_restart');
 assert.equal(taskAInV3Eow.preservedFromVersionId, 'tgv-root-v2');
 assert.equal(taskAInV3Eow.preservedFromEowId, 'eow-task-a');
 assert.equal(taskAInV3Eow.approvedByReviewNodeId, 'review-task-a');
 const waveTwo = promotePartialAndClose(multiWaveWorkDir, 'task-c', 'partial-multi-task-c');
 assert.equal(waveTwo.toVersionId, 'tgv-root-v4');
-assert.equal(existsSync(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v4', 'eow', 'eow-task-a-tgv-root-v4.md')), true, 'second wave must preserve first task EoW again');
+assert.equal(
+  existsSync(join(
+    multiWaveWorkDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    'tgv-root-v4',
+    'eow',
+    `${taskEowId({ taskGroupVersionId: 'tgv-root-v4', taskId: 'task-a' })}.md`,
+  )),
+  true,
+  'second wave must preserve first task EoW again',
+);
 const waveThree = promotePartialAndClose(multiWaveWorkDir, 'task-d', 'partial-multi-task-d');
 assert.equal(waveThree.toVersionId, 'tgv-root-v5');
 const finalVersionId = selectedVersionId(multiWaveWorkDir);
 assert.equal(finalVersionId, 'tgv-root-v5');
-for (const taskId of ['task-a', 'task-b', 'task-task-b-followup', 'task-c', 'task-task-c-followup', 'task-d', 'task-task-d-followup']) {
-  const eowFiles = [`eow-${taskId}-tgv-root-v5.md`, `eow-${taskId}.md`];
+for (const taskId of ['task-a', 'task-b', 'task-task-b-followup', 'task-c', 'task-task-c-followup']) {
   assert.equal(
-    eowFiles.some((file) => existsSync(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', finalVersionId, 'eow', file))),
+    existsSync(join(
+      multiWaveWorkDir,
+      'task-groups',
+      'tg-root',
+      'versions',
+      finalVersionId,
+      'eow',
+      `${taskEowId({ taskGroupVersionId: finalVersionId, taskId })}.md`,
+    )),
     true,
     `${taskId} should have an EoW in final multi-wave version`,
   );
 }
-const finalTaskAEow = parseMarkdownFile(join(multiWaveWorkDir, 'task-groups', 'tg-root', 'versions', finalVersionId, 'eow', 'eow-task-a-tgv-root-v5.md'));
+for (const taskId of ['task-d', 'task-task-d-followup']) {
+  assert.equal(
+    existsSync(join(
+      multiWaveWorkDir,
+      'task-groups',
+      'tg-root',
+      'versions',
+      finalVersionId,
+      'eow',
+      `eow-${taskId}.md`,
+    )),
+    true,
+    `${taskId} historical fixture EoW should remain literal in the final multi-wave version`,
+  );
+}
+const finalTaskAEow = parseMarkdownFile(join(
+  multiWaveWorkDir,
+  'task-groups',
+  'tg-root',
+  'versions',
+  finalVersionId,
+  'eow',
+  `${taskEowId({ taskGroupVersionId: finalVersionId, taskId: 'task-a' })}.md`,
+));
 assert.equal(finalTaskAEow.reason, 'preserved_upstream_after_restart');
 assert.equal(finalTaskAEow.preservedFromVersionId, 'tgv-root-v2', 'multi-wave preservation should keep original provenance, not a hop-by-hop chain');
 assert.equal(finalTaskAEow.preservedFromEowId, 'eow-task-a');
@@ -770,7 +940,10 @@ function repointPreservedEow(workDir, {
     'versions',
     selectedId,
     'eow',
-    `eow-${selectedTaskId}-${selectedId}.md`,
+    `${taskEowId({
+      taskGroupVersionId: selectedId,
+      taskId: selectedTaskId,
+    })}.md`,
   );
   const selectedEow = parseMarkdownFile(selectedEowPath);
   const sourceEow = parseMarkdownFile(join(

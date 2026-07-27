@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import {
   initProject,
   parseMarkdownFile,
@@ -82,7 +83,18 @@ assert.equal(action?.kind, 'decompose', 'runner action should be decompose');
 assert.equal(action?.status, 'completed', 'decompose action should complete');
 assert.ok(action.childTaskGroupId, 'decompose action should report childTaskGroupId');
 
-const taskEow = parseMarkdownFile(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-parent-tgv-root-v2.md'));
+const taskEow = parseMarkdownFile(join(
+  root,
+  'task-groups',
+  'tg-root',
+  'versions',
+  'tgv-root-v2',
+  'eow',
+  `${taskEowId({
+    taskGroupVersionId: 'tgv-root-v2',
+    taskId: 'task-parent',
+  })}.md`,
+));
 assert.equal(
   taskEow.resolvedByTaskGroupId,
   action.childTaskGroupId,
@@ -97,7 +109,16 @@ assert.equal(
   'decompose wiring output should not emit resolver backlink warnings',
 );
 
-const runEow = parseMarkdownFile(join(root, 'runs', runResult.runId, 'nodes', `eow-${action.runNodeId}-${runResult.runId}.md`));
+const runEow = parseMarkdownFile(join(
+  root,
+  'runs',
+  runResult.runId,
+  'nodes',
+  `${runEowId({
+    runId: runResult.runId,
+    runNodeId: action.runNodeId,
+  })}.md`,
+));
 assert.equal(
   runEow.resolvedByTaskGroupId,
   undefined,
