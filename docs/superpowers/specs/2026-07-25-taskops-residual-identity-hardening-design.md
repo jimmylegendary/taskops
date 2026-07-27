@@ -1,6 +1,6 @@
 # TaskOps Residual Identity Hardening Design
 
-Status: approved in conversation on 2026-07-25  
+Status: approved in conversation on 2026-07-25
 Base revision: `2440929` (`v0.10.1`)
 
 ## Objective
