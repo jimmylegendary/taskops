@@ -208,6 +208,28 @@ nextLearningGoal: Run a minimal API trial and write the constraints needed for t
 Path:
 - `task-groups/<task-group-id>/versions/<version-id>/eow/<eow-id>.md`
 
+New TaskOps writers use deterministic v2 EoW IDs:
+
+- task: `eow-v2-t.<base64url(taskId UTF-8)>.<base64url(taskGroupVersionId UTF-8)>`
+- run: `eow-v2-r.<base64url(runNodeId UTF-8)>.<base64url(runId UTF-8)>`
+
+The dot-framed base64url components are reversible and make the work-wide EoW
+namespace injective across graph kind and tuple components. Consumers must
+treat the complete ID as opaque rather than infer semantics by splitting it.
+Existing qualified-v1 and unqualified-v0 IDs remain readable and immutable.
+New writes never rename or rewrite them.
+
+When looking for an existing task EoW, writers check canonical v2, lossy
+qualified v1, then original unqualified v0. A candidate is reusable only when
+its filename and frontmatter ID agree and its complete ownership tuple is
+exactly `(graphType: task, attachedToType: task, attachedToId: taskId,
+taskGroupVersionId)`. A qualified-v1 candidate owned by a different tuple is
+skipped only when that valid stored tuple recomputes to the same lossy legacy
+ID; canonical-v2 and unqualified-v0 ownership mismatches are errors. Unsafe
+unqualified IDs are not probed as paths. Compatible existing files are reused
+byte-for-byte. Only a fresh canonical write is subject to the pre-write limit
+of 255 UTF-8 bytes for the complete `<eow-id>.md` filename.
+
 Suggested fields:
 - `entityType: eow`
 - `id`
@@ -285,10 +307,21 @@ Suggested fields:
 - `status`
 - `sourceTaskId?`
 - `sourceTaskGroupVersionId?`
-- `actionKind?`
+- `actionKind`
 - `attempt?`
 - `predecessorRunNodeId?`
 - `createdAt`
+
+`actionKind` is required on every modern run node. It is legacy-optional only
+when `actionKind`, `attempt`, `predecessorRunNodeId`, and the attached EoW's
+`closureRole` are all absent as properties. Null or blank modern fields are
+malformed and cannot contribute policy-approved claim evidence.
+
+These four modern-cohort witnesses are own-properties: inherited values do not
+make a record modern. Any one own-property witness selects the modern contract,
+including a null or blank value. Historical malformed claims remain
+parse-readable for audit, but they are not policy-approved and cannot approve
+restart carry-forward provenance.
 
 Suggested `type` values include `execute`, `explore`, `debug`, `review`, `verify`, and `delegate`.
 Use `explore` when the run objective is learning enough to update task readiness or decomposition.
@@ -318,6 +351,21 @@ timeoutAt: 2026-05-10T04:45:00+09:00
 Path:
 - `runs/<run-id>/nodes/<eow-id>.md`
 
+New TaskOps writers use the same deterministic v2 EoW namespace:
+
+- task: `eow-v2-t.<base64url(taskId UTF-8)>.<base64url(taskGroupVersionId UTF-8)>`
+- run: `eow-v2-r.<base64url(runNodeId UTF-8)>.<base64url(runId UTF-8)>`
+
+The dot-framed components are reversible, graph-kind-separated base64url
+encodings, but the complete ID is opaque to consumers. Existing qualified-v1
+and unqualified-v0 records remain readable at their original IDs. Run writers
+resolve candidates in canonical-v2, lossy qualified-v1, unqualified-v0 order
+and reuse a record only when its filename/frontmatter ID and exact
+`(graphType: run, attachedToType: runNode, attachedToId: runNodeId, runId)`
+ownership tuple match. A proven qualified-v1 lossy collision may be skipped;
+other ownership mismatches are errors. Fresh canonical filenames must fit the
+255-byte UTF-8 budget including `.md`, checked immediately before the write.
+
 Suggested fields:
 - `entityType: eow`
 - `id`
@@ -333,6 +381,16 @@ Suggested fields:
 - `status: done`
 
 Run EoW nodes should usually be connected by a `runEdge` with `edgeType: closes_with`.
+The edge must target the actual EoW ID returned by resolution or creation, not
+an independently reconstructed ID. This applies to automatic, review, and
+manual closure, so a compatible reused legacy EoW keeps its original edge
+target.
+
+Manual close first checks parsed logical closure across all supported ID
+formats. If the target already has an EoW, it retains the existing
+`already closed by EoW` error rather than acting as resolver-driven idempotent
+reuse. A fresh manual task or run close writes canonical v2; a fresh manual run
+edge targets the exact generated ID.
 
 - `closureRole: supporting` records provenance and is structurally validated,
   but it is not in the policy-approval denominator.
@@ -425,11 +483,15 @@ Validator should check at least:
 - independent `runs/<run-id>/` folders are valid
 - run nodes exist
 - run edges reference real run nodes or EoW nodes
+- canonical v2 EoW IDs decode strictly and match the raw frontmatter graph kind
+  and complete task/run ownership tuple
 - referenced source task/task-group-version ids exist if present
 - task `runRefs` and run-node `sourceTaskId` agree bidirectionally
 - delegated/waiting nodes include enough request/delegatee metadata
 - done terminal run paths have EoW nodes
 - run partial markers do not create `closes_with` edges
+- duplicate EoW IDs are rejected across the complete parsed work, not only
+  within one task version or run directory
 
 ### Policy-aware closure
 - structural closure is reported separately from policy-approved closure
@@ -438,11 +500,32 @@ Validator should check at least:
 - `manual_verified` / `manual_close` EoW nodes count as manual attestation, not policy-approved review
 - `informational` review remains advisory and does not count as policy-approved closure
 - summaries should surface mismatches such as active work with structurally complete graphs
+- action identity uses own-property cohort witnesses; legacy inference is
+  allowed only when `actionKind`, `attempt`, `predecessorRunNodeId`, and the
+  attached EoW's `closureRole` are all absent
+- malformed modern claims, including historical records, remain auditable but
+  cannot supply policy-approved evidence directly or through restart
+  carry-forward
 
 ### Legacy compatibility
 - legacy `entityType: project` and `run/` layouts remain readable
 - tasks without `acceptance`, or with `acceptance.mode: informational`, stay advisory/manual-compatible
 - stricter acceptance and semantic assertion gates apply to `enforced`, `guarded`, and `runner-managed` paths rather than breaking old informational notes
+- qualified-v1 and unqualified-v0 EoWs remain readable and are never renamed
+  or rewritten by a new writer
+
+Canonical v2 decoding is strict: accepted components must be primitive,
+non-empty, well-formed Unicode; token UTF-8 decoding is fatal; and every
+base64url token must re-encode exactly. A malformed v2 frame, graph tag,
+component, or non-canonical encoding is rejected. The parser also compares the
+decoded graph kind and tuple with raw frontmatter before task-version
+normalization, so malformed and wrong-tuple canonical records cannot be
+accepted accidentally.
+
+Restart carry-forward always writes the canonical task v2 ID for the actual
+destination version and task tuple. Its `preservedFromEowId` remains the
+source-exact ID, including a qualified-v1 or unqualified-v0 literal; provenance
+is never normalized to the destination codec or independently reconstructed.
 
 ## Selection model
 

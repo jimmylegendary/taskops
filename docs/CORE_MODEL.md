@@ -134,6 +134,38 @@ Rules:
 - `closureRole: claim-bearing` carries an objective result and requires a real,
   matching independent review before policy-approved completion.
 
+New TaskOps writers use deterministic v2 EoW IDs:
+
+- task: `eow-v2-t.<base64url(taskId UTF-8)>.<base64url(taskGroupVersionId UTF-8)>`
+- run: `eow-v2-r.<base64url(runNodeId UTF-8)>.<base64url(runId UTF-8)>`
+
+The dot-framed base64url components are reversible and make the work-wide EoW
+namespace injective across graph kind and tuple components. Consumers must
+treat the complete ID as opaque rather than infer semantics by splitting it.
+Existing qualified-v1 and unqualified-v0 IDs remain readable and immutable.
+New writes never rename or rewrite them.
+
+Canonical decoding accepts only primitive, non-empty, well-formed Unicode
+components, uses fatal UTF-8 decoding, and requires each token to re-encode to
+the exact canonical base64url spelling. The parser rejects malformed v2 IDs
+and compares the decoded graph kind and complete task/run tuple with raw
+frontmatter. Global duplicate-EoW rejection remains in force across task and
+run directories.
+
+Writers search for existing EoWs in canonical-v2, lossy qualified-v1, then
+original unqualified-v0 order. Reuse requires filename/frontmatter ID equality
+and exact ownership of the requested graph tuple. A qualified-v1 alternate
+owner may be skipped only when its valid stored tuple recomputes to that same
+lossy ID; other ownership mismatches are errors. Reused records remain
+byte-identical. Fresh canonical writes must pass a pre-write 255 UTF-8-byte
+budget for the whole filename including `.md`. Run `closes_with` edges target
+the actual reused or created EoW ID.
+
+Manual close preserves its logical-closure semantics: an already closed task
+or run node still produces the existing `already closed by EoW` error instead
+of idempotently reusing that record. A fresh manual close uses canonical v2,
+and its run edge targets the actual generated ID.
+
 ### 2.5.1 Partial
 
 Partial markers record honest unfinished progress for a task or run node. They are separate
@@ -179,10 +211,20 @@ Fields:
 - `status`
 - `sourceTaskId?`
 - `sourceTaskGroupVersionId?`
-- `actionKind?`
+- `actionKind`
 - `attempt?`
 - `predecessorRunNodeId?`
 - `createdAt`
+
+`actionKind` is required on every modern run node. It is legacy-optional only
+when `actionKind`, `attempt`, `predecessorRunNodeId`, and the attached EoW's
+`closureRole` are all absent as properties. Null or blank modern fields are
+malformed and cannot contribute policy-approved claim evidence.
+
+The four cohort witnesses are own-properties. Any one present own-property
+selects the modern contract, while inherited properties do not. Historical
+malformed claims remain parse-readable for audit, but cannot remain
+policy-approved or approve restart carry-forward provenance.
 
 Suggested `type` examples:
 - `execute`
@@ -367,6 +409,13 @@ acceptance/result hashes must match the current source task acceptance and the
 current claim-bearing run-node result; copied or stale hashes do not approve
 closure.
 
+- Restart carry-forward writes a canonical task v2 ID for the actual
+  destination task/version tuple. `preservedFromEowId` is copied from the
+  exact source record and is never normalized or reconstructed, so historical
+  qualified-v1 and unqualified-v0 provenance remains literal.
+- A carried record can be structurally readable without being policy-approved:
+  a malformed modern historical claim cannot become approved evidence merely
+  by passing through restart provenance.
 - `graph_closed_unapproved` means the graph is structurally closed but at least
   one claim lacks policy-approved evidence. It is not `all_closed`.
 
