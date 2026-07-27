@@ -1,0 +1,41 @@
+{
+  "stage": "stage-gpt54-smoke",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "judgeField": "official_resolved",
+  "arms": [
+    {
+      "key": "A",
+      "adapter": "run_swebench_bare.mjs",
+      "extraArgs": [],
+      "claimField": "claimed_done",
+      "resultPattern": "results/bare/verified-gpt54/bare-swe-codex-cli-gpt54-{id}.json"
+    },
+    {
+      "key": "C",
+      "adapter": "run_swebench.mjs",
+      "extraArgs": ["2"],
+      "claimField": "verified_done",
+      "resultPattern": "results/verified-gpt54/swebench-verified-{id}.json"
+    }
+  ],
+  "instances": [
+    "django__django-11179",
+    "django__django-11119",
+    "django__django-11066",
+    "django__django-11133"
+  ],
+  "concurrency": 1,
+  "globalWallMin": 240,
+  "perRunTimeoutMin": 40,
+  "maxAttemptsPerJob": 2,
+  "haltOnConsecutiveFailures": 3,
+  "env": {
+    "TASKOPS_SWE_EXECUTOR": "codex-cli",
+    "TASKOPS_CODEX_NATIVE_MODEL": "gpt-5.4",
+    "TASKOPS_CODEX_EFFORT": "medium",
+    "TASKOPS_SWE_RESULT_TAG": "gpt54",
+    "TASKOPS_MAX_WALL_MS": "1800000",
+    "SWEBENCH_CACHE_LEVEL": "instance"
+  },
+  "postJobCleanup": "docker rmi -f sweb.eval.x86_64.{id1776}:latest >/dev/null 2>&1 || true"
+}

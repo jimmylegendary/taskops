@@ -121,15 +121,19 @@ const rec = {
   agent_edited: diffLines != null && diffLines > 0,   // wiring check: did claude actually edit the seeded workspace?
   diff_lines: diffLines, verifyRetries, wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-// namespace by retries/arm/dataset so a k>0, no-verify, or Verified run never clobbers the pristine Lite k=0 baseline
+// namespace by retries/arm/dataset so a k>0, no-verify, or Verified run never clobbers the pristine Lite k=0 baseline.
+// TASKOPS_SWE_RESULT_TAG additionally namespaces by MODEL (e.g. "gpt54"): the same instance graded under a different
+// native model is a different measurement, and the Verified path is already occupied by the gpt-5.5 run (45 results).
 const verifiedSplit = /verified/i.test(dataset);
+const resultTag = (process.env.TASKOPS_SWE_RESULT_TAG || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
+const tagDir = resultTag ? `-${resultTag}` : '';
 if (noVerify) mkdirSync(join(EVAL, 'results', 'noverify'), { recursive: true });
-if (verifiedSplit) mkdirSync(join(EVAL, 'results', 'verified'), { recursive: true });
+if (verifiedSplit) mkdirSync(join(EVAL, 'results', `verified${tagDir}`), { recursive: true });
 const outFile = join(EVAL, 'results',
   noVerify ? `noverify/swebench-noverify-${instanceId}.json`
-  : verifiedSplit ? `verified/swebench-verified-${instanceId}.json`
-  : verifyRetries > 0 ? `swebench-k${verifyRetries}-${instanceId}.json`
-  : `swebench-${instanceId}.json`);
+  : verifiedSplit ? `verified${tagDir}/swebench-verified-${instanceId}.json`
+  : verifyRetries > 0 ? `swebench-k${verifyRetries}${tagDir}-${instanceId}.json`
+  : `swebench${tagDir}-${instanceId}.json`);
 writeFileSync(outFile, JSON.stringify(rec, null, 2), 'utf8');
 console.log(JSON.stringify(rec, null, 2));
 if (process.env.KEEP_RUN !== '1') rmSync(root, { recursive: true, force: true });
