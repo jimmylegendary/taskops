@@ -1,6 +1,14 @@
 import { basename, dirname, join } from 'node:path';
 import { validateRunNodeActionIdentity } from './lib-run-closure.js';
-import { runEowId, taskEowId } from './lib-run-identity.js';
+import {
+  assertEowFilenameBudget,
+  legacyQualifiedRunEowId,
+  legacyQualifiedTaskEowId,
+  runEowId,
+  runEowIdCandidates,
+  taskEowId,
+  taskEowIdCandidates,
+} from './lib-run-identity.js';
 
 function requireFn(io, name) {
   const fn = io?.[name];
@@ -166,27 +174,154 @@ function applyApprovedReviewToEow(fm, approvedReview) {
   if (approvedReview.oracleAccess) fm.oracleAccess = approvedReview.oracleAccess;
 }
 
+export function resolveExistingRunEowFile({
+  runDir,
+  runId,
+  runNodeId,
+}, io) {
+  const exists = requireFn(io, 'exists');
+  const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
+  const candidates = runEowIdCandidates({ runId, runNodeId });
+  const canonicalId = runEowId({ runId, runNodeId });
+  const qualifiedId = legacyQualifiedRunEowId({ runId, runNodeId });
+
+  for (const candidateId of candidates) {
+    const path = join(runDir, 'nodes', `${candidateId}.md`);
+    if (!exists(path)) continue;
+    const format = candidateId === canonicalId
+      ? 'canonical-v2'
+      : (candidateId === qualifiedId ? 'qualified-v1' : 'unqualified-v0');
+    const frontmatter = parseMarkdownFile(path);
+    if (frontmatter.id !== candidateId) {
+      throw new Error(
+        `Run EoW candidate '${candidateId}' frontmatter id mismatch`,
+      );
+    }
+    const runOwnerMatches = (
+      frontmatter.graphType === 'run'
+      && frontmatter.attachedToType === 'runNode'
+      && frontmatter.runId === runId
+      && frontmatter.attachedToId === runNodeId
+    );
+    if (runOwnerMatches) {
+      return {
+        id: candidateId,
+        path,
+        frontmatter,
+        format,
+      };
+    }
+    if (format === 'qualified-v1') {
+      let collisionOwnerMatches = false;
+      if (
+        frontmatter.graphType === 'run'
+        && frontmatter.attachedToType === 'runNode'
+      ) {
+        try {
+          collisionOwnerMatches = legacyQualifiedRunEowId({
+            runId: frontmatter.runId,
+            runNodeId: frontmatter.attachedToId,
+          }) === candidateId;
+        } catch {
+          collisionOwnerMatches = false;
+        }
+      }
+      if (collisionOwnerMatches) continue;
+    }
+    throw new Error(
+      `${format === 'canonical-v2' ? 'Canonical' : format === 'unqualified-v0' ? 'Unqualified' : 'Qualified'} EoW candidate '${candidateId}' is owned by another tuple`,
+    );
+  }
+  return null;
+}
+
+export function resolveExistingTaskEowFile({
+  versionDir,
+  taskGroupVersionId,
+  taskId,
+}, io) {
+  const exists = requireFn(io, 'exists');
+  const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
+  const candidates = taskEowIdCandidates({
+    taskGroupVersionId,
+    taskId,
+  });
+  const canonicalId = taskEowId({ taskGroupVersionId, taskId });
+  const qualifiedId = legacyQualifiedTaskEowId({
+    taskGroupVersionId,
+    taskId,
+  });
+
+  for (const candidateId of candidates) {
+    const path = join(versionDir, 'eow', `${candidateId}.md`);
+    if (!exists(path)) continue;
+    const format = candidateId === canonicalId
+      ? 'canonical-v2'
+      : (candidateId === qualifiedId ? 'qualified-v1' : 'unqualified-v0');
+    const frontmatter = parseMarkdownFile(path);
+    if (frontmatter.id !== candidateId) {
+      throw new Error(
+        `Task EoW candidate '${candidateId}' frontmatter id mismatch`,
+      );
+    }
+    const taskOwnerMatches = (
+      frontmatter.graphType === 'task'
+      && frontmatter.attachedToType === 'task'
+      && frontmatter.taskGroupVersionId === taskGroupVersionId
+      && frontmatter.attachedToId === taskId
+    );
+    if (taskOwnerMatches) {
+      return {
+        id: candidateId,
+        path,
+        frontmatter,
+        format,
+      };
+    }
+    if (format === 'qualified-v1') {
+      let collisionOwnerMatches = false;
+      if (
+        frontmatter.graphType === 'task'
+        && frontmatter.attachedToType === 'task'
+      ) {
+        try {
+          collisionOwnerMatches = legacyQualifiedTaskEowId({
+            taskGroupVersionId: frontmatter.taskGroupVersionId,
+            taskId: frontmatter.attachedToId,
+          }) === candidateId;
+        } catch {
+          collisionOwnerMatches = false;
+        }
+      }
+      if (collisionOwnerMatches) continue;
+    }
+    throw new Error(
+      `${format === 'canonical-v2' ? 'Canonical' : format === 'unqualified-v0' ? 'Unqualified' : 'Qualified'} EoW candidate '${candidateId}' is owned by another tuple`,
+    );
+  }
+  return null;
+}
+
 export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, closureRole, approvedReview = null, resolvedByTaskGroupId = null }, io) {
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
-  const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
   if (!['supporting', 'claim-bearing'].includes(closureRole)) {
     throw new Error(`Invalid run EoW closureRole '${closureRole}' for ${runNodeId}`);
   }
-  const qualifiedEowId = runEowId({ runId, runNodeId });
-  const qualifiedEowPath = join(runDir, 'nodes', `${qualifiedEowId}.md`);
-  const legacyEowId = `eow-${runNodeId}`;
-  const legacyEowPath = join(runDir, 'nodes', `${legacyEowId}.md`);
-  const existingEowPath = exists(qualifiedEowPath)
-    ? qualifiedEowPath
-    : (exists(legacyEowPath) ? legacyEowPath : null);
-  let eowRunNodeId = qualifiedEowId;
-  if (!existingEowPath) {
+  const canonicalId = runEowId({ runId, runNodeId });
+  const existing = resolveExistingRunEowFile({
+    runDir,
+    runId,
+    runNodeId,
+  }, io);
+  const eowRunNodeId = existing?.id || canonicalId;
+  if (!existing) {
+    const canonicalPath = join(runDir, 'nodes', `${canonicalId}.md`);
     const eowFm = {
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: qualifiedEowId,
+      id: canonicalId,
       runId,
       graphType: 'run',
       attachedToType: 'runNode',
@@ -200,23 +335,18 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
     };
     if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') eowFm.resolvedByTaskGroupId = resolvedByTaskGroupId;
     applyApprovedReviewToEow(eowFm, approvedReview);
-    writeTextFile(qualifiedEowPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
+    assertEowFilenameBudget(canonicalId);
+    writeTextFile(canonicalPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
   } else {
-    const current = parseMarkdownFile(existingEowPath);
-    eowRunNodeId = current.id;
-    for (const [field, expected] of Object.entries({
-      runId,
-      attachedToId: runNodeId,
+    const current = existing.frontmatter;
+    const immutableFields = {
       reason,
       closureRole,
-    })) {
-      if (
-        field === 'closureRole'
-        && existingEowPath === legacyEowPath
-        && current[field] == null
-      ) {
-        continue;
-      }
+    };
+    if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') {
+      immutableFields.resolvedByTaskGroupId = resolvedByTaskGroupId;
+    }
+    for (const [field, expected] of Object.entries(immutableFields)) {
       if (current[field] !== expected) {
         throw new Error(`Immutable run EoW mismatch for ${runNodeId}: ${field}`);
       }
@@ -252,19 +382,23 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
   const taskGroupVersionId = version?.id
     || task.taskGroupVersionId
     || basename(versionDir);
-  const eowTaskId = taskEowId({
+  const canonicalId = taskEowId({
     taskGroupVersionId,
     taskId: task.id,
   });
   const eowTaskDir = join(versionDir, 'eow');
   ensureDir(eowTaskDir);
-  const eowTaskPath = join(eowTaskDir, `${eowTaskId}.md`);
-  const legacyEowTaskPath = join(eowTaskDir, `eow-${task.id}.md`);
-  if (!exists(eowTaskPath) && !exists(legacyEowTaskPath)) {
+  const existing = resolveExistingTaskEowFile({
+    versionDir,
+    taskGroupVersionId,
+    taskId: task.id,
+  }, io);
+  if (!existing) {
+    const canonicalPath = join(eowTaskDir, `${canonicalId}.md`);
     const eowFm = {
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: eowTaskId,
+      id: canonicalId,
       graphType: 'task',
       attachedToType: 'task',
       attachedToId: task.id,
@@ -277,6 +411,17 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
     };
     if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') eowFm.resolvedByTaskGroupId = resolvedByTaskGroupId;
     applyApprovedReviewToEow(eowFm, approvedReview);
-    writeTextFile(eowTaskPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
+    assertEowFilenameBudget(canonicalId);
+    writeTextFile(canonicalPath, fmBlock(eowFm) + `# EoW: ${task.id}\n`);
+  } else {
+    const immutableFields = { reason };
+    if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') {
+      immutableFields.resolvedByTaskGroupId = resolvedByTaskGroupId;
+    }
+    for (const [field, expected] of Object.entries(immutableFields)) {
+      if (existing.frontmatter[field] !== expected) {
+        throw new Error(`Immutable task EoW mismatch for ${task.id}: ${field}`);
+      }
+    }
   }
 }

@@ -115,6 +115,8 @@ function makeWork(name, { acceptance, result }) {
     id: 'run-node-review',
     runId: 'run-main',
     type: 'implementation',
+    actionKind: 'execute',
+    attempt: 1,
     title: 'Review target',
     sourceTaskId: 'task-review',
     sourceTaskGroupVersionId: 'tgv-root-v1',
