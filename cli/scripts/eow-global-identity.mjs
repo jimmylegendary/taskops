@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import { closeTarget, reviewTarget, runTaskOps } from '../lib-runner.js';
 import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
 
@@ -130,6 +131,94 @@ function duplicateEowErrors(parsed) {
   return parsed.errors.filter((error) => /duplicate EoW id/i.test(error));
 }
 
+test('parser rejects malformed and tuple-inconsistent canonical EoWs', () => {
+  const fixture = seedSingleTaskWork('canonical-parser-errors');
+
+  const malformedId = 'eow-v2-r.A.A';
+  writeMd(
+    join(
+      fixture.workDir,
+      'runs/run-main/nodes',
+      `${malformedId}.md`,
+    ),
+    {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: malformedId,
+      runId: 'run-main',
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: 'run-node-missing',
+      reason: 'manual_close',
+      closureRole: 'supporting',
+      declaredBy: 'fixture',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    },
+  );
+
+  const wrongTupleId = runEowId({
+    runId: 'run-other',
+    runNodeId: 'run-node-missing',
+  });
+  writeMd(
+    join(
+      fixture.workDir,
+      'runs/run-main/nodes',
+      `${wrongTupleId}.md`,
+    ),
+    {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: wrongTupleId,
+      runId: 'run-main',
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: 'run-node-missing',
+      reason: 'manual_close',
+      closureRole: 'supporting',
+      declaredBy: 'fixture',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    },
+  );
+
+  const wrongKindId = runEowId({
+    runId: 'tgv-root-v1',
+    runNodeId: 'task',
+  });
+  writeMd(
+    join(fixture.versionDir, 'eow', `${wrongKindId}.md`),
+    {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: wrongKindId,
+      graphType: 'task',
+      attachedToType: 'task',
+      attachedToId: 'task',
+      taskGroupVersionId: 'tgv-root-v1',
+      reason: 'manual_close',
+      declaredBy: 'fixture',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    },
+  );
+
+  const parsed = parseProject(fixture.workDir);
+  assert.ok(parsed.errors.some((error) => (
+    /malformed canonical EoW id/i.test(error)
+  )));
+  assert.ok(parsed.errors.some((error) => (
+    /canonical run EoW tuple does not match frontmatter/i.test(error)
+  )));
+  assert.ok(parsed.errors.some((error) => (
+    /canonical EoW graph kind does not match frontmatter/i.test(error)
+  )));
+});
+
 test('separate runs of one task write run-qualified EoWs', () => {
   const fixture = seedSingleTaskWork('separate-runs', {
     uncertaintyState: 'unknown_known',
@@ -179,10 +268,13 @@ test('separate runs of one task write run-qualified EoWs', () => {
     ))
     .map((eow) => eow.id)
     .sort();
-  assert.deepEqual(actionEows, [
-    'eow-run-node-task-run-one',
-    'eow-run-node-task-run-two',
-  ]);
+  assert.deepEqual(
+    actionEows,
+    [
+      runEowId({ runId: 'run-one', runNodeId: 'run-node-task' }),
+      runEowId({ runId: 'run-two', runNodeId: 'run-node-task' }),
+    ].sort(),
+  );
 });
 
 test('a restarted verification worker keeps its prior run EoWs distinct', () => {
@@ -227,10 +319,19 @@ test('a restarted verification worker keeps its prior run EoWs distinct', () => 
     ))
     .map((eow) => eow.id)
     .sort();
-  assert.deepEqual(reviewEows, [
-    'eow-review-run-node-task-run-worker-one',
-    'eow-review-run-node-task-run-worker-restarted',
-  ]);
+  assert.deepEqual(
+    reviewEows,
+    [
+      runEowId({
+        runId: 'run-worker-one',
+        runNodeId: 'review-run-node-task',
+      }),
+      runEowId({
+        runId: 'run-worker-restarted',
+        runNodeId: 'review-run-node-task',
+      }),
+    ].sort(),
+  );
 });
 
 function seedTwoReviewRuns() {
@@ -357,10 +458,19 @@ test('independent reviews in separate runs write run-qualified review EoWs', () 
     ))
     .map((eow) => eow.id)
     .sort();
-  assert.deepEqual(reviewEows, [
-    'eow-review-run-node-task-run-review-one',
-    'eow-review-run-node-task-run-review-two',
-  ]);
+  assert.deepEqual(
+    reviewEows,
+    [
+      runEowId({
+        runId: 'run-review-one',
+        runNodeId: 'review-run-node-task',
+      }),
+      runEowId({
+        runId: 'run-review-two',
+        runNodeId: 'review-run-node-task',
+      }),
+    ].sort(),
+  );
 });
 
 function seedManualTaskClose() {
@@ -480,7 +590,10 @@ test('manual task close writes a version-qualified EoW', () => {
   const closed = closeTarget(workDir, 'task', {
     reason: 'manual_verified',
   });
-  assert.equal(closed.eowId, 'eow-task-tgv-root-v2');
+  assert.equal(
+    closed.eowId,
+    taskEowId({ taskGroupVersionId: 'tgv-root-v2', taskId: 'task' }),
+  );
   assert.deepEqual(
     duplicateEowErrors(parseProject(workDir)),
     [],
@@ -572,9 +685,13 @@ test('manual run-node close writes a run-qualified EoW and edge target', () => {
   const closed = closeTarget(workDir, 'run-node-manual', {
     reason: 'manual_close',
   });
-  assert.equal(closed.eowId, 'eow-run-node-manual-run-manual');
+  const expectedEowId = runEowId({
+    runId: 'run-manual',
+    runNodeId: 'run-node-manual',
+  });
+  assert.equal(closed.eowId, expectedEowId);
   const edge = parseMarkdownFile(closed.edgePath);
-  assert.equal(edge.toRunNodeId, closed.eowId);
+  assert.equal(edge.toRunNodeId, expectedEowId);
   assert.deepEqual(
     duplicateEowErrors(parseProject(workDir)),
     [],

@@ -3,7 +3,11 @@ import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter } from './lib-state-writer.js';
 import { classifyRunClosure } from './lib-run-closure.js';
-import { runEowId, taskEowId } from './lib-run-identity.js';
+import {
+  decodeCanonicalEowId,
+  runEowId,
+  taskEowId,
+} from './lib-run-identity.js';
 import {
   findSelectedRestartBlockedByIssues,
   rebaseBlockedByVersionRefs,
@@ -779,6 +783,46 @@ function blockedTaskEvidenceWarning(task) {
   return `blocked task '${task.id}' has status/runReadiness blocked but no blockedBy or explicit manual/external blocker marker`;
 }
 
+function canonicalEowIdentityIssues(eow) {
+  if (typeof eow?.id !== 'string' || !eow.id.startsWith('eow-v2-')) {
+    return [];
+  }
+
+  let decoded;
+  try {
+    decoded = decodeCanonicalEowId(eow.id);
+  } catch (error) {
+    return [error.message];
+  }
+
+  const issues = [];
+  if (
+    decoded.graphType !== eow.graphType
+    || decoded.attachedToType !== eow.attachedToType
+  ) {
+    issues.push('canonical EoW graph kind does not match frontmatter');
+    return issues;
+  }
+  if (decoded.attachedToId !== eow.attachedToId) {
+    issues.push(
+      `canonical ${decoded.graphType} EoW tuple does not match frontmatter`,
+    );
+  }
+  if (
+    decoded.graphType === 'run'
+    && decoded.runId !== eow.runId
+  ) {
+    issues.push('canonical run EoW tuple does not match frontmatter');
+  }
+  if (
+    decoded.graphType === 'task'
+    && decoded.taskGroupVersionId !== eow.taskGroupVersionId
+  ) {
+    issues.push('canonical task EoW tuple does not match frontmatter');
+  }
+  return [...new Set(issues)];
+}
+
 export function parseProject(projectDir) {
   const errors = [];
   const warnings = [];
@@ -804,6 +848,9 @@ export function parseProject(projectDir) {
   const runEowsByRunNodeKey = new Map();
 
   const addEow = (eow, filePath) => {
+    for (const issue of canonicalEowIdentityIssues(eow)) {
+      errors.push(withPath(filePath, issue));
+    }
     if (eowNodes.has(eow.id)) errors.push(withPath(filePath, `duplicate EoW id '${eow.id}'`));
     eowNodes.set(eow.id, { ...eow, path: filePath });
   };
