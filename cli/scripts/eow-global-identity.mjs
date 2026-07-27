@@ -10,9 +10,18 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
-import { runEowId, taskEowId } from '../lib-run-identity.js';
+import {
+  decodeCanonicalEowId,
+  runEowId,
+  taskEowId,
+} from '../lib-run-identity.js';
 import { closeTarget, reviewTarget, runTaskOps } from '../lib-runner.js';
-import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
+import {
+  fmBlock,
+  parseMarkdownFile,
+  parseProject,
+  restartFromTask,
+} from '../lib-taskops.js';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'taskops-eow-global-identity-'));
 const now = '2026-07-25T00:00:00.000Z';
@@ -90,7 +99,11 @@ function seedSingleTaskWork(name, taskOverrides = {}) {
       versionId: 'tgv-root-v1',
     }],
   });
-  const taskPath = join(versionDir, 'tasks', 'task.md');
+  const taskPath = join(
+    versionDir,
+    'tasks',
+    `${taskOverrides.id || 'task'}.md`,
+  );
   writeMd(taskPath, {
     taskOpsVersion: 'v1',
     entityType: 'task',
@@ -336,7 +349,7 @@ test('separate runs of one task write run-qualified EoWs', () => {
 
   const first = runTaskOps(fixture.workDir, {
     executor: 'dry-run',
-    runId: 'run-one',
+    runId: 'run+one',
     maxSteps: 1,
     maxStepsExplicit: true,
   });
@@ -346,7 +359,7 @@ test('separate runs of one task write run-qualified EoWs', () => {
 
   const second = runTaskOps(fixture.workDir, {
     executor: 'dry-run',
-    runId: 'run-two',
+    runId: 'run-one',
     maxSteps: 1,
     maxStepsExplicit: true,
   });
@@ -366,70 +379,280 @@ test('separate runs of one task write run-qualified EoWs', () => {
     ))
     .map((eow) => eow.id)
     .sort();
+  assert.equal(new Set(actionEows).size, 2);
+  assert.ok(actionEows.every((id) => id.startsWith('eow-v2-r.')));
   assert.deepEqual(
     actionEows,
     [
+      runEowId({ runId: 'run+one', runNodeId: 'run-node-task' }),
       runEowId({ runId: 'run-one', runNodeId: 'run-node-task' }),
-      runEowId({ runId: 'run-two', runNodeId: 'run-node-task' }),
     ].sort(),
   );
+  for (const runId of ['run+one', 'run-one']) {
+    const actual = [...parsed.eowNodes.values()].find((eow) => (
+      eow.graphType === 'run'
+      && eow.runId === runId
+      && eow.attachedToId === 'run-node-task'
+    ));
+    assert.ok(actual);
+    assert.deepEqual(decodeCanonicalEowId(actual.id), {
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: 'run-node-task',
+      runId,
+    });
+  }
 });
 
-test('a restarted verification worker keeps its prior run EoWs distinct', () => {
-  const fixture = seedSingleTaskWork('restarted-worker', {
-    acceptance: {
-      mode: 'runner-managed',
-      expectedOutcome: 'The deterministic check passes.',
-      requiredChecks: [{ id: 'check-fail', command: 'exit 1' }],
-    },
+test('tasks that collide under the legacy sanitizer write distinct canonical EoWs', () => {
+  const fixture = seedSingleTaskWork('task-collision', {
+    id: 'task+a',
+    title: 'Complete the plus task',
+    objective: 'Complete the plus task.',
+    responsibility: 'Own the plus result.',
+    completionCriteria: 'The plus result is recorded.',
+    order: 1,
+  });
+  writeMd(join(fixture.versionDir, 'tasks', 'task-a.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'task',
+    id: 'task-a',
+    taskGroupId: 'tg-root',
+    taskGroupVersionId: 'tgv-root-v1',
+    title: 'Complete the hyphen task',
+    objective: 'Complete the hyphen task.',
+    responsibility: 'Own the hyphen result.',
+    completionCriteria: 'The hyphen result is recorded.',
+    order: 2,
+    createdAt: now,
+    status: 'pending',
+    runReadiness: 'runnable',
+    understandingLevel: 'known',
   });
 
-  const first = runTaskOps(fixture.workDir, {
+  const result = runTaskOps(fixture.workDir, {
     executor: 'dry-run',
-    runId: 'run-worker-one',
-    maxSteps: 1,
+    runId: 'run-task-collision',
+    maxSteps: 2,
     maxStepsExplicit: true,
-    verifyChecks: true,
-    verifyRetries: 1,
   });
-  assert.equal(first.actions[0].status, 'retry');
-
-  const restarted = runTaskOps(fixture.workDir, {
-    executor: 'dry-run',
-    runId: 'run-worker-restarted',
-    maxSteps: 1,
-    maxStepsExplicit: true,
-    verifyChecks: true,
-    verifyRetries: 1,
-  });
-  assert.equal(restarted.actions[0].kind, 'execute');
+  assert.deepEqual(
+    result.actions.map((action) => action.status),
+    ['completed', 'completed'],
+  );
 
   const parsed = parseProject(fixture.workDir);
+  const taskEows = [...parsed.eowNodes.values()].filter((eow) => (
+    eow.graphType === 'task'
+    && eow.taskGroupVersionId === 'tgv-root-v1'
+  ));
+  assert.equal(taskEows.length, 2);
   assert.deepEqual(
-    duplicateEowErrors(parsed),
-    [],
-    'a restarted worker must not collide with the prior worker run',
+    new Set(taskEows.map((eow) => eow.attachedToId)),
+    new Set(['task+a', 'task-a']),
   );
-  const reviewEows = [...parsed.eowNodes.values()]
-    .filter((eow) => (
-      eow.graphType === 'run'
-      && eow.attachedToId === 'review-run-node-task'
-    ))
-    .map((eow) => eow.id)
-    .sort();
-  assert.deepEqual(
-    reviewEows,
-    [
-      runEowId({
-        runId: 'run-worker-one',
-        runNodeId: 'review-run-node-task',
-      }),
-      runEowId({
-        runId: 'run-worker-restarted',
-        runNodeId: 'review-run-node-task',
-      }),
-    ].sort(),
+  assert.equal(new Set(taskEows.map((eow) => eow.id)).size, 2);
+  assert.ok(taskEows.every((eow) => eow.id.startsWith('eow-v2-t.')));
+  for (const taskId of ['task+a', 'task-a']) {
+    const actual = taskEows.find((eow) => eow.attachedToId === taskId);
+    assert.ok(actual);
+    assert.deepEqual(decodeCanonicalEowId(actual.id), {
+      graphType: 'task',
+      attachedToType: 'task',
+      attachedToId: taskId,
+      taskGroupVersionId: 'tgv-root-v1',
+    });
+  }
+  assert.equal(parsed.closure.terminalTaskEowCount, 2);
+  assert.deepEqual(duplicateEowErrors(parsed), []);
+});
+
+function seedRestartCollision() {
+  const workDir = join(tempRoot, 'restart-collision');
+  const groupDir = join(workDir, 'task-groups', 'tg-root');
+  const sourceVersionDir = join(groupDir, 'versions', 'tgv-root-v2');
+  const historicalVersionDir = join(groupDir, 'versions', 'tgv-root+v3');
+  const sourceEowId = 'eow-task+a';
+  writeMd(join(workDir, 'index.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'work',
+    id: 'restart-collision',
+    title: 'Restart collision',
+    objective: 'Carry an exact upstream closure into a collision-safe version.',
+    activeRootTaskGroupId: 'tg-root',
+    activeSnapshotId: 'snapshot-root-v2',
+    createdAt: now,
+    status: 'active',
+  });
+  writeMd(join(groupDir, 'index.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'taskGroup',
+    id: 'tg-root',
+    objective: 'Restart the downstream task.',
+    activeVersionId: 'tgv-root-v2',
+    createdAt: now,
+    status: 'active',
+  });
+  writeMd(join(sourceVersionDir, 'index.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'taskGroupVersion',
+    id: 'tgv-root-v2',
+    taskGroupId: 'tg-root',
+    version: 'v2',
+    summary: 'Selected restart source.',
+    selected: true,
+    createdAt: now,
+    status: 'active',
+  });
+  writeMd(join(historicalVersionDir, 'index.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'taskGroupVersion',
+    id: 'tgv-root+v3',
+    taskGroupId: 'tg-root',
+    version: 'v3-legacy-collision',
+    summary: 'Unselected legacy collision fixture.',
+    selected: false,
+    createdAt: now,
+    status: 'done',
+  });
+  writeMd(join(workDir, 'snapshots', 'snapshot-root-v2.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'versionSnapshot',
+    id: 'snapshot-root-v2',
+    rootTaskGroupId: 'tg-root',
+    createdAt: now,
+    label: 'Root v2',
+    status: 'active',
+    selectedVersions: [{
+      taskGroupId: 'tg-root',
+      versionId: 'tgv-root-v2',
+    }],
+  });
+  writeMd(join(historicalVersionDir, 'tasks', 'task-a.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'task',
+    id: 'task-a',
+    taskGroupId: 'tg-root',
+    taskGroupVersionId: 'tgv-root+v3',
+    title: 'Historical collision task',
+    objective: 'Remain an unselected historical record.',
+    responsibility: 'Preserve the old lossy identity.',
+    completionCriteria: 'The historical closure remains readable.',
+    order: 1,
+    createdAt: now,
+    status: 'done',
+    runReadiness: 'runnable',
+    understandingLevel: 'known',
+  });
+  writeMd(
+    join(historicalVersionDir, 'eow', 'eow-task-a-tgv-root-v3.md'),
+    {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: 'eow-task-a-tgv-root-v3',
+      graphType: 'task',
+      attachedToType: 'task',
+      attachedToId: 'task-a',
+      taskGroupVersionId: 'tgv-root+v3',
+      reason: 'execution_path_closed',
+      declaredBy: 'fixture',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    },
   );
+  writeMd(join(sourceVersionDir, 'tasks', 'task+a.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'task',
+    id: 'task+a',
+    taskGroupId: 'tg-root',
+    taskGroupVersionId: 'tgv-root-v2',
+    title: 'Completed upstream task',
+    objective: 'Preserve the upstream result through restart.',
+    responsibility: 'Own the preserved upstream proof.',
+    completionCriteria: 'The upstream proof is carried forward exactly.',
+    order: 1,
+    createdAt: now,
+    status: 'done',
+    runReadiness: 'runnable',
+    understandingLevel: 'known',
+  });
+  writeMd(join(sourceVersionDir, 'eow', `${sourceEowId}.md`), {
+    taskOpsVersion: 'v1',
+    entityType: 'eow',
+    id: sourceEowId,
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: 'task+a',
+    taskGroupVersionId: 'tgv-root-v2',
+    reason: 'execution_path_closed',
+    declaredBy: 'fixture',
+    declaredAt: now,
+    createdAt: now,
+    status: 'done',
+  });
+  writeMd(join(sourceVersionDir, 'tasks', 'task-restart.md'), {
+    taskOpsVersion: 'v1',
+    entityType: 'task',
+    id: 'task-restart',
+    taskGroupId: 'tg-root',
+    taskGroupVersionId: 'tgv-root-v2',
+    title: 'Restart downstream task',
+    objective: 'Retry downstream work.',
+    responsibility: 'Own the downstream retry.',
+    completionCriteria: 'The downstream work succeeds after restart.',
+    order: 2,
+    createdAt: now,
+    status: 'pending',
+    runReadiness: 'runnable',
+    understandingLevel: 'known',
+  });
+  writeRunIndex(workDir, 'run-main', 'restart-collision');
+  return { workDir, sourceEowId };
+}
+
+test('restart carry-forward survives a legacy destination collision', () => {
+  const { workDir, sourceEowId } = seedRestartCollision();
+  assert.deepEqual(parseProject(workDir).errors, []);
+  const restarted = restartFromTask(workDir, {
+    fromTaskId: 'task-restart',
+    instruction: 'Retry the downstream task with preserved upstream proof.',
+    reason: 'identity collision regression',
+  });
+  assert.equal(restarted.toVersionId, 'tgv-root-v3');
+
+  const parsed = parseProject(workDir);
+  const source = [...parsed.eowNodes.values()].find((eow) => (
+    eow.graphType === 'task'
+    && eow.taskGroupVersionId === restarted.fromVersionId
+    && eow.attachedToId === 'task+a'
+  ));
+  assert.ok(source);
+  assert.equal(source.id, sourceEowId);
+  const carried = [...parsed.eowNodes.values()].find((eow) => (
+    eow.graphType === 'task'
+    && eow.taskGroupVersionId === restarted.toVersionId
+    && eow.attachedToId === 'task+a'
+  ));
+  assert.ok(carried);
+  assert.equal(
+    carried.id,
+    taskEowId({
+      taskGroupVersionId: restarted.toVersionId,
+      taskId: 'task+a',
+    }),
+  );
+  assert.deepEqual(decodeCanonicalEowId(carried.id), {
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: 'task+a',
+    taskGroupVersionId: restarted.toVersionId,
+  });
+  assert.equal(carried.taskGroupVersionId, restarted.toVersionId);
+  assert.equal(carried.preservedFromVersionId, restarted.fromVersionId);
+  assert.equal(carried.preservedFromEowId, source.id);
+  assert.notEqual(carried.id, 'eow-task-a-tgv-root-v3');
+  assert.deepEqual(duplicateEowErrors(parsed), []);
 });
 
 function seedTwoReviewRuns() {
@@ -442,12 +665,12 @@ function seedTwoReviewRuns() {
     },
     runRefs: [
       {
-        runId: 'run-review-one',
+        runId: 'run-review+one',
         runNodeId: 'run-node-task',
         role: 'primary_execution',
       },
       {
-        runId: 'run-review-two',
+        runId: 'run-review-one',
         runNodeId: 'run-node-task',
         role: 'primary_execution',
       },
@@ -467,7 +690,7 @@ function seedTwoReviewRuns() {
     createdAt: now,
     status: 'done',
   });
-  for (const runId of ['run-review-one', 'run-review-two']) {
+  for (const runId of ['run-review+one', 'run-review-one']) {
     writeRunIndex(fixture.workDir, runId, 'review-runs');
     writeMd(join(fixture.workDir, 'runs', runId, 'nodes', 'run-node-task.md'), {
       taskOpsVersion: 'v1',
@@ -532,16 +755,16 @@ test('independent reviews in separate runs write run-qualified review EoWs', () 
   const fixture = seedTwoReviewRuns();
   assert.deepEqual(parseProject(fixture.workDir).errors, []);
 
-  const secondReview = reviewTarget(fixture.workDir, 'task');
-  assert.equal(secondReview.target.runId, 'run-review-two');
+  const hyphenReview = reviewTarget(fixture.workDir, 'task');
+  assert.equal(hyphenReview.target.runId, 'run-review-one');
 
   const taskFm = parseMarkdownFile(fixture.taskPath);
   writeMd(fixture.taskPath, {
     ...taskFm,
     runRefs: [...taskFm.runRefs].reverse(),
   });
-  const firstReview = reviewTarget(fixture.workDir, 'task');
-  assert.equal(firstReview.target.runId, 'run-review-one');
+  const plusReview = reviewTarget(fixture.workDir, 'task');
+  assert.equal(plusReview.target.runId, 'run-review+one');
 
   const parsed = parseProject(fixture.workDir);
   assert.deepEqual(
@@ -553,22 +776,44 @@ test('independent reviews in separate runs write run-qualified review EoWs', () 
     .filter((eow) => (
       eow.graphType === 'run'
       && eow.attachedToId === 'review-run-node-task'
-    ))
-    .map((eow) => eow.id)
-    .sort();
+    ));
+  const reviewEowIds = reviewEows.map((eow) => eow.id).sort();
+  assert.equal(new Set(reviewEowIds).size, 2);
+  assert.ok(reviewEowIds.every((id) => id.startsWith('eow-v2-r.')));
   assert.deepEqual(
-    reviewEows,
+    reviewEowIds,
     [
+      runEowId({
+        runId: 'run-review+one',
+        runNodeId: 'review-run-node-task',
+      }),
       runEowId({
         runId: 'run-review-one',
         runNodeId: 'review-run-node-task',
       }),
-      runEowId({
-        runId: 'run-review-two',
-        runNodeId: 'review-run-node-task',
-      }),
     ].sort(),
   );
+  for (const runId of ['run-review+one', 'run-review-one']) {
+    const reviewEow = reviewEows.find((eow) => eow.runId === runId);
+    assert.ok(reviewEow);
+    assert.equal(
+      reviewEow.id,
+      runEowId({ runId, runNodeId: 'review-run-node-task' }),
+    );
+    assert.deepEqual(decodeCanonicalEowId(reviewEow.id), {
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: 'review-run-node-task',
+      runId,
+    });
+    const closesWithEdge = [...parsed.runEdges.values()].find((edge) => (
+      edge.runId === runId
+      && edge.fromRunNodeId === 'review-run-node-task'
+      && edge.edgeType === 'closes_with'
+    ));
+    assert.ok(closesWithEdge);
+    assert.equal(closesWithEdge.toRunNodeId, reviewEow.id);
+  }
 });
 
 function seedManualTaskClose() {
@@ -607,6 +852,7 @@ function seedManualTaskClose() {
     createdAt: now,
     status: 'done',
   });
+  mkdirSync(join(v1, 'tasks'), { recursive: true });
   writeMd(join(v2, 'index.md'), {
     taskOpsVersion: 'v1',
     entityType: 'taskGroupVersion',
@@ -632,47 +878,47 @@ function seedManualTaskClose() {
       versionId: 'tgv-root-v2',
     }],
   });
-  writeMd(join(v1, 'tasks', 'historical.md'), {
+  writeMd(join(v2, 'tasks', 'task+manual.md'), {
     taskOpsVersion: 'v1',
     entityType: 'task',
-    id: 'historical',
+    id: 'task+manual',
     taskGroupId: 'tg-root',
-    taskGroupVersionId: 'tgv-root-v1',
-    title: 'Historical task',
-    objective: 'Remain historical.',
-    responsibility: 'Record history.',
-    completionCriteria: 'History exists.',
+    taskGroupVersionId: 'tgv-root-v2',
+    title: 'Historical plus task',
+    objective: 'Remain closed as a historical compatibility record.',
+    responsibility: 'Record the historical plus result.',
+    completionCriteria: 'The historical plus closure exists.',
     order: 1,
     createdAt: now,
     status: 'done',
     runReadiness: 'runnable',
     understandingLevel: 'known',
   });
-  writeMd(join(v1, 'eow', 'eow-task.md'), {
+  writeMd(join(v2, 'eow', 'eow-task-manual-tgv-root-v2.md'), {
     taskOpsVersion: 'v1',
     entityType: 'eow',
-    id: 'eow-task',
+    id: 'eow-task-manual-tgv-root-v2',
     graphType: 'task',
     attachedToType: 'task',
-    attachedToId: 'historical',
-    taskGroupVersionId: 'tgv-root-v1',
+    attachedToId: 'task+manual',
+    taskGroupVersionId: 'tgv-root-v2',
     reason: 'manual_close',
     declaredBy: 'fixture',
     declaredAt: now,
     createdAt: now,
     status: 'done',
   });
-  writeMd(join(v2, 'tasks', 'task.md'), {
+  writeMd(join(v2, 'tasks', 'task-manual.md'), {
     taskOpsVersion: 'v1',
     entityType: 'task',
-    id: 'task',
+    id: 'task-manual',
     taskGroupId: 'tg-root',
     taskGroupVersionId: 'tgv-root-v2',
-    title: 'Selected task',
+    title: 'Selected hyphen task',
     objective: 'Close manually.',
     responsibility: 'Own the manual result.',
     completionCriteria: 'Manual attestation exists.',
-    order: 1,
+    order: 2,
     createdAt: now,
     status: 'pending',
     runReadiness: 'runnable',
@@ -685,13 +931,22 @@ function seedManualTaskClose() {
 test('manual task close writes a version-qualified EoW', () => {
   const workDir = seedManualTaskClose();
   assert.deepEqual(parseProject(workDir).errors, []);
-  const closed = closeTarget(workDir, 'task', {
+  const closed = closeTarget(workDir, 'task-manual', {
     reason: 'manual_verified',
   });
   assert.equal(
     closed.eowId,
-    taskEowId({ taskGroupVersionId: 'tgv-root-v2', taskId: 'task' }),
+    taskEowId({
+      taskGroupVersionId: 'tgv-root-v2',
+      taskId: 'task-manual',
+    }),
   );
+  assert.deepEqual(decodeCanonicalEowId(closed.eowId), {
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: 'task-manual',
+    taskGroupVersionId: 'tgv-root-v2',
+  });
   assert.deepEqual(
     duplicateEowErrors(parseProject(workDir)),
     [],
@@ -701,19 +956,18 @@ test('manual task close writes a version-qualified EoW', () => {
 
 function seedManualRunClose() {
   const fixture = seedSingleTaskWork('manual-run-close');
-  writeRunIndex(fixture.workDir, 'run-history', 'manual-run-close');
   writeRunIndex(fixture.workDir, 'run-manual', 'manual-run-close');
   writeMd(
-    join(fixture.workDir, 'runs', 'run-history', 'nodes', 'historical-node.md'),
+    join(fixture.workDir, 'runs', 'run-manual', 'nodes', 'run-node+manual.md'),
     {
       taskOpsVersion: 'v1',
       entityType: 'runNode',
-      id: 'historical-node',
-      runId: 'run-history',
+      id: 'run-node+manual',
+      runId: 'run-manual',
       type: 'loopback',
       actionKind: 'loopback',
       attempt: 1,
-      title: 'Historical node',
+      title: 'Historical plus node',
       status: 'done',
       createdAt: now,
     },
@@ -722,18 +976,18 @@ function seedManualRunClose() {
     join(
       fixture.workDir,
       'runs',
-      'run-history',
+      'run-manual',
       'nodes',
-      'eow-run-node-manual.md',
+      'eow-run-node-manual-run-manual.md',
     ),
     {
       taskOpsVersion: 'v1',
       entityType: 'eow',
-      id: 'eow-run-node-manual',
-      runId: 'run-history',
+      id: 'eow-run-node-manual-run-manual',
+      runId: 'run-manual',
       graphType: 'run',
       attachedToType: 'runNode',
-      attachedToId: 'historical-node',
+      attachedToId: 'run-node+manual',
       reason: 'manual_close',
       closureRole: 'supporting',
       declaredBy: 'fixture',
@@ -743,14 +997,14 @@ function seedManualRunClose() {
     },
   );
   writeMd(
-    join(fixture.workDir, 'runs', 'run-history', 'edges', 'edge-history-to-eow.md'),
+    join(fixture.workDir, 'runs', 'run-manual', 'edges', 'edge-history-to-eow.md'),
     {
       taskOpsVersion: 'v1',
       entityType: 'runEdge',
       id: 'edge-history-to-eow',
-      runId: 'run-history',
-      fromRunNodeId: 'historical-node',
-      toRunNodeId: 'eow-run-node-manual',
+      runId: 'run-manual',
+      fromRunNodeId: 'run-node+manual',
+      toRunNodeId: 'eow-run-node-manual-run-manual',
       edgeType: 'closes_with',
       createdAt: now,
       status: 'done',
@@ -780,16 +1034,22 @@ function seedManualRunClose() {
 test('manual run-node close writes a run-qualified EoW and edge target', () => {
   const workDir = seedManualRunClose();
   assert.deepEqual(parseProject(workDir).errors, []);
-  const closed = closeTarget(workDir, 'run-node-manual', {
+  const runClosed = closeTarget(workDir, 'run-node-manual', {
     reason: 'manual_close',
   });
   const expectedEowId = runEowId({
     runId: 'run-manual',
     runNodeId: 'run-node-manual',
   });
-  assert.equal(closed.eowId, expectedEowId);
-  const edge = parseMarkdownFile(closed.edgePath);
-  assert.equal(edge.toRunNodeId, expectedEowId);
+  assert.equal(runClosed.eowId, expectedEowId);
+  assert.deepEqual(decodeCanonicalEowId(runClosed.eowId), {
+    graphType: 'run',
+    attachedToType: 'runNode',
+    attachedToId: 'run-node-manual',
+    runId: 'run-manual',
+  });
+  const runEdge = parseMarkdownFile(runClosed.edgePath);
+  assert.equal(runEdge.toRunNodeId, runClosed.eowId);
   assert.deepEqual(
     duplicateEowErrors(parseProject(workDir)),
     [],

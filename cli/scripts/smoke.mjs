@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { insertRunnerAttempt } from '../lib-queue.js';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import { filterConcurrentTargetValidationErrors, runTaskOps, sanitizeFmScalar } from '../lib-runner.js';
 import { parseFrontmatterText } from '../lib-taskops.js';
 
@@ -282,11 +283,21 @@ if (!firstTaskAfter.includes('status: done') || !firstTaskAfter.includes('runRef
   console.error(firstTaskAfter);
   process.exit(1);
 }
-const taskEowPath = join(runnerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-first-tgv-root-v2.md');
-const runEowPath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'eow-run-node-task-first-run-main.md');
+const firstTaskEowId = taskEowId({
+  taskGroupVersionId: 'tgv-root-v2',
+  taskId: 'task-first',
+});
+const taskEowPath = join(runnerWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', `${firstTaskEowId}.md`);
+const runEowPath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', `${runEowId({
+  runId: 'run-main',
+  runNodeId: 'run-node-task-first',
+})}.md`);
 const runEdgePath = join(runnerWorkDir, 'runs', 'run-main', 'edges', 'edge-run-node-task-first-to-eow.md');
 const reviewNodePath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'review-run-node-task-first.md');
-const reviewEowPath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', 'eow-review-run-node-task-first-run-main.md');
+const reviewEowPath = join(runnerWorkDir, 'runs', 'run-main', 'nodes', `${runEowId({
+  runId: 'run-main',
+  runNodeId: 'review-run-node-task-first',
+})}.md`);
 const reviewEdgePath = join(runnerWorkDir, 'runs', 'run-main', 'edges', 'edge-run-node-task-first-to-review-run-node-task-first.md');
 for (const p of [taskEowPath, runEowPath, runEdgePath, reviewNodePath, reviewEowPath, reviewEdgePath]) {
   try { readFileSync(p, 'utf8'); } catch {
@@ -320,7 +331,7 @@ if (manualReview.reviewReport.decision !== 'approved' || manualReview.reviewNode
   process.exit(1);
 }
 const runnerSummary = run(['summary', runnerWorkDir]).stdout;
-if (!runnerSummary.includes('task task-first [done; runnable]') || !runnerSummary.includes('run-main/run-node-task-first') || !runnerSummary.includes('EoW eow-task-first-tgv-root-v2')) {
+if (!runnerSummary.includes('task task-first [done; runnable]') || !runnerSummary.includes('run-main/run-node-task-first') || !runnerSummary.includes(`EoW ${firstTaskEowId}`)) {
   console.error('Runner summary missing expected entries');
   console.error(runnerSummary);
   process.exit(1);
@@ -1252,7 +1263,10 @@ if (exploreTaskAfter.includes('status: done') || !exploreTaskAfter.includes('sta
   console.error(exploreTaskAfter);
   process.exit(1);
 }
-if (existsSync(join(dispatchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-explore-tgv-root-v2.md'))) {
+if (existsSync(join(dispatchWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', `${taskEowId({
+  taskGroupVersionId: 'tgv-root-v2',
+  taskId: 'task-explore',
+})}.md`))) {
   console.error('exploration must NOT attach a task-EoW to the source objective task (task graph stays open)');
   process.exit(1);
 }
@@ -1527,7 +1541,10 @@ if (!/refuse to close|status is/.test(closeMissingReason.stderr)) {
 }
 
 const closeOk = JSON.parse(run(['close', honestDir, 'task-honest-blocked', '--reason', 'manual_verified', '--json']).stdout);
-if (closeOk.closed !== true || closeOk.target.type !== 'task' || closeOk.target.id !== 'task-honest-blocked' || closeOk.eowId !== 'eow-task-honest-blocked-tgv-root-v2') {
+if (closeOk.closed !== true || closeOk.target.type !== 'task' || closeOk.target.id !== 'task-honest-blocked' || closeOk.eowId !== taskEowId({
+  taskGroupVersionId: 'tgv-root-v2',
+  taskId: 'task-honest-blocked',
+})) {
   console.error('Expected manual_verified close to write EoW for task-honest-blocked');
   console.error(closeOk);
   process.exit(1);
@@ -1587,7 +1604,10 @@ if (!runEowBody.includes('reason: superseded') || !runEowBody.includes('graphTyp
   process.exit(1);
 }
 const runEdgeBody = readFileSync(closeRunNodeOk.edgePath, 'utf8');
-if (!runEdgeBody.includes('edgeType: closes_with') || !runEdgeBody.includes('toRunNodeId: eow-run-node-manual-run-main')) {
+if (!runEdgeBody.includes('edgeType: closes_with') || !runEdgeBody.includes(`toRunNodeId: ${runEowId({
+  runId: 'run-main',
+  runNodeId: 'run-node-manual',
+})}`)) {
   console.error('Run-node close did not write expected closes_with edge');
   console.error(runEdgeBody);
   process.exit(1);
@@ -1772,7 +1792,10 @@ if (!downstreamAfter.includes('status: pending')) {
   process.exit(1);
 }
 const newVersionEowDir = join(restartDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3', 'eow');
-const upstreamEow = readFileSync(join(newVersionEowDir, 'eow-task-upstream-tgv-root-v3.md'), 'utf8');
+const upstreamEow = readFileSync(join(newVersionEowDir, `${taskEowId({
+  taskGroupVersionId: 'tgv-root-v3',
+  taskId: 'task-upstream',
+})}.md`), 'utf8');
 if (!upstreamEow.includes('reason: preserved_upstream_after_restart') || !upstreamEow.includes('preservedFromVersionId: tgv-root-v2')) {
   console.error('Preservation EoW must use preserved_upstream_after_restart reason');
   console.error(upstreamEow);

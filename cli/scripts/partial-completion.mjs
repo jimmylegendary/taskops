@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { auditParsedWork } from '../lib-audit.js';
+import { taskEowId } from '../lib-run-identity.js';
 import { parseMarkdownFile, parseProject } from '../lib-taskops.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -61,7 +62,11 @@ function makePartialWork(name) {
 try {
   const workDir = makePartialWork('partial-work');
   const taskPath = join(workDir, 'task-groups/tg-root/versions/tgv-root-v2/tasks/task-partial.md');
-  const canonicalEowPath = join(workDir, 'task-groups/tg-root/versions/tgv-root-v2/eow/eow-task-partial-tgv-root-v2.md');
+  const canonicalEowId = taskEowId({
+    taskGroupVersionId: 'tgv-root-v2',
+    taskId: 'task-partial',
+  });
+  const canonicalEowPath = join(workDir, `task-groups/tg-root/versions/tgv-root-v2/eow/${canonicalEowId}.md`);
   const beforeStatus = parseMarkdownFile(taskPath).status;
 
   const partial = JSON.parse(run([
@@ -110,7 +115,7 @@ try {
 
   parsed = parseProject(workDir);
   assert.equal(parsed.errors.length, 0, parsed.errors.join('\n'));
-  assert.equal(parsed.eowNodes.has('eow-task-partial-tgv-root-v2'), true, 'canonical EoW should be parsed as an EoW node');
+  assert.equal(parsed.eowNodes.has(canonicalEowId), true, 'canonical EoW should be parsed as an EoW node');
   assert.equal(parsed.partialNodes.has(partial.partialId), true, 'partial marker should remain separate evidence');
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

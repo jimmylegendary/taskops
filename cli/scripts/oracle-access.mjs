@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { taskEowId } from '../lib-run-identity.js';
 import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
 import { runTaskOps, reviewTarget, buildFailureCertificate } from '../lib-runner.js';
 import { auditParsedWork, renderAuditText } from '../lib-audit.js';
@@ -37,7 +38,13 @@ const rewriteTask = (w, mutate) => {
   mutate(fm);
   writeFileSync(taskPath(w), `${fmBlock(fm)}# t\n`, 'utf8');
 };
-const eowPath = (w) => join(w, `${tv}/eow/eow-t-tgv-root-v1.md`);
+const eowPath = (w) => join(
+  w,
+  `${tv}/eow/${taskEowId({
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 't',
+  })}.md`,
+);
 const readEow = (w) => parseMarkdownFile(eowPath(w));
 const rewriteEow = (w, mutate) => {
   const fm = parseMarkdownFile(eowPath(w));
@@ -158,7 +165,7 @@ const readReviewNode = (w) => {
   md(`${tv}/tasks/task-review.md`, { taskOpsVersion: 'v1', entityType: 'task', id: 'task-review', taskGroupId: 'tg-root', taskGroupVersionId: 'tgv-root-v1', title: 'Review target', objective: 'x', responsibility: 'own', completionCriteria: 'check', order: 1, createdAt: now, status: 'done', runReadiness: 'runnable', understandingLevel: 'known', runRefs: [{ runId: 'run-main', runNodeId: 'run-node-review', role: 'primary_execution' }], acceptance: { mode: 'guarded', expectedOutcome: 'check', requiredChecks: [{ command: 'node -e 0', oracle: true }] } });
   md(`${tv}/eow/eow-task-review.md`, { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-task-review', graphType: 'task', attachedToType: 'task', attachedToId: 'task-review', taskGroupVersionId: 'tgv-root-v1', reason: 'execution_path_closed', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
   md('runs/run-main/index.md', { taskOpsVersion: 'v1', entityType: 'run', id: 'run-main', workId: 'oa7', createdAt: now, status: 'active' });
-  md('runs/run-main/nodes/run-node-review.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review', runId: 'run-main', type: 'implementation', title: 'Review target', sourceTaskId: 'task-review', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, result: { executorSummary: 'ran check', observed: { outcomeSummary: 'check passed', checkResults: [{ command: 'node -e 0', status: 'passed' }], evidenceRefs: ['run:run-main/node:run-node-review'] } } });
+  md('runs/run-main/nodes/run-node-review.md', { taskOpsVersion: 'v1', entityType: 'runNode', id: 'run-node-review', runId: 'run-main', type: 'implementation', actionKind: 'execute', title: 'Review target', sourceTaskId: 'task-review', sourceTaskGroupVersionId: 'tgv-root-v1', status: 'done', createdAt: now, result: { executorSummary: 'ran check', observed: { outcomeSummary: 'check passed', checkResults: [{ command: 'node -e 0', status: 'passed' }], evidenceRefs: ['run:run-main/node:run-node-review'] } } });
   md('runs/run-main/nodes/eow-run-node-review.md', { taskOpsVersion: 'v1', entityType: 'eow', id: 'eow-run-node-review', runId: 'run-main', graphType: 'run', attachedToType: 'runNode', attachedToId: 'run-node-review', reason: 'execution_path_closed', closureRole: 'claim-bearing', declaredBy: 'test', declaredAt: now, createdAt: now, status: 'done' });
   md('runs/run-main/edges/edge-run-node-review-to-eow.md', { taskOpsVersion: 'v1', entityType: 'runEdge', id: 'edge-run-node-review-to-eow', runId: 'run-main', fromRunNodeId: 'run-node-review', toRunNodeId: 'eow-run-node-review', edgeType: 'closes_with', createdAt: now, status: 'done' });
   const r = reviewTarget(w, 'task-review');

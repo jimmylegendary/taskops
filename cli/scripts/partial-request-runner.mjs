@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import { parseMarkdownFile, promotePartialCompletions } from '../lib-taskops.js';
 import { recheckBlockedTasks, runTaskOps } from '../lib-runner.js';
 
@@ -67,6 +68,21 @@ function makeWork(id) {
   return workDir;
 }
 
+function taskEowPath(workDir) {
+  return join(
+    workDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    'tgv-root-v2',
+    'eow',
+    `${taskEowId({
+      taskGroupVersionId: 'tgv-root-v2',
+      taskId: 'task-main',
+    })}.md`,
+  );
+}
+
 try {
   const fakeOpenClaw = makeFakeOpenClaw('fake-openclaw-partial', [
     'Completed the verified first slice only.',
@@ -103,13 +119,22 @@ try {
   assert.equal(task.awaitingPromotion, true);
   assert.equal(task.awaitingPromotionPartialId, partialCompletion.partialId);
   assert.match(task.runReadinessReason, /Awaiting partial-driven follow-up promotion/);
-  assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-main-tgv-root-v2.md')), false, 'runner partial must not create canonical task EoW');
+  assert.equal(existsSync(taskEowPath(workDir)), false, 'runner partial must not create canonical task EoW');
 
   const runNodePath = join(workDir, 'runs', runResult.runId, 'nodes', runResult.actions[0].runNodeId + '.md');
   const runNode = parseMarkdownFile(runNodePath);
   assert.equal(runNode.status, 'done', 'worker turn should close successfully even when the task remains incomplete');
   assert.equal(runNode.result.partialCompletion.partialId, partialCompletion.partialId);
-  const partialRunEowPath = join(workDir, 'runs', runResult.runId, 'nodes', `eow-${runResult.actions[0].runNodeId}-${runResult.runId}.md`);
+  const partialRunEowPath = join(
+    workDir,
+    'runs',
+    runResult.runId,
+    'nodes',
+    `${runEowId({
+      runId: runResult.runId,
+      runNodeId: runResult.actions[0].runNodeId,
+    })}.md`,
+  );
   assert.equal(existsSync(partialRunEowPath), true, 'runner partial closes the completed attempt without closing the task');
   assert.equal(parseMarkdownFile(partialRunEowPath).reason, 'partial_recorded');
   assert.equal(parseMarkdownFile(partialRunEowPath).closureRole, 'supporting');
@@ -198,7 +223,7 @@ try {
   assert.equal(malformedTask.needsManualReview, true);
   assert.equal(malformedTask.malformedPartialRequest, true);
   assert.match(malformedTask.runReadinessReason, /malformed TASKOPS_PARTIAL_REQUEST marker/);
-  assert.equal(existsSync(join(malformedWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-main-tgv-root-v2.md')), false, 'malformed partial marker must not auto-close the task');
+  assert.equal(existsSync(taskEowPath(malformedWorkDir)), false, 'malformed partial marker must not auto-close the task');
 
   const fakeDoneOpenClaw = makeFakeOpenClaw('fake-openclaw-done', 'Completed normally without a partial sentinel.');
   process.env.TASKOPS_OPENCLAW_BIN = fakeDoneOpenClaw;

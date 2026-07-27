@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { taskEowId } from '../lib-run-identity.js';
 import {
   initProject,
   parseMarkdownFile,
@@ -117,7 +118,18 @@ function inputRequiredChildPath(root, childTaskGroupId, versionId) {
 
   const parsed = parseProject(root);
   assert.deepEqual(parsed.errors, [], 'external resolver dry-run output should validate without errors');
-  const taskEow = parseMarkdownFile(join(root, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-parent-tgv-root-v2.md'));
+  const taskEow = parseMarkdownFile(join(
+    root,
+    'task-groups',
+    'tg-root',
+    'versions',
+    'tgv-root-v2',
+    'eow',
+    `${taskEowId({
+      taskGroupVersionId: 'tgv-root-v2',
+      taskId: 'task-parent',
+    })}.md`,
+  ));
   assert.equal(
     taskEow.resolvedByTaskGroupId,
     action.childTaskGroupId,

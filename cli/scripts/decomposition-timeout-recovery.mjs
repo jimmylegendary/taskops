@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import { parseMarkdownFile, parseProject } from '../lib-taskops.js';
 import { runTaskOps } from '../lib-runner.js';
 
@@ -158,6 +159,21 @@ function taskPath(workDir) {
   return join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'tasks', 'task-open-depth.md');
 }
 
+function taskEowPath(workDir) {
+  return join(
+    workDir,
+    'task-groups',
+    'tg-root',
+    'versions',
+    'tgv-root-v2',
+    'eow',
+    `${taskEowId({
+      taskGroupVersionId: 'tgv-root-v2',
+      taskId: 'task-open-depth',
+    })}.md`,
+  );
+}
+
 try {
   const fakeOpenClaw = makeFakeOpenClaw();
   const previousOpenClawBin = process.env.TASKOPS_OPENCLAW_BIN;
@@ -192,9 +208,18 @@ try {
   assert.equal(recoveredTask.childTaskGroupId, 'tg-open-depth');
   assert.equal(recoveredTask.lastRunFailureReason, undefined);
   assert.match(recoveredTask.runReadinessReason, /adapter timeout recovery/);
-  assert.equal(existsSync(join(recoveryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth-tgv-root-v2.md')), true);
-  assert.equal(parseMarkdownFile(join(recoveryWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth-tgv-root-v2.md')).reason, 'decomposed_by_runner_after_adapter_timeout_recovery');
-  assert.equal(parseMarkdownFile(join(recoveryWorkDir, 'runs', recoveredRun.runId, 'nodes', `eow-${recoveredRun.actions[0].runNodeId}-${recoveredRun.runId}.md`)).reason, 'decomposition_recorded_after_adapter_timeout_recovery');
+  assert.equal(existsSync(taskEowPath(recoveryWorkDir)), true);
+  assert.equal(parseMarkdownFile(taskEowPath(recoveryWorkDir)).reason, 'decomposed_by_runner_after_adapter_timeout_recovery');
+  assert.equal(parseMarkdownFile(join(
+    recoveryWorkDir,
+    'runs',
+    recoveredRun.runId,
+    'nodes',
+    `${runEowId({
+      runId: recoveredRun.runId,
+      runNodeId: recoveredRun.actions[0].runNodeId,
+    })}.md`,
+  )).reason, 'decomposition_recorded_after_adapter_timeout_recovery');
   const recoveredEvents = readEvents(recoveryWorkDir, recoveredRun.runId);
   assert.equal(recoveredEvents.some((event) => event.type === 'decomposition_recovered_after_adapter_failure'), true);
   assert.equal(recoveredEvents.find((event) => event.type === 'decomposition_recovered_after_adapter_failure').adapterStatus, 'timeout');
@@ -225,7 +250,7 @@ try {
   assert.equal(rejectedTask.status, 'blocked');
   assert.equal(rejectedTask.childTaskGroupId, undefined);
   assert.match(rejectedTask.lastRunFailureReason, /timeout recovery rejected/);
-  assert.equal(existsSync(join(rejectWorkDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v2', 'eow', 'eow-task-open-depth-tgv-root-v2.md')), false);
+  assert.equal(existsSync(taskEowPath(rejectWorkDir)), false);
   const rejectedEvents = readEvents(rejectWorkDir, rejectedRun.runId);
   assert.equal(rejectedEvents.some((event) => event.type === 'decomposition_recovered_after_adapter_failure'), false);
   assert.equal(rejectedEvents.some((event) => event.type === 'decomposition_completed'), false);

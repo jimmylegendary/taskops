@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { runEowId, taskEowId } from '../lib-run-identity.js';
 import { fmBlock, parseMarkdownFile, parseProject } from '../lib-taskops.js';
 import {
   computeNextAction,
@@ -265,13 +266,19 @@ try {
   });
   const action = validRun.actions[0];
   const taskPath = validCase.taskPath;
-  const taskEowPath = join(validCase.versionDir, 'eow', 'eow-prototype-tgv-root-v1.md');
+  const taskEowPath = join(validCase.versionDir, 'eow', `${taskEowId({
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 'prototype',
+  })}.md`);
   const runEowPath = join(
     validCase.workDir,
     'runs',
     validRun.runId,
     'nodes',
-    `eow-${action.runNodeId}-${validRun.runId}.md`,
+    `${runEowId({
+      runId: validRun.runId,
+      runNodeId: action.runNodeId,
+    })}.md`,
   );
   assert.equal(action.kind, 'prototype');
   assert.equal(action.status, 'completed');
@@ -297,7 +304,10 @@ try {
       'runs',
       failedRun.runId,
       'nodes',
-      `eow-${failedAction.runNodeId}-${failedRun.runId}.md`,
+      `${runEowId({
+        runId: failedRun.runId,
+        runNodeId: failedAction.runNodeId,
+      })}.md`,
     );
     assert.equal(failedAction.status, 'failed');
     assert.equal(parseMarkdownFile(failedTaskPath).status, 'blocked');

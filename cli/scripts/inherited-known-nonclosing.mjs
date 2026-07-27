@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { taskEowId } from '../lib-run-identity.js';
 import { fmBlock, parseProject, classifyTaskReadiness } from '../lib-taskops.js';
 import { computeNextAction } from '../lib-runner.js';
 import { auditParsedWork } from '../lib-audit.js';
@@ -80,7 +81,18 @@ assert.equal(atomicNext.action, 'execute', 'P0#7: atomic accepted inherited-know
 // non-closing: 아직 실행 안 했으므로 source task는 pending, task-EoW 없음.
 const atomicTask = [...atomicParsed.tasks.values()].find((t) => t.id === 'task-atomic');
 assert.notEqual(atomicTask.status, 'done', 'inherited-known revalidation is a non-closing routing decision (task stays open)');
-assert.equal(existsSync(join(atomicWork, 'task-groups', 'tg-root', 'versions', 'tgv-root-v1', 'eow', 'eow-task-atomic-tgv-root-v1.md')), false, 'no task-EoW is written by a routing decision');
+assert.equal(existsSync(join(
+  atomicWork,
+  'task-groups',
+  'tg-root',
+  'versions',
+  'tgv-root-v1',
+  'eow',
+  `${taskEowId({
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 'task-atomic',
+  })}.md`,
+)), false, 'no task-EoW is written by a routing decision');
 assert.equal(auditParsedWork(atomicParsed).claimSafe, false, 'with pilot-scope.md absent the acceptance is unmet → claimSafe=false (not falsely done)');
 
 // non-atomic contrast: next=explore (inherited-known을 먼저 재검증).
