@@ -259,7 +259,9 @@ try {
   );
   const missingAction = parseProject(missingActionKindDir);
   assert.equal(missingAction.closure.invalidSupportingRunEowClosureCount, 1);
-  assert.ok(missingAction.errors.some((error) => /missing actionKind/i.test(error)));
+  assert.ok(
+    missingAction.errors.some((error) => /run-node actionKind is required/i.test(error)),
+  );
 
   const unknownActionKindDir = join(tempRoot, 'unknown-action-kind-dynamic');
   cpSync(workDir, unknownActionKindDir, { recursive: true });
@@ -303,16 +305,36 @@ try {
   assert.ok(legacyNode && legacyEow);
   const legacyNodePath = legacyNode.path.replace(workDir, legacyInferenceDir);
   const legacyEowPath = legacyEow.path.replace(workDir, legacyInferenceDir);
-  writeFileSync(
-    legacyNodePath,
-    readFileSync(legacyNodePath, 'utf8').replace(/^actionKind: explore\n/m, ''),
-    'utf8',
+  const legacyNodeBefore = readFileSync(legacyNodePath, 'utf8');
+  const legacyNodeWithoutAction = legacyNodeBefore.replace(
+    /^actionKind: explore\n/m,
+    '',
   );
-  writeFileSync(
-    legacyEowPath,
-    readFileSync(legacyEowPath, 'utf8').replace(/^closureRole: supporting\n/m, ''),
-    'utf8',
+  assert.notEqual(
+    legacyNodeWithoutAction,
+    legacyNodeBefore,
+    'legacy inference fixture must remove actionKind',
   );
+  const legacyNodeAfter = legacyNodeWithoutAction.replace(/^attempt: 1\n/m, '');
+  assert.notEqual(
+    legacyNodeAfter,
+    legacyNodeWithoutAction,
+    'legacy inference fixture must remove attempt',
+  );
+  assert.doesNotMatch(legacyNodeAfter, /^predecessorRunNodeId:/m);
+  writeFileSync(legacyNodePath, legacyNodeAfter, 'utf8');
+
+  const legacyEowBefore = readFileSync(legacyEowPath, 'utf8');
+  const legacyEowAfter = legacyEowBefore.replace(
+    /^closureRole: supporting\n/m,
+    '',
+  );
+  assert.notEqual(
+    legacyEowAfter,
+    legacyEowBefore,
+    'legacy inference fixture must remove closureRole',
+  );
+  writeFileSync(legacyEowPath, legacyEowAfter, 'utf8');
   const legacyInference = parseProject(legacyInferenceDir);
   assert.equal(legacyInference.closure.invalidSupportingRunEowClosureCount, 0);
   assert.equal(legacyInference.closure.validSupportingRunEowClosureCount, 3);

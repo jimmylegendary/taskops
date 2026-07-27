@@ -61,6 +61,45 @@ export function validateRunNodeActionIdentity({ type, actionKind, requireActionK
   };
 }
 
+const hasOwn = (value, key) => (
+  value != null
+  && Object.prototype.hasOwnProperty.call(value, key)
+);
+
+export function resolveRunNodeActionIdentity({ node, eow } = {}) {
+  const hasModernWitness = (
+    hasOwn(node, 'actionKind')
+    || hasOwn(node, 'attempt')
+    || hasOwn(node, 'predecessorRunNodeId')
+    || hasOwn(eow, 'closureRole')
+  );
+
+  if (!hasModernWitness) {
+    const actionKind = LEGACY_ACTION_KIND_BY_TYPE.get(node?.type) || null;
+    const issues = actionKind
+      ? []
+      : [`legacy run closure cannot infer actionKind from type '${node?.type}'`];
+    return {
+      mode: 'legacy-inferred',
+      actionKind,
+      valid: issues.length === 0,
+      issues,
+    };
+  }
+
+  const validated = validateRunNodeActionIdentity({
+    type: node?.type,
+    actionKind: node?.actionKind,
+    requireActionKind: true,
+  });
+  return {
+    mode: 'explicit',
+    actionKind: validated.actionKind,
+    valid: validated.valid,
+    issues: validated.issues,
+  };
+}
+
 function inferredRole(node, eow) {
   return node?.type === 'implementation' && CLAIM_REASONS.has(eow?.reason)
     ? 'claim-bearing'
@@ -141,34 +180,16 @@ export function classifyRunClosure({
     || selectedVersionIds.size === 0
     || selectedVersionIds.has(node.sourceTaskGroupVersionId);
   const issues = [];
+  const actionIdentity = resolveRunNodeActionIdentity({ node, eow });
+  issues.push(...actionIdentity.issues);
+  const actionKind = actionIdentity.actionKind;
   if (!['supporting', 'claim-bearing'].includes(role)) issues.push(`invalid closureRole '${role}'`);
   if (hasExplicitRole && role !== expectedRole) issues.push(`closureRole spoof: expected ${expectedRole}`);
   if (role === 'supporting' && CLAIM_REASONS.has(eow?.reason)) {
     issues.push(`supporting closure cannot use claim reason '${eow.reason}'`);
   }
 
-  let actionKind = node?.actionKind;
-  if (selected && (actionKind != null && String(actionKind).trim() !== '')) {
-    const actionIdentity = validateRunNodeActionIdentity({
-      type: node?.type,
-      actionKind,
-    });
-    issues.push(...actionIdentity.issues);
-    actionKind = actionIdentity.actionKind;
-  }
-
   if (selected && role === 'supporting') {
-    if (actionKind == null || String(actionKind).trim() === '') {
-      if (hasExplicitRole) {
-        issues.push('explicit supporting closure is missing actionKind');
-      } else {
-        actionKind = LEGACY_ACTION_KIND_BY_TYPE.get(node?.type) || null;
-        if (!actionKind) {
-          issues.push(`legacy supporting closure cannot infer actionKind from type '${node?.type}'`);
-        }
-      }
-    }
-
     if (actionKind === 'explore') {
       const inspected = inspectNonEmptyUtf8File(node.result?.artifactPath, { label: 'exploration artifact' });
       if (!inspected.ok) issues.push(inspected.message);
@@ -208,7 +229,12 @@ export function classifyRunClosure({
     schemaValid: allIssues.length === 0,
     supportValid: role !== 'supporting' || issues.length === 0,
     reviewEvidenceValid: review.valid,
-    policyApproved: role === 'claim-bearing' && review.valid && allIssues.length === 0,
+    policyApproved: (
+      role === 'claim-bearing'
+      && actionIdentity.valid
+      && review.valid
+      && allIssues.length === 0
+    ),
     issues: allIssues,
   };
 }

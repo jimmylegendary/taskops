@@ -8,6 +8,10 @@ import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  classifyRunClosure,
+  resolveRunNodeActionIdentity,
+} from '../lib-run-closure.js';
 import { fmBlock, parseProject } from '../lib-taskops.js';
 import { reviewTarget } from '../lib-runner.js';
 
@@ -182,6 +186,92 @@ assert.ok(
   'unknown claim action identity must be a canonical validation error',
 );
 
+const missingClaimActionDir = join(tempRoot, 'missing-claim-action');
+cpSync(tamperSource, missingClaimActionDir, { recursive: true });
+const missingClaimNodePath = join(
+  missingClaimActionDir,
+  'runs/run-main/nodes/run-node-review.md',
+);
+const missingClaimBefore = readFileSync(missingClaimNodePath, 'utf8');
+const missingClaimAfter = missingClaimBefore.replace(
+  /^actionKind: execute\n/m,
+  '',
+);
+assert.notEqual(
+  missingClaimAfter,
+  missingClaimBefore,
+  'missing-action fixture must remove only the live actionKind',
+);
+assert.match(missingClaimAfter, /^attempt: 1$/m);
+writeFileSync(missingClaimNodePath, missingClaimAfter, 'utf8');
+
+const missingClaim = parseProject(missingClaimActionDir);
+const missingNode = missingClaim.runNodes.get('run-main:run-node-review');
+const missingEow = [...missingClaim.eowNodes.values()].find((eow) => (
+  eow.runId === 'run-main'
+  && eow.attachedToId === 'run-node-review'
+));
+const missingClassification = classifyRunClosure({
+  node: missingNode,
+  task: missingClaim.tasks.get('tgv-root-v1:task-review'),
+  eow: missingEow,
+  runNodes: missingClaim.runNodes,
+  runEdges: missingClaim.runEdges,
+  versions: missingClaim.versions,
+  selectedVersionIds: new Set(['tgv-root-v1']),
+});
+
+assert.equal(missingClassification.reviewEvidenceValid, true);
+assert.equal(missingClassification.policyApproved, false);
+assert.ok(
+  missingClassification.issues.some((issue) => /actionKind is required/i.test(issue)),
+);
+assert.equal(missingClaim.closure.policyApprovedComplete, false);
+assert.ok(
+  missingClaim.errors.some((error) => /actionKind is required/i.test(error)),
+);
+
+const historicalMissingClassification = classifyRunClosure({
+  node: missingNode,
+  task: missingClaim.tasks.get('tgv-root-v1:task-review'),
+  eow: missingEow,
+  runNodes: missingClaim.runNodes,
+  runEdges: missingClaim.runEdges,
+  versions: missingClaim.versions,
+  selectedVersionIds: new Set(['tgv-other-v1']),
+});
+assert.equal(historicalMissingClassification.selected, false);
+assert.equal(historicalMissingClassification.reviewEvidenceValid, true);
+assert.equal(historicalMissingClassification.policyApproved, false);
+
+assert.deepEqual(
+  resolveRunNodeActionIdentity({
+    node: { type: 'implementation' },
+    eow: { reason: 'approved_result' },
+  }),
+  {
+    mode: 'legacy-inferred',
+    actionKind: 'execute',
+    valid: true,
+    issues: [],
+  },
+);
+
+for (const node of [
+  { type: 'implementation', actionKind: null },
+  { type: 'implementation', actionKind: '' },
+  { type: 'implementation', attempt: 1 },
+  { type: 'implementation', predecessorRunNodeId: 'run-node-prior' },
+]) {
+  const resolved = resolveRunNodeActionIdentity({
+    node,
+    eow: { reason: 'approved_result' },
+  });
+  assert.equal(resolved.mode, 'explicit');
+  assert.equal(resolved.valid, false);
+  assert.ok(resolved.issues.some((issue) => /actionKind is required/i.test(issue)));
+}
+
 const legacyClaimIdentityDir = join(tempRoot, 'legacy-claim-identity');
 cpSync(tamperSource, legacyClaimIdentityDir, { recursive: true });
 const legacyClaimNodePath = join(
@@ -192,16 +282,38 @@ const legacyClaimEowPath = join(
   legacyClaimIdentityDir,
   'runs/run-main/nodes/eow-run-node-review.md',
 );
-writeFileSync(
-  legacyClaimNodePath,
-  readFileSync(legacyClaimNodePath, 'utf8').replace(/^actionKind: execute\n/m, ''),
-  'utf8',
+const legacyClaimNodeBefore = readFileSync(legacyClaimNodePath, 'utf8');
+const legacyClaimWithoutAction = legacyClaimNodeBefore.replace(
+  /^actionKind: execute\n/m,
+  '',
 );
-writeFileSync(
-  legacyClaimEowPath,
-  readFileSync(legacyClaimEowPath, 'utf8').replace(/^closureRole: claim-bearing\n/m, ''),
-  'utf8',
+assert.notEqual(
+  legacyClaimWithoutAction,
+  legacyClaimNodeBefore,
+  'legacy claim fixture must remove actionKind',
 );
+const legacyClaimNodeAfter = legacyClaimWithoutAction.replace(
+  /^attempt: 1\n/m,
+  '',
+);
+assert.notEqual(
+  legacyClaimNodeAfter,
+  legacyClaimWithoutAction,
+  'legacy claim fixture must remove attempt',
+);
+writeFileSync(legacyClaimNodePath, legacyClaimNodeAfter, 'utf8');
+
+const legacyClaimEowBefore = readFileSync(legacyClaimEowPath, 'utf8');
+const legacyClaimEowAfter = legacyClaimEowBefore.replace(
+  /^closureRole: claim-bearing\n/m,
+  '',
+);
+assert.notEqual(
+  legacyClaimEowAfter,
+  legacyClaimEowBefore,
+  'legacy claim fixture must remove closureRole',
+);
+writeFileSync(legacyClaimEowPath, legacyClaimEowAfter, 'utf8');
 assert.equal(
   parseProject(legacyClaimIdentityDir).closure.policyApprovedComplete,
   true,
