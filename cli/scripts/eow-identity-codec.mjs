@@ -15,6 +15,8 @@ const runNormalizationA = runEowId({
   runId: 'run-main',
   runNodeId: 'run-node+a',
 });
+const canonicalRunId = 'eow-v2-r.cnVuLW5vZGUrYQ.cnVuLW1haW4';
+assert.equal(runNormalizationA, canonicalRunId);
 const runNormalizationB = runEowId({
   runId: 'run-main',
   runNodeId: 'run-node-a',
@@ -29,6 +31,8 @@ const taskNormalizationA = taskEowId({
   taskGroupVersionId: 'tgv-root-v1',
   taskId: 'task+a',
 });
+const canonicalTaskId = 'eow-v2-t.dGFzayth.dGd2LXJvb3QtdjE';
+assert.equal(taskNormalizationA, canonicalTaskId);
 const taskNormalizationB = taskEowId({
   taskGroupVersionId: 'tgv-root-v1',
   taskId: 'task-a',
@@ -49,13 +53,13 @@ assert.notEqual(
   taskEowId({ taskGroupVersionId: 'same', taskId: 'same' }),
 );
 
-assert.deepEqual(decodeCanonicalEowId(runNormalizationA), {
+assert.deepEqual(decodeCanonicalEowId(canonicalRunId), {
   graphType: 'run',
   attachedToType: 'runNode',
   attachedToId: 'run-node+a',
   runId: 'run-main',
 });
-assert.deepEqual(decodeCanonicalEowId(taskNormalizationA), {
+assert.deepEqual(decodeCanonicalEowId(canonicalTaskId), {
   graphType: 'task',
   attachedToType: 'task',
   attachedToId: 'task+a',
@@ -83,7 +87,7 @@ assert.deepEqual(
     runNodeId: 'run-node+a',
   }),
   [
-    runNormalizationA,
+    canonicalRunId,
     'eow-run-node-a-run-main',
     'eow-run-node+a',
   ],
@@ -94,7 +98,7 @@ assert.deepEqual(
     taskId: 'task+a',
   }),
   [
-    taskNormalizationA,
+    canonicalTaskId,
     'eow-task-a-tgv-root-v1',
     'eow-task+a',
   ],
@@ -121,7 +125,26 @@ assert.throws(
   /malformed canonical EoW id/i,
 );
 assert.throws(
+  () => decodeCanonicalEowId('eow-v2-r._w.cnVu'),
+  /invalid UTF-8 runNodeId/i,
+);
+assert.throws(
+  () => decodeCanonicalEowId('eow-v2-r.YR.cnVu'),
+  /non-canonical runNodeId/i,
+);
+assert.throws(
   () => runEowId({ runId: 1, runNodeId: 'node' }),
+  /runId must be a primitive string/i,
+);
+assert.throws(
+  () => runEowId({ runId: '', runNodeId: 'node' }),
+  /runId must be non-empty/i,
+);
+assert.throws(
+  () => runEowId({
+    runId: new String('run-main'),
+    runNodeId: 'node',
+  }),
   /runId must be a primitive string/i,
 );
 assert.throws(
@@ -139,6 +162,26 @@ const overBudget = runEowId({
 assert.throws(
   () => assertEowFilenameBudget(overBudget),
   /255 UTF-8 bytes/i,
+);
+
+const exactlyAtBudget = 'é'.repeat(126);
+assert.equal(
+  Buffer.byteLength(`${exactlyAtBudget}.md`, 'utf8'),
+  255,
+);
+assert.equal(
+  assertEowFilenameBudget(exactlyAtBudget),
+  exactlyAtBudget,
+);
+
+const oneByteOverBudget = `${exactlyAtBudget}a`;
+assert.equal(
+  Buffer.byteLength(`${oneByteOverBudget}.md`, 'utf8'),
+  256,
+);
+assert.throws(
+  () => assertEowFilenameBudget(oneByteOverBudget),
+  /255 UTF-8 bytes \(256\)/i,
 );
 
 console.log('eow identity codec checks passed');
