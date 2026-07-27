@@ -847,8 +847,8 @@ export function parseProject(projectDir) {
   const taskEowsByTaskKey = new Map();
   const runEowsByRunNodeKey = new Map();
 
-  const addEow = (eow, filePath) => {
-    for (const issue of canonicalEowIdentityIssues(eow)) {
+  const addEow = (eow, filePath, identityFrontmatter = eow) => {
+    for (const issue of canonicalEowIdentityIssues(identityFrontmatter)) {
       errors.push(withPath(filePath, issue));
     }
     if (eowNodes.has(eow.id)) errors.push(withPath(filePath, `duplicate EoW id '${eow.id}'`));
@@ -950,7 +950,7 @@ export function parseProject(projectDir) {
         const attachedKey = taskKey(v.id, eow.attachedToId);
         if (!tasks.has(attachedKey)) errors.push(withPath(eowPath, t.eowAttachedTaskNotFound(eow.attachedToId)));
         const eowRecord = { ...eow, path: eowPath, taskGroupId: tg.id, taskGroupVersionId: v.id };
-        addEow(eowRecord, eowPath);
+        addEow(eowRecord, eowPath, eow);
         versionRecord.eows.push(eowRecord);
         if (!taskEowsByTaskKey.has(attachedKey)) taskEowsByTaskKey.set(attachedKey, []);
         taskEowsByTaskKey.get(attachedKey).push(eowRecord);

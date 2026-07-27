@@ -131,92 +131,190 @@ function duplicateEowErrors(parsed) {
   return parsed.errors.filter((error) => /duplicate EoW id/i.test(error));
 }
 
-test('parser rejects malformed and tuple-inconsistent canonical EoWs', () => {
-  const fixture = seedSingleTaskWork('canonical-parser-errors');
-
-  const malformedId = 'eow-v2-r.A.A';
-  writeMd(
-    join(
-      fixture.workDir,
-      'runs/run-main/nodes',
-      `${malformedId}.md`,
-    ),
-    {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: malformedId,
-      runId: 'run-main',
-      graphType: 'run',
-      attachedToType: 'runNode',
-      attachedToId: 'run-node-missing',
-      reason: 'manual_close',
-      closureRole: 'supporting',
-      declaredBy: 'fixture',
-      declaredAt: now,
-      createdAt: now,
-      status: 'done',
-    },
+function writeRunEow(fixture, id, frontmatterOverrides = {}) {
+  const path = join(
+    fixture.workDir,
+    'runs/run-main/nodes',
+    `${id}.md`,
   );
+  writeMd(path, {
+    taskOpsVersion: 'v1',
+    entityType: 'eow',
+    id,
+    runId: 'run-main',
+    graphType: 'run',
+    attachedToType: 'runNode',
+    attachedToId: 'run-node-missing',
+    reason: 'manual_close',
+    closureRole: 'supporting',
+    declaredBy: 'fixture',
+    declaredAt: now,
+    createdAt: now,
+    status: 'done',
+    ...frontmatterOverrides,
+  });
+  return path;
+}
 
-  const wrongTupleId = runEowId({
+function writeTaskEow(
+  fixture,
+  id,
+  {
+    omitTaskGroupVersionId = false,
+    ...frontmatterOverrides
+  } = {},
+) {
+  const path = join(fixture.versionDir, 'eow', `${id}.md`);
+  const frontmatter = {
+    taskOpsVersion: 'v1',
+    entityType: 'eow',
+    id,
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: 'task',
+    taskGroupVersionId: 'tgv-root-v1',
+    reason: 'manual_close',
+    declaredBy: 'fixture',
+    declaredAt: now,
+    createdAt: now,
+    status: 'done',
+    ...frontmatterOverrides,
+  };
+  if (omitTaskGroupVersionId) delete frontmatter.taskGroupVersionId;
+  writeMd(path, frontmatter);
+  return path;
+}
+
+function assertCanonicalErrorsAt(parsed, path, expectedMessages) {
+  const prefix = `${path}: `;
+  const actual = parsed.errors
+    .filter((error) => (
+      error.startsWith(prefix)
+      && /(?:malformed )?canonical(?: run| task)? EoW/i.test(error)
+    ));
+  assert.deepEqual(
+    actual,
+    expectedMessages.map((message) => `${prefix}${message}`),
+  );
+}
+
+test('parser rejects a malformed canonical EoW at its exact path', () => {
+  const fixture = seedSingleTaskWork('canonical-malformed');
+  const malformedId = 'eow-v2-r.A.A';
+  const path = writeRunEow(fixture, malformedId);
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'malformed canonical EoW id: non-canonical runNodeId',
+  ]);
+});
+
+test('parser validates canonical graphType independently', () => {
+  const fixture = seedSingleTaskWork('canonical-graph-type');
+  const id = runEowId({
+    runId: 'run-main',
+    runNodeId: 'run-node-missing',
+  });
+  const path = writeRunEow(fixture, id, {
+    graphType: 'task',
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical EoW graph kind does not match frontmatter',
+  ]);
+});
+
+test('parser validates canonical attachedToType independently', () => {
+  const fixture = seedSingleTaskWork('canonical-attached-type');
+  const id = runEowId({
+    runId: 'run-main',
+    runNodeId: 'run-node-missing',
+  });
+  const path = writeRunEow(fixture, id, {
+    attachedToType: 'task',
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical EoW graph kind does not match frontmatter',
+  ]);
+});
+
+test('parser validates canonical attachedToId independently', () => {
+  const fixture = seedSingleTaskWork('canonical-attached-id');
+  const id = runEowId({
+    runId: 'run-main',
+    runNodeId: 'run-node-canonical',
+  });
+  const path = writeRunEow(fixture, id, {
+    attachedToId: 'run-node-frontmatter',
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical run EoW tuple does not match frontmatter',
+  ]);
+});
+
+test('parser validates canonical runId independently', () => {
+  const fixture = seedSingleTaskWork('canonical-run-id');
+  const id = runEowId({
     runId: 'run-other',
     runNodeId: 'run-node-missing',
   });
-  writeMd(
-    join(
-      fixture.workDir,
-      'runs/run-main/nodes',
-      `${wrongTupleId}.md`,
-    ),
-    {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: wrongTupleId,
-      runId: 'run-main',
-      graphType: 'run',
-      attachedToType: 'runNode',
-      attachedToId: 'run-node-missing',
-      reason: 'manual_close',
-      closureRole: 'supporting',
-      declaredBy: 'fixture',
-      declaredAt: now,
-      createdAt: now,
-      status: 'done',
-    },
-  );
-
-  const wrongKindId = runEowId({
-    runId: 'tgv-root-v1',
-    runNodeId: 'task',
-  });
-  writeMd(
-    join(fixture.versionDir, 'eow', `${wrongKindId}.md`),
-    {
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: wrongKindId,
-      graphType: 'task',
-      attachedToType: 'task',
-      attachedToId: 'task',
-      taskGroupVersionId: 'tgv-root-v1',
-      reason: 'manual_close',
-      declaredBy: 'fixture',
-      declaredAt: now,
-      createdAt: now,
-      status: 'done',
-    },
-  );
+  const path = writeRunEow(fixture, id);
 
   const parsed = parseProject(fixture.workDir);
-  assert.ok(parsed.errors.some((error) => (
-    /malformed canonical EoW id/i.test(error)
-  )));
-  assert.ok(parsed.errors.some((error) => (
-    /canonical run EoW tuple does not match frontmatter/i.test(error)
-  )));
-  assert.ok(parsed.errors.some((error) => (
-    /canonical EoW graph kind does not match frontmatter/i.test(error)
-  )));
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical run EoW tuple does not match frontmatter',
+  ]);
+});
+
+test('parser validates canonical taskGroupVersionId independently', () => {
+  const fixture = seedSingleTaskWork('canonical-task-version');
+  const id = taskEowId({
+    taskGroupVersionId: 'tgv-other',
+    taskId: 'task',
+  });
+  const path = writeTaskEow(fixture, id);
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical task EoW tuple does not match frontmatter',
+  ]);
+});
+
+test('parser rejects a canonical task EoW with missing version frontmatter', () => {
+  const fixture = seedSingleTaskWork('canonical-task-version-missing');
+  const id = taskEowId({
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 'task',
+  });
+  const path = writeTaskEow(fixture, id, {
+    omitTaskGroupVersionId: true,
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical task EoW tuple does not match frontmatter',
+  ]);
+});
+
+test('parser rejects a canonical task EoW with empty version frontmatter', () => {
+  const fixture = seedSingleTaskWork('canonical-task-version-empty');
+  const id = taskEowId({
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 'task',
+  });
+  const path = writeTaskEow(fixture, id, {
+    taskGroupVersionId: '',
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assertCanonicalErrorsAt(parsed, path, [
+    'canonical task EoW tuple does not match frontmatter',
+  ]);
 });
 
 test('separate runs of one task write run-qualified EoWs', () => {
