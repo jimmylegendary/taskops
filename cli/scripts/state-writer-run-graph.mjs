@@ -76,6 +76,33 @@ function stateWriterIo() {
   };
 }
 
+function tracingStateWriterIo() {
+  const base = stateWriterIo();
+  const calls = {
+    exists: [],
+    parseMarkdownFile: [],
+    readBody: [],
+  };
+  return {
+    calls,
+    io: {
+      ...base,
+      exists: (path) => {
+        calls.exists.push(path);
+        return base.exists(path);
+      },
+      parseMarkdownFile: (path) => {
+        calls.parseMarkdownFile.push(path);
+        return base.parseMarkdownFile(path);
+      },
+      readBody: (path) => {
+        calls.readBody.push(path);
+        return base.readBody(path);
+      },
+    },
+  };
+}
+
 function legacyUpdateFrontmatter(filePath, updater) {
   const fm = parseMarkdownFile(filePath);
   const body = readBody(filePath);
@@ -771,6 +798,111 @@ assert.throws(
     taskId: 'task-a',
   }, stateWriterIo()),
   /Unqualified EoW candidate.*owned by another tuple/,
+);
+
+const separatorRun = seedTree(join(tempRoot, 'separator-run-candidate'));
+const separatorRunId = 'run-separator';
+const separatorRunNodeId = 'nested/run-node';
+const unsafeRunCandidateId = `eow-${separatorRunNodeId}`;
+const unsafeRunCandidatePath = join(
+  separatorRun.runDir,
+  'nodes',
+  `${unsafeRunCandidateId}.md`,
+);
+mkdirSync(dirname(unsafeRunCandidatePath), { recursive: true });
+seedRunEow(unsafeRunCandidatePath, {
+  id: unsafeRunCandidateId,
+  runId: separatorRunId,
+  runNodeId: separatorRunNodeId,
+});
+const separatorRunEdgePath = join(
+  separatorRun.runDir,
+  'edges',
+  `edge-${separatorRunNodeId}-to-eow.md`,
+);
+mkdirSync(dirname(separatorRunEdgePath), { recursive: true });
+const tracedRunIo = tracingStateWriterIo();
+closeRunNodeWithEowFiles({
+  runDir: separatorRun.runDir,
+  runId: separatorRunId,
+  runNodeId: separatorRunNodeId,
+  reason: 'manual_close',
+  closureRole: 'supporting',
+  finishedAt: fixedNow,
+}, tracedRunIo.io);
+const separatorRunCanonicalId = runEowId({
+  runId: separatorRunId,
+  runNodeId: separatorRunNodeId,
+});
+const separatorRunCanonicalPath = join(
+  separatorRun.runDir,
+  'nodes',
+  `${separatorRunCanonicalId}.md`,
+);
+
+const traversalTask = seedTree(join(tempRoot, 'traversal-task-candidate'));
+const traversalTaskId = '../../../outside-task';
+const traversalVersionDir = dirname(dirname(traversalTask.taskPath));
+const unsafeTaskCandidateId = `eow-${traversalTaskId}`;
+const unsafeTaskCandidatePath = join(
+  traversalVersionDir,
+  'eow',
+  `${unsafeTaskCandidateId}.md`,
+);
+seedTaskEow(unsafeTaskCandidatePath, {
+  id: unsafeTaskCandidateId,
+  taskGroupVersionId: 'tgv-root-v1',
+  taskId: traversalTaskId,
+});
+const tracedTaskIo = tracingStateWriterIo();
+closeTaskWithEowFile({
+  task: {
+    id: traversalTaskId,
+    path: traversalTask.taskPath,
+  },
+  reason: 'completed',
+  finishedAt: fixedNow,
+}, tracedTaskIo.io);
+const traversalTaskCanonicalId = taskEowId({
+  taskGroupVersionId: 'tgv-root-v1',
+  taskId: traversalTaskId,
+});
+const traversalTaskCanonicalPath = join(
+  traversalVersionDir,
+  'eow',
+  `${traversalTaskCanonicalId}.md`,
+);
+
+assert.deepEqual(
+  {
+    runUnsafeExistsProbe: tracedRunIo.calls.exists.includes(
+      unsafeRunCandidatePath,
+    ),
+    runUnsafeReadProbe: [
+      ...tracedRunIo.calls.parseMarkdownFile,
+      ...tracedRunIo.calls.readBody,
+    ].includes(unsafeRunCandidatePath),
+    runCanonicalCreated: existsSync(separatorRunCanonicalPath),
+    runEdgeTarget: parseMarkdownFile(separatorRunEdgePath).toRunNodeId,
+    taskUnsafeExistsProbe: tracedTaskIo.calls.exists.includes(
+      unsafeTaskCandidatePath,
+    ),
+    taskUnsafeReadProbe: [
+      ...tracedTaskIo.calls.parseMarkdownFile,
+      ...tracedTaskIo.calls.readBody,
+    ].includes(unsafeTaskCandidatePath),
+    taskCanonicalCreated: existsSync(traversalTaskCanonicalPath),
+  },
+  {
+    runUnsafeExistsProbe: false,
+    runUnsafeReadProbe: false,
+    runCanonicalCreated: true,
+    runEdgeTarget: separatorRunCanonicalId,
+    taskUnsafeExistsProbe: false,
+    taskUnsafeReadProbe: false,
+    taskCanonicalCreated: true,
+  },
+  'separator-bearing raw v0 candidates must be skipped before I/O',
 );
 
 const qualifiedTask = seedTree(join(tempRoot, 'qualified-task-reuse'));

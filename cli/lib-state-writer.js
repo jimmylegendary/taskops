@@ -1,4 +1,4 @@
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, win32 } from 'node:path';
 import { validateRunNodeActionIdentity } from './lib-run-closure.js';
 import {
   assertEowFilenameBudget,
@@ -14,6 +14,14 @@ function requireFn(io, name) {
   const fn = io?.[name];
   if (typeof fn !== 'function') throw new Error(`Missing ${name} adapter`);
   return fn;
+}
+
+function isSinglePlatformBasename(value) {
+  return (
+    basename(value) === value
+    && win32.basename(value) === value
+    && !value.includes('\0')
+  );
 }
 
 export function updateMarkdownFrontmatter(filePath, updater, io) {
@@ -186,11 +194,17 @@ export function resolveExistingRunEowFile({
   const qualifiedId = legacyQualifiedRunEowId({ runId, runNodeId });
 
   for (const candidateId of candidates) {
-    const path = join(runDir, 'nodes', `${candidateId}.md`);
-    if (!exists(path)) continue;
     const format = candidateId === canonicalId
       ? 'canonical-v2'
       : (candidateId === qualifiedId ? 'qualified-v1' : 'unqualified-v0');
+    if (
+      format === 'unqualified-v0'
+      && !isSinglePlatformBasename(candidateId)
+    ) {
+      continue;
+    }
+    const path = join(runDir, 'nodes', `${candidateId}.md`);
+    if (!exists(path)) continue;
     const frontmatter = parseMarkdownFile(path);
     if (frontmatter.id !== candidateId) {
       throw new Error(
@@ -253,11 +267,17 @@ export function resolveExistingTaskEowFile({
   });
 
   for (const candidateId of candidates) {
-    const path = join(versionDir, 'eow', `${candidateId}.md`);
-    if (!exists(path)) continue;
     const format = candidateId === canonicalId
       ? 'canonical-v2'
       : (candidateId === qualifiedId ? 'qualified-v1' : 'unqualified-v0');
+    if (
+      format === 'unqualified-v0'
+      && !isSinglePlatformBasename(candidateId)
+    ) {
+      continue;
+    }
+    const path = join(versionDir, 'eow', `${candidateId}.md`);
+    if (!exists(path)) continue;
     const frontmatter = parseMarkdownFile(path);
     if (frontmatter.id !== candidateId) {
       throw new Error(
