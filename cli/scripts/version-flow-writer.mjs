@@ -47,6 +47,8 @@ const promotionHelper = findFunctionSection('applyPartialPromotion', '\nexport f
 assertSequence(
   promotionHelper,
   [
+    'const preparedSourceRunNodes = new Map()',
+    'preparePromotedPartialSourceRunNode(parsed, partial)',
     'applyRepeatedPartialReviewPatches(parsed, plan.repeatedReviewPatches)',
     'for (const versionPlan of plan.versionPlans)',
     'const sourceVersion = parsed.versions.get(versionPlan.fromVersionId)',
@@ -65,7 +67,8 @@ assertSequence(
     'for (const promotion of versionPlan.promotions)',
     'updateMarkdownFrontmatter(partial.path',
     'fm.supersededBy = promotion.supersededBy',
-    'closePromotedPartialSourceRunNode(plan.projectDir, partial, now)',
+    'const closedSourceRunNode = closePromotedPartialSourceRunNode(',
+    'preparedSourceRunNodes.get(partial.path)',
     'appliedVersionPlans.push({',
     'appendWorkLog(plan.projectDir, logLine)',
     "updateMarkdownFrontmatter(join(plan.projectDir, 'index.md')",

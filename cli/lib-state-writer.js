@@ -1,7 +1,15 @@
-import { basename, dirname, join, win32 } from 'node:path';
-import { validateRunNodeActionIdentity } from './lib-run-closure.js';
+import { basename, dirname, join } from 'node:path';
+import {
+  resolveRunClosureRole,
+  validateRunNodeActionIdentity,
+} from './lib-run-closure.js';
+import {
+  assertPortablePathComponent,
+  resolveContainedPath,
+} from './lib-path-containment.js';
 import {
   assertEowFilenameBudget,
+  decodeCanonicalEowId,
   legacyQualifiedRunEowId,
   legacyQualifiedTaskEowId,
   runEowId,
@@ -17,11 +25,64 @@ function requireFn(io, name) {
 }
 
 function isSinglePlatformBasename(value) {
-  return (
-    basename(value) === value
-    && win32.basename(value) === value
-    && !value.includes('\0')
-  );
+  try {
+    assertPortablePathComponent(value, 'legacy EoW id');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const hasOwn = (value, key) => (
+  value != null
+  && Object.prototype.hasOwnProperty.call(value, key)
+);
+
+function assertReservedRunEowCandidate(candidateId, { runId, runNodeId }) {
+  if (!candidateId.startsWith('eow-v2-')) return;
+  let decoded;
+  try {
+    decoded = decodeCanonicalEowId(candidateId);
+  } catch (error) {
+    throw new Error(
+      `Reserved EoW candidate '${candidateId}' has malformed canonical identity: ${error.message}`,
+    );
+  }
+  if (
+    decoded.graphType !== 'run'
+    || decoded.attachedToType !== 'runNode'
+    || decoded.runId !== runId
+    || decoded.attachedToId !== runNodeId
+  ) {
+    throw new Error(
+      `Reserved EoW candidate '${candidateId}' does not encode requested run tuple`,
+    );
+  }
+}
+
+function assertReservedTaskEowCandidate(
+  candidateId,
+  { taskGroupVersionId, taskId },
+) {
+  if (!candidateId.startsWith('eow-v2-')) return;
+  let decoded;
+  try {
+    decoded = decodeCanonicalEowId(candidateId);
+  } catch (error) {
+    throw new Error(
+      `Reserved EoW candidate '${candidateId}' has malformed canonical identity: ${error.message}`,
+    );
+  }
+  if (
+    decoded.graphType !== 'task'
+    || decoded.attachedToType !== 'task'
+    || decoded.taskGroupVersionId !== taskGroupVersionId
+    || decoded.attachedToId !== taskId
+  ) {
+    throw new Error(
+      `Reserved EoW candidate '${candidateId}' does not encode requested task tuple`,
+    );
+  }
 }
 
 export function updateMarkdownFrontmatter(filePath, updater, io) {
@@ -48,17 +109,18 @@ export function appendRunLogEntry(runDir, line, io) {
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const appendTextFile = requireFn(io, 'appendTextFile');
-  const logPath = join(runDir, 'run-log.md');
+  const logPath = resolveContainedPath(runDir, 'run-log.md');
   if (!exists(logPath)) writeTextFile(logPath, '# Run log\n\n');
   appendTextFile(logPath, `- ${line}\n`);
 }
 
 export function writeRunEdgeFile({ runDir, runId, edgeId, fromRunNodeId, toRunNodeId, edgeType, createdAt, note }, io) {
+  assertPortablePathComponent(edgeId, 'run edge id');
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
   const sanitize = typeof io?.sanitizeFmScalar === 'function' ? io.sanitizeFmScalar : (value) => value;
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
+  const edgePath = resolveContainedPath(runDir, 'edges', `${edgeId}.md`);
   if (exists(edgePath)) return edgePath;
   const fm = {
     taskOpsVersion: 'v1',
@@ -90,13 +152,18 @@ export function ensureRunNodeFile({
   attempt,
   predecessorRunNodeId = null,
 }, io) {
+  assertPortablePathComponent(runNodeId, 'runNodeId');
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
   const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
   const updateFrontmatter = requireFn(io, 'updateMarkdownFrontmatter');
   const now = requireFn(io, 'now');
-  const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
+  const runNodePath = resolveContainedPath(
+    runDir,
+    'nodes',
+    `${runNodeId}.md`,
+  );
   if (!exists(runNodePath)) {
     const actionIdentity = validateRunNodeActionIdentity({
       type,
@@ -203,8 +270,13 @@ export function resolveExistingRunEowFile({
     ) {
       continue;
     }
-    const path = join(runDir, 'nodes', `${candidateId}.md`);
+    const path = resolveContainedPath(
+      runDir,
+      'nodes',
+      `${candidateId}.md`,
+    );
     if (!exists(path)) continue;
+    assertReservedRunEowCandidate(candidateId, { runId, runNodeId });
     const frontmatter = parseMarkdownFile(path);
     if (frontmatter.id !== candidateId) {
       throw new Error(
@@ -231,6 +303,11 @@ export function resolveExistingRunEowFile({
         frontmatter.graphType === 'run'
         && frontmatter.attachedToType === 'runNode'
       ) {
+        if (frontmatter.runId !== runId) {
+          throw new Error(
+            `Qualified EoW candidate '${candidateId}' has wrong run container`,
+          );
+        }
         try {
           collisionOwnerMatches = legacyQualifiedRunEowId({
             runId: frontmatter.runId,
@@ -276,8 +353,16 @@ export function resolveExistingTaskEowFile({
     ) {
       continue;
     }
-    const path = join(versionDir, 'eow', `${candidateId}.md`);
+    const path = resolveContainedPath(
+      versionDir,
+      'eow',
+      `${candidateId}.md`,
+    );
     if (!exists(path)) continue;
+    assertReservedTaskEowCandidate(candidateId, {
+      taskGroupVersionId,
+      taskId,
+    });
     const frontmatter = parseMarkdownFile(path);
     if (frontmatter.id !== candidateId) {
       throw new Error(
@@ -287,7 +372,13 @@ export function resolveExistingTaskEowFile({
     const taskOwnerMatches = (
       frontmatter.graphType === 'task'
       && frontmatter.attachedToType === 'task'
-      && frontmatter.taskGroupVersionId === taskGroupVersionId
+      && (
+        frontmatter.taskGroupVersionId === taskGroupVersionId
+        || (
+          format === 'unqualified-v0'
+          && !hasOwn(frontmatter, 'taskGroupVersionId')
+        )
+      )
       && frontmatter.attachedToId === taskId
     );
     if (taskOwnerMatches) {
@@ -304,6 +395,11 @@ export function resolveExistingTaskEowFile({
         frontmatter.graphType === 'task'
         && frontmatter.attachedToType === 'task'
       ) {
+        if (frontmatter.taskGroupVersionId !== taskGroupVersionId) {
+          throw new Error(
+            `Qualified EoW candidate '${candidateId}' has wrong task version container`,
+          );
+        }
         try {
           collisionOwnerMatches = legacyQualifiedTaskEowId({
             taskGroupVersionId: frontmatter.taskGroupVersionId,
@@ -322,7 +418,85 @@ export function resolveExistingTaskEowFile({
   return null;
 }
 
-export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, finishedAt, closureRole, approvedReview = null, resolvedByTaskGroupId = null }, io) {
+export function assertRunEowImmutableReuse({
+  existing,
+  runDir,
+  runId,
+  runNodeId,
+  reason,
+  closureRole,
+  resolvedByTaskGroupId = null,
+}, io) {
+  if (!existing) return;
+  assertPortablePathComponent(runNodeId, 'runNodeId');
+  const current = existing.frontmatter;
+  if (current.reason !== reason) {
+    throw new Error(`Immutable run EoW mismatch for ${runNodeId}: reason`);
+  }
+
+  let existingRole = current.closureRole;
+  if (!hasOwn(current, 'closureRole')) {
+    if (existing.format !== 'unqualified-v0') {
+      throw new Error(
+        `Immutable run EoW mismatch for ${runNodeId}: closureRole`,
+      );
+    }
+    const exists = requireFn(io, 'exists');
+    const parseMarkdownFile = requireFn(io, 'parseMarkdownFile');
+    const runNodePath = resolveContainedPath(
+      runDir,
+      'nodes',
+      `${runNodeId}.md`,
+    );
+    if (!exists(runNodePath)) {
+      throw new Error(
+        `Cannot infer legacy run EoW closureRole for ${runNodeId}: trusted run node missing`,
+      );
+    }
+    const node = parseMarkdownFile(runNodePath);
+    if (
+      node.entityType !== 'runNode'
+      || node.id !== runNodeId
+      || node.runId !== runId
+    ) {
+      throw new Error(
+        `Cannot infer legacy run EoW closureRole for ${runNodeId}: trusted run node mismatch`,
+      );
+    }
+    const resolvedRole = resolveRunClosureRole({ node, eow: current });
+    if (!resolvedRole.valid) {
+      throw new Error(
+        `Immutable run EoW mismatch for ${runNodeId}: closureRole`,
+      );
+    }
+    existingRole = resolvedRole.role;
+  }
+  if (existingRole !== closureRole) {
+    throw new Error(`Immutable run EoW mismatch for ${runNodeId}: closureRole`);
+  }
+  if (
+    resolvedByTaskGroupId != null
+    && resolvedByTaskGroupId !== ''
+    && current.resolvedByTaskGroupId !== resolvedByTaskGroupId
+  ) {
+    throw new Error(
+      `Immutable run EoW mismatch for ${runNodeId}: resolvedByTaskGroupId`,
+    );
+  }
+}
+
+export function closeRunNodeWithEowFiles({
+  runDir,
+  runId,
+  runNodeId,
+  reason,
+  finishedAt,
+  closureRole,
+  declaredBy = 'taskops-runner',
+  approvedReview = null,
+  resolvedByTaskGroupId = null,
+}, io) {
+  assertPortablePathComponent(runNodeId, 'runNodeId');
   const exists = requireFn(io, 'exists');
   const writeTextFile = requireFn(io, 'writeTextFile');
   const fmBlock = requireFn(io, 'fmBlock');
@@ -336,8 +510,13 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
     runNodeId,
   }, io);
   const eowRunNodeId = existing?.id || canonicalId;
+  let wroteEow = false;
   if (!existing) {
-    const canonicalPath = join(runDir, 'nodes', `${canonicalId}.md`);
+    const canonicalPath = resolveContainedPath(
+      runDir,
+      'nodes',
+      `${canonicalId}.md`,
+    );
     const eowFm = {
       taskOpsVersion: 'v1',
       entityType: 'eow',
@@ -348,7 +527,7 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
       attachedToId: runNodeId,
       reason,
       closureRole,
-      declaredBy: 'taskops-runner',
+      declaredBy,
       declaredAt: finishedAt,
       createdAt: finishedAt,
       status: 'done',
@@ -357,23 +536,26 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
     applyApprovedReviewToEow(eowFm, approvedReview);
     assertEowFilenameBudget(canonicalId);
     writeTextFile(canonicalPath, fmBlock(eowFm) + `# EoW: ${runNodeId}\n`);
+    wroteEow = true;
   } else {
-    const current = existing.frontmatter;
-    const immutableFields = {
+    assertRunEowImmutableReuse({
+      existing,
+      runDir,
+      runId,
+      runNodeId,
       reason,
       closureRole,
-    };
-    if (resolvedByTaskGroupId != null && resolvedByTaskGroupId !== '') {
-      immutableFields.resolvedByTaskGroupId = resolvedByTaskGroupId;
-    }
-    for (const [field, expected] of Object.entries(immutableFields)) {
-      if (current[field] !== expected) {
-        throw new Error(`Immutable run EoW mismatch for ${runNodeId}: ${field}`);
-      }
-    }
+      resolvedByTaskGroupId,
+    }, io);
   }
   const edgeId = `edge-${runNodeId}-to-eow`;
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
+  assertPortablePathComponent(edgeId, 'run edge id');
+  const edgePath = resolveContainedPath(
+    runDir,
+    'edges',
+    `${edgeId}.md`,
+  );
+  let wroteEdge = false;
   if (!exists(edgePath)) {
     const edgeFm = {
       taskOpsVersion: 'v1',
@@ -387,7 +569,14 @@ export function closeRunNodeWithEowFiles({ runDir, runId, runNodeId, reason, fin
       status: 'done',
     };
     writeTextFile(edgePath, fmBlock(edgeFm) + `# Run edge: ${runNodeId} closes with EoW\n`);
+    wroteEdge = true;
   }
+  return {
+    eowRunNodeId,
+    edgeId,
+    wroteEow,
+    wroteEdge,
+  };
 }
 
 export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }, io) {
@@ -406,7 +595,7 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
     taskGroupVersionId,
     taskId: task.id,
   });
-  const eowTaskDir = join(versionDir, 'eow');
+  const eowTaskDir = resolveContainedPath(versionDir, 'eow');
   ensureDir(eowTaskDir);
   const existing = resolveExistingTaskEowFile({
     versionDir,
@@ -414,7 +603,10 @@ export function closeTaskWithEowFile({ task, reason, finishedAt, approvedReview 
     taskId: task.id,
   }, io);
   if (!existing) {
-    const canonicalPath = join(eowTaskDir, `${canonicalId}.md`);
+    const canonicalPath = resolveContainedPath(
+      eowTaskDir,
+      `${canonicalId}.md`,
+    );
     const eowFm = {
       taskOpsVersion: 'v1',
       entityType: 'eow',

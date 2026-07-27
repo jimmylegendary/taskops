@@ -1,8 +1,18 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import fs, {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { canonicalSha256 } from '../lib-run-closure.js';
@@ -11,7 +21,14 @@ import {
   runEowId,
   taskEowId,
 } from '../lib-run-identity.js';
-import { fmBlock, isPartialUnresolved, parseMarkdownFile, parseProject, readBody } from '../lib-taskops.js';
+import {
+  fmBlock,
+  isPartialUnresolved,
+  parseMarkdownFile,
+  parseProject,
+  promotePartialCompletions,
+  readBody,
+} from '../lib-taskops.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const cli = resolve(__dirname, '..', 'bin', 'taskops.js');
@@ -27,6 +44,47 @@ function run(args) {
 
 function json(args) {
   return JSON.parse(run([...args, '--json']));
+}
+
+function traceSynchronousFs(callback) {
+  const methodNames = [
+    'appendFileSync',
+    'existsSync',
+    'lstatSync',
+    'mkdirSync',
+    'readFileSync',
+    'readdirSync',
+    'statSync',
+    'writeFileSync',
+  ];
+  const originals = new Map();
+  const calls = [];
+  for (const name of methodNames) {
+    const original = fs[name];
+    originals.set(name, original);
+    fs[name] = function tracedFsCall(...args) {
+      if (typeof args[0] === 'string') {
+        calls.push({ operation: name, path: resolve(args[0]) });
+      }
+      return original.apply(this, args);
+    };
+  }
+  syncBuiltinESMExports();
+  let error = null;
+  try {
+    callback();
+  } catch (caught) {
+    error = caught;
+  } finally {
+    for (const [name, original] of originals) fs[name] = original;
+    syncBuiltinESMExports();
+  }
+  return { calls, error };
+}
+
+function isContainedBy(root, path) {
+  const rel = relative(resolve(root), resolve(path));
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !/^\.\.(?:[/\\]|$)/.test(rel));
 }
 
 function writeTaskPartial(workDir, versionId, taskId, partialId, { completedSummary = 'Completed slice.', incompleteSummary = 'Remaining slice.' } = {}) {
@@ -310,21 +368,6 @@ writeFileSync(
   }) + `# EoW: ${sourceRunNodeId}\n`,
   'utf8',
 );
-writeFileSync(
-  sourceCloseEdgePath,
-  fmBlock({
-    taskOpsVersion: 'v1',
-    entityType: 'runEdge',
-    id: sourceCloseEdgeId,
-    runId: sourceRunId,
-    fromRunNodeId: sourceRunNodeId,
-    toRunNodeId: legacySourceRunEowId,
-    edgeType: 'closes_with',
-    createdAt: '2026-06-27T00:00:00Z',
-    status: 'done',
-  }) + `# Run edge: ${sourceRunNodeId} closes with EoW\n`,
-  'utf8',
-);
 const promotedSourcePartial = parseMarkdownFile(primaryClose.partialPath);
 promotedSourcePartial.sourceRunId = sourceRunId;
 promotedSourcePartial.sourceRunNodeId = sourceRunNodeId;
@@ -461,6 +504,312 @@ assert.equal(versionPlan.specPreview.eows.length, 1);
 assert.equal(versionPlan.specPreview.eows[0].preservedFromEowId, 'eow-task-upstream');
 assert.equal(existsSync(join(workDir, 'task-groups', 'tg-root', 'versions', 'tgv-root-v3')), false, 'dry-run must not create the planned version directory');
 
+const primaryPartialRel = relative(workDir, primaryClose.partialPath);
+const sourceNodeRel = relative(
+  workDir,
+  join(sourceRunDir, 'nodes', `${sourceRunNodeId}.md`),
+);
+const sourceEowRel = relative(
+  workDir,
+  join(sourceRunDir, 'nodes', `${legacySourceRunEowId}.md`),
+);
+const sourceEdgeRel = relative(workDir, sourceCloseEdgePath);
+const mutationWatchRels = [
+  'index.md',
+  'snapshots/snapshot-root-v1.md',
+  'task-groups/tg-root/index.md',
+  'task-groups/tg-root/versions/tgv-root-v2/index.md',
+  primaryPartialRel,
+];
+
+function copyPrimaryPromotionFixture(name) {
+  const fixtureDir = join(tempRoot, name);
+  cpSync(workDir, fixtureDir, { recursive: true });
+  return fixtureDir;
+}
+
+function promotionMutationSnapshot(fixtureDir) {
+  return {
+    watchedFiles: Object.fromEntries(mutationWatchRels.map((rel) => [
+      rel,
+      readFileSync(join(fixtureDir, rel), 'utf8'),
+    ])),
+    sourceEdgeExists: existsSync(join(fixtureDir, sourceEdgeRel)),
+    sourceRunLogExists: existsSync(join(
+      fixtureDir,
+      'runs',
+      sourceRunId,
+      'run-log.md',
+    )),
+    newVersionExists: existsSync(join(
+      fixtureDir,
+      'task-groups',
+      'tg-root',
+      'versions',
+      'tgv-root-v3',
+    )),
+  };
+}
+
+const traversalPromotionDir = copyPrimaryPromotionFixture(
+  'promoted-source-traversal',
+);
+const traversalPartialPath = join(traversalPromotionDir, primaryPartialRel);
+const traversalPartial = parseMarkdownFile(traversalPartialPath);
+traversalPartial.sourceRunId = '../../../../outside-promoted-run';
+traversalPartial.sourceRunNodeId = 'outside-node';
+writeFileSync(
+  traversalPartialPath,
+  fmBlock(traversalPartial) + `${readBody(traversalPartialPath)}\n`,
+  'utf8',
+);
+const traversalDerivedRunDir = join(
+  traversalPromotionDir,
+  'runs',
+  traversalPartial.sourceRunId,
+);
+assert.equal(
+  isContainedBy(traversalPromotionDir, traversalDerivedRunDir),
+  false,
+  'promoted-source traversal fixture must derive outside the work tree under the old implementation',
+);
+const traversalBefore = promotionMutationSnapshot(traversalPromotionDir);
+const traversalTrace = traceSynchronousFs(() => promotePartialCompletions(
+  traversalPromotionDir,
+  { partialId: primaryClose.partialId, dryRun: false },
+));
+assert.ok(traversalTrace.calls.length > 0, 'promoted traversal trace must observe real filesystem activity');
+assert.deepEqual(
+  traversalTrace.calls.filter((call) => isContainedBy(
+    traversalDerivedRunDir,
+    call.path,
+  )),
+  [],
+  'unsafe promoted-source metadata must produce zero attacker-derived filesystem I/O',
+);
+assert.deepEqual(
+  traversalTrace.calls.filter((call) => (
+    !isContainedBy(traversalPromotionDir, call.path)
+    && call.operation !== 'existsSync'
+  )),
+  [],
+  'unsafe promoted-source metadata must produce zero out-of-tree read/readdir/stat/mkdir/write/append I/O',
+);
+assert.match(
+  traversalTrace.error?.message || '',
+  /Unsafe promoted source reference/,
+  'unsafe promoted-source metadata must fail with a deterministic TaskOps error',
+);
+assert.deepEqual(
+  promotionMutationSnapshot(traversalPromotionDir),
+  traversalBefore,
+  'unsafe promoted-source metadata must fail before any version, edge, log, or partial mutation',
+);
+
+const nodeTraversalPromotionDir = copyPrimaryPromotionFixture(
+  'promoted-source-node-traversal',
+);
+const nodeTraversalPartialPath = join(
+  nodeTraversalPromotionDir,
+  primaryPartialRel,
+);
+const nodeTraversalPartial = parseMarkdownFile(nodeTraversalPartialPath);
+nodeTraversalPartial.sourceRunNodeId = '../../../../outside-promoted-node';
+writeFileSync(
+  nodeTraversalPartialPath,
+  fmBlock(nodeTraversalPartial) + `${readBody(nodeTraversalPartialPath)}\n`,
+  'utf8',
+);
+const nodeTraversalDerivedPath = join(
+  nodeTraversalPromotionDir,
+  'runs',
+  sourceRunId,
+  'nodes',
+  `${nodeTraversalPartial.sourceRunNodeId}.md`,
+);
+assert.equal(
+  isContainedBy(nodeTraversalPromotionDir, nodeTraversalDerivedPath),
+  false,
+  'promoted-source node traversal fixture must derive outside the work under the old implementation',
+);
+const nodeTraversalBefore = promotionMutationSnapshot(
+  nodeTraversalPromotionDir,
+);
+const nodeTraversalTrace = traceSynchronousFs(() => promotePartialCompletions(
+  nodeTraversalPromotionDir,
+  { partialId: primaryClose.partialId, dryRun: false },
+));
+assert.deepEqual(
+  nodeTraversalTrace.calls.filter((call) => isContainedBy(
+    nodeTraversalDerivedPath,
+    call.path,
+  )),
+  [],
+  'unsafe promoted sourceRunNodeId must produce zero attacker-derived filesystem I/O',
+);
+assert.deepEqual(
+  nodeTraversalTrace.calls.filter((call) => (
+    !isContainedBy(nodeTraversalPromotionDir, call.path)
+    && call.operation !== 'existsSync'
+  )),
+  [],
+  'unsafe promoted sourceRunNodeId must produce zero out-of-tree read/readdir/stat/mkdir/write/append I/O',
+);
+assert.match(
+  nodeTraversalTrace.error?.message || '',
+  /Unsafe promoted source reference/,
+  'unsafe promoted sourceRunNodeId must fail with a deterministic TaskOps error',
+);
+assert.deepEqual(
+  promotionMutationSnapshot(nodeTraversalPromotionDir),
+  nodeTraversalBefore,
+  'unsafe promoted sourceRunNodeId must fail before any version, edge, log, or partial mutation',
+);
+
+const symlinkPromotionDir = copyPrimaryPromotionFixture(
+  'promoted-source-symlink',
+);
+const symlinkNodesDir = join(
+  symlinkPromotionDir,
+  'runs',
+  sourceRunId,
+  'nodes',
+);
+const symlinkOutsideNodesDir = join(
+  tempRoot,
+  'outside-promoted-source-nodes',
+);
+cpSync(symlinkNodesDir, symlinkOutsideNodesDir, { recursive: true });
+rmSync(symlinkNodesDir, { recursive: true });
+symlinkSync(symlinkOutsideNodesDir, symlinkNodesDir, 'dir');
+const symlinkBefore = promotionMutationSnapshot(symlinkPromotionDir);
+const symlinkTrace = traceSynchronousFs(() => promotePartialCompletions(
+  symlinkPromotionDir,
+  { partialId: primaryClose.partialId, dryRun: false },
+));
+assert.deepEqual(
+  symlinkTrace.calls.filter((call) => (
+    ['readFileSync', 'readdirSync', 'statSync'].includes(call.operation)
+    && isContainedBy(symlinkNodesDir, call.path)
+  )),
+  [],
+  'promoted-source parsing must not read through the lexical nodes symlink',
+);
+assert.deepEqual(
+  symlinkTrace.calls.filter((call) => isContainedBy(
+    symlinkOutsideNodesDir,
+    call.path,
+  )),
+  [],
+  'promoted-source parsing must not follow a trusted-tree symlink outside the work',
+);
+assert.match(
+  symlinkTrace.error?.message || '',
+  /Unsafe promoted source reference/,
+  'symlinked promoted-source records must fail with a deterministic TaskOps error',
+);
+assert.deepEqual(
+  promotionMutationSnapshot(symlinkPromotionDir),
+  symlinkBefore,
+  'symlinked promoted-source records must fail before any version, edge, log, or partial mutation',
+);
+
+function assertPromotedReuseMismatchNoMutation({
+  name,
+  field,
+  value,
+  makeHistorical = false,
+}) {
+  const fixtureDir = copyPrimaryPromotionFixture(name);
+  const eowPath = join(fixtureDir, sourceEowRel);
+  const eow = parseMarkdownFile(eowPath);
+  eow[field] = value;
+  writeFileSync(eowPath, fmBlock(eow) + `${readBody(eowPath)}\n`, 'utf8');
+  if (makeHistorical) {
+    const nodePath = join(fixtureDir, sourceNodeRel);
+    const node = parseMarkdownFile(nodePath);
+    node.sourceTaskId = 'task-old';
+    node.sourceTaskGroupVersionId = 'tgv-root-old';
+    writeFileSync(nodePath, fmBlock(node) + `${readBody(nodePath)}\n`, 'utf8');
+  }
+  const before = promotionMutationSnapshot(fixtureDir);
+  let error = null;
+  try {
+    promotePartialCompletions(fixtureDir, {
+      partialId: primaryClose.partialId,
+      dryRun: false,
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert.match(
+    error?.message || '',
+    new RegExp(`Immutable run EoW mismatch.*${field}`),
+    `promoted-source ${field} mismatch must fail closed`,
+  );
+  assert.deepEqual(
+    promotionMutationSnapshot(fixtureDir),
+    before,
+    `promoted-source ${field} mismatch must precede edge, log, partial, and version mutation`,
+  );
+}
+
+assertPromotedReuseMismatchNoMutation({
+  name: 'promoted-source-reason-mismatch',
+  field: 'reason',
+  value: 'manual_close',
+});
+assertPromotedReuseMismatchNoMutation({
+  name: 'promoted-source-spoofed-recorded-partial',
+  field: 'reason',
+  value: 'partial_recorded',
+});
+assertPromotedReuseMismatchNoMutation({
+  name: 'promoted-source-role-mismatch',
+  field: 'closureRole',
+  value: 'claim-bearing',
+  makeHistorical: true,
+});
+
+for (const [field, value] of [
+  ['partialId', 'partial-other'],
+  ['sourceRunId', 'run-other'],
+  ['sourceRunNodeId', 'run-node-other'],
+]) {
+  const fixtureDir = copyPrimaryPromotionFixture(
+    `recorded-partial-${field}-mismatch`,
+  );
+  const eowPath = join(fixtureDir, sourceEowRel);
+  const eow = parseMarkdownFile(eowPath);
+  eow.reason = 'partial_recorded';
+  writeFileSync(eowPath, fmBlock(eow) + `${readBody(eowPath)}\n`, 'utf8');
+  const nodePath = join(fixtureDir, sourceNodeRel);
+  const node = parseMarkdownFile(nodePath);
+  node.result = {
+    partialCompletion: {
+      partialId: primaryClose.partialId,
+      sourceRunId,
+      sourceRunNodeId,
+      [field]: value,
+    },
+  };
+  writeFileSync(nodePath, fmBlock(node) + `${readBody(nodePath)}\n`, 'utf8');
+  const before = promotionMutationSnapshot(fixtureDir);
+  assert.throws(
+    () => promotePartialCompletions(fixtureDir, {
+      partialId: primaryClose.partialId,
+      dryRun: false,
+    }),
+    /Immutable run EoW mismatch.*reason/,
+    `recorded partial ${field} mismatch must not authorize compatibility reuse`,
+  );
+  assert.deepEqual(
+    promotionMutationSnapshot(fixtureDir),
+    before,
+    `recorded partial ${field} mismatch must precede edge, log, partial, and version mutation`,
+  );
+}
+
 const applied = json(['promote-partials', workDir, '--apply', '--partial-id', primaryClose.partialId]);
 assert.equal(applied.dryRun, false);
 assert.equal(applied.applied, true);
@@ -469,6 +818,11 @@ assert.equal(applied.waveBudget.nextCount, 1);
 assert.equal(applied.appliedVersionPlans[0].toVersionId, 'tgv-root-v3');
 const closedSource = applied.appliedVersionPlans[0].closedSourceRunNodes[0];
 assert.equal(closedSource.wroteEow, false);
+assert.equal(
+  closedSource.wroteEdge,
+  true,
+  'legacy source reuse with no pre-existing close edge must create the edge',
+);
 assert.equal(
   closedSource.eowRunNodeId,
   legacyQualifiedRunEowId({ runId: sourceRunId, runNodeId: sourceRunNodeId }),

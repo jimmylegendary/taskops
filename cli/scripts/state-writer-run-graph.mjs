@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ import {
   readBody,
 } from '../lib-taskops.js';
 import {
+  decodeCanonicalEowId,
   legacyQualifiedRunEowId,
   legacyQualifiedTaskEowId,
   runEowId,
@@ -79,14 +80,25 @@ function stateWriterIo() {
 function tracingStateWriterIo() {
   const base = stateWriterIo();
   const calls = {
+    appendTextFile: [],
+    ensureDir: [],
     exists: [],
     parseMarkdownFile: [],
     readBody: [],
+    writeTextFile: [],
   };
   return {
     calls,
     io: {
       ...base,
+      appendTextFile: (path, text) => {
+        calls.appendTextFile.push(path);
+        return base.appendTextFile(path, text);
+      },
+      ensureDir: (path) => {
+        calls.ensureDir.push(path);
+        return base.ensureDir(path);
+      },
       exists: (path) => {
         calls.exists.push(path);
         return base.exists(path);
@@ -98,6 +110,10 @@ function tracingStateWriterIo() {
       readBody: (path) => {
         calls.readBody.push(path);
         return base.readBody(path);
+      },
+      writeTextFile: (path, text) => {
+        calls.writeTextFile.push(path);
+        return base.writeTextFile(path, text);
       },
     },
   };
@@ -298,6 +314,7 @@ function seedRunEow(path, {
   runNodeId,
   reason = 'manual_close',
   closureRole = 'supporting',
+  omitClosureRole = false,
   resolvedByTaskGroupId = null,
 }) {
   const fm = {
@@ -309,12 +326,12 @@ function seedRunEow(path, {
     attachedToType: 'runNode',
     attachedToId: runNodeId,
     reason,
-    closureRole,
     declaredBy: 'fixture',
     declaredAt: fixedNow,
     createdAt: fixedNow,
     status: 'done',
   };
+  if (!omitClosureRole) fm.closureRole = closureRole;
   if (resolvedByTaskGroupId) {
     fm.resolvedByTaskGroupId = resolvedByTaskGroupId;
   }
@@ -326,6 +343,7 @@ function seedTaskEow(path, {
   taskGroupVersionId,
   taskId,
   reason = 'completed',
+  omitTaskGroupVersionId = false,
   resolvedByTaskGroupId = null,
 }) {
   mkdirSync(dirname(path), { recursive: true });
@@ -336,13 +354,13 @@ function seedTaskEow(path, {
     graphType: 'task',
     attachedToType: 'task',
     attachedToId: taskId,
-    taskGroupVersionId,
     reason,
     declaredBy: 'fixture',
     declaredAt: fixedNow,
     createdAt: fixedNow,
     status: 'done',
   };
+  if (!omitTaskGroupVersionId) fm.taskGroupVersionId = taskGroupVersionId;
   if (resolvedByTaskGroupId) {
     fm.resolvedByTaskGroupId = resolvedByTaskGroupId;
   }
@@ -559,6 +577,186 @@ assert.equal(
   unqualifiedId,
 );
 
+const authenticV0Run = seedTree(join(tempRoot, 'authentic-v0-run-reuse'));
+const authenticV0RunNodeId = 'run-node-authentic-v0';
+const authenticV0RunEowId = `eow-${authenticV0RunNodeId}`;
+writeFileSync(
+  join(authenticV0Run.runDir, 'nodes', `${authenticV0RunNodeId}.md`),
+  [
+    '---',
+    'taskOpsVersion: v1',
+    'entityType: runNode',
+    `id: ${authenticV0RunNodeId}`,
+    'runId: run-authentic-v0',
+    'type: verification',
+    'title: Authentic pre-hardening run node',
+    'status: done',
+    `createdAt: ${fixedNow}`,
+    '---',
+    '# Authentic pre-hardening run node',
+    '',
+  ].join('\n'),
+  'utf8',
+);
+const authenticV0RunEowPath = join(
+  authenticV0Run.runDir,
+  'nodes',
+  `${authenticV0RunEowId}.md`,
+);
+writeFileSync(
+  authenticV0RunEowPath,
+  [
+    '---',
+    'taskOpsVersion: v1',
+    'entityType: eow',
+    `id: ${authenticV0RunEowId}`,
+    'runId: run-authentic-v0',
+    'graphType: run',
+    'attachedToType: runNode',
+    `attachedToId: ${authenticV0RunNodeId}`,
+    'reason: manual_close',
+    'declaredBy: fixture',
+    `declaredAt: ${fixedNow}`,
+    `createdAt: ${fixedNow}`,
+    'status: done',
+    '---',
+    '# Authentic pre-hardening run EoW',
+    '',
+  ].join('\n'),
+  'utf8',
+);
+const authenticV0RunBefore = readFileSync(authenticV0RunEowPath, 'utf8');
+closeRunNodeWithEowFiles({
+  runDir: authenticV0Run.runDir,
+  runId: 'run-authentic-v0',
+  runNodeId: authenticV0RunNodeId,
+  reason: 'manual_close',
+  closureRole: 'supporting',
+  finishedAt: fixedNow,
+}, stateWriterIo());
+assert.equal(
+  readFileSync(authenticV0RunEowPath, 'utf8'),
+  authenticV0RunBefore,
+  'authentic v0 run EoW reuse must remain byte-identical',
+);
+assert.equal(
+  parseMarkdownFile(join(
+    authenticV0Run.runDir,
+    'edges',
+    `edge-${authenticV0RunNodeId}-to-eow.md`,
+  )).toRunNodeId,
+  authenticV0RunEowId,
+);
+
+for (const [name, storedRole] of [
+  ['conflicting', 'claim-bearing'],
+  ['malformed', ''],
+]) {
+  const runId = `run-authentic-v0-${name}-role`;
+  const runNodeId = `run-node-authentic-v0-${name}-role`;
+  const fixture = seedTree(join(tempRoot, `${name}-authentic-v0-run-role`));
+  writeFileSync(
+    join(fixture.runDir, 'nodes', `${runNodeId}.md`),
+    fmBlock({
+      taskOpsVersion: 'v1',
+      entityType: 'runNode',
+      id: runNodeId,
+      runId,
+      type: 'verification',
+      title: `${name} authentic v0 role`,
+      status: 'done',
+      createdAt: fixedNow,
+    }) + `# ${name} authentic v0 role\n`,
+    'utf8',
+  );
+  seedRunEow(
+    join(fixture.runDir, 'nodes', `eow-${runNodeId}.md`),
+    {
+      id: `eow-${runNodeId}`,
+      runId,
+      runNodeId,
+      closureRole: storedRole,
+    },
+  );
+  assert.throws(
+    () => closeRunNodeWithEowFiles({
+      runDir: fixture.runDir,
+      runId,
+      runNodeId,
+      reason: 'manual_close',
+      closureRole: 'supporting',
+      finishedAt: fixedNow,
+    }, stateWriterIo()),
+    /Immutable run EoW mismatch.*closureRole/,
+    `authentic v0 ${name} present closureRole must not be inferred`,
+  );
+}
+
+for (const {
+  name,
+  id,
+  format,
+} of [
+  {
+    name: 'qualified-v1',
+    id: legacyQualifiedRunEowId({
+      runId: 'run-role-omission',
+      runNodeId: 'run-node-role-omission',
+    }),
+    format: 'qualified-v1',
+  },
+  {
+    name: 'canonical-v2',
+    id: runEowId({
+      runId: 'run-role-omission',
+      runNodeId: 'run-node-role-omission',
+    }),
+    format: 'canonical-v2',
+  },
+]) {
+  const fixture = seedTree(join(tempRoot, `${name}-run-role-omission`));
+  writeFileSync(
+    join(fixture.runDir, 'nodes', 'run-node-role-omission.md'),
+    fmBlock({
+      taskOpsVersion: 'v1',
+      entityType: 'runNode',
+      id: 'run-node-role-omission',
+      runId: 'run-role-omission',
+      type: 'verification',
+      title: `${name} role omission`,
+      status: 'done',
+      createdAt: fixedNow,
+    }) + `# ${name} role omission\n`,
+    'utf8',
+  );
+  seedRunEow(join(fixture.runDir, 'nodes', `${id}.md`), {
+    id,
+    runId: 'run-role-omission',
+    runNodeId: 'run-node-role-omission',
+    omitClosureRole: true,
+  });
+  assert.equal(
+    resolveExistingRunEowFile({
+      runDir: fixture.runDir,
+      runId: 'run-role-omission',
+      runNodeId: 'run-node-role-omission',
+    }, stateWriterIo()).format,
+    format,
+  );
+  assert.throws(
+    () => closeRunNodeWithEowFiles({
+      runDir: fixture.runDir,
+      runId: 'run-role-omission',
+      runNodeId: 'run-node-role-omission',
+      reason: 'manual_close',
+      closureRole: 'supporting',
+      finishedAt: fixedNow,
+    }, stateWriterIo()),
+    /Immutable run EoW mismatch.*closureRole/,
+    `${name} must not receive the v0 missing-role compatibility`,
+  );
+}
+
 const collisionRunDir = seedTree(
   join(tempRoot, 'run-collision-owner'),
 ).runDir;
@@ -611,6 +809,47 @@ assert.equal(
 assert.equal(
   parseMarkdownFile(legacyCollisionPath).attachedToId,
   'run-node+a',
+);
+
+const wrongContainerRunDir = seedTree(
+  join(tempRoot, 'wrong-container-qualified-run-collision'),
+).runDir;
+const wrongContainerRequestedRunId = 'run+container';
+const wrongContainerRequestedRunNodeId = 'run-node+collision';
+const wrongContainerStoredRunId = 'run-container';
+const wrongContainerStoredRunNodeId = 'run-node-collision';
+const wrongContainerRunCandidate = legacyQualifiedRunEowId({
+  runId: wrongContainerRequestedRunId,
+  runNodeId: wrongContainerRequestedRunNodeId,
+});
+assert.equal(
+  legacyQualifiedRunEowId({
+    runId: wrongContainerStoredRunId,
+    runNodeId: wrongContainerStoredRunNodeId,
+  }),
+  wrongContainerRunCandidate,
+  'wrong-container run fixture must be a real qualified-v1 lossy collision',
+);
+assert.notEqual(wrongContainerStoredRunId, wrongContainerRequestedRunId);
+seedRunEow(
+  join(
+    wrongContainerRunDir,
+    'nodes',
+    `${wrongContainerRunCandidate}.md`,
+  ),
+  {
+    id: wrongContainerRunCandidate,
+    runId: wrongContainerStoredRunId,
+    runNodeId: wrongContainerStoredRunNodeId,
+  },
+);
+assert.throws(
+  () => resolveExistingRunEowFile({
+    runDir: wrongContainerRunDir,
+    runId: wrongContainerRequestedRunId,
+    runNodeId: wrongContainerRequestedRunNodeId,
+  }, stateWriterIo()),
+  /Qualified EoW candidate.*wrong run container/i,
 );
 
 const corruptRunDir = seedTree(
@@ -800,6 +1039,154 @@ assert.throws(
   /Unqualified EoW candidate.*owned by another tuple/,
 );
 
+const malformedReservedRunDir = seedTree(
+  join(tempRoot, 'malformed-reserved-qualified-run'),
+).runDir;
+const malformedReservedRunId = 'run-reserved';
+const malformedReservedRunNodeId = 'v2-r.reserved';
+const malformedReservedRunCandidate = legacyQualifiedRunEowId({
+  runId: malformedReservedRunId,
+  runNodeId: malformedReservedRunNodeId,
+});
+assert.match(malformedReservedRunCandidate, /^eow-v2-/);
+assert.throws(
+  () => decodeCanonicalEowId(malformedReservedRunCandidate),
+  /malformed canonical EoW id/i,
+);
+seedRunEow(
+  join(
+    malformedReservedRunDir,
+    'nodes',
+    `${malformedReservedRunCandidate}.md`,
+  ),
+  {
+    id: malformedReservedRunCandidate,
+    runId: malformedReservedRunId,
+    runNodeId: malformedReservedRunNodeId,
+  },
+);
+assert.throws(
+  () => resolveExistingRunEowFile({
+    runDir: malformedReservedRunDir,
+    runId: malformedReservedRunId,
+    runNodeId: malformedReservedRunNodeId,
+  }, stateWriterIo()),
+  /Reserved EoW candidate.*malformed canonical/i,
+);
+
+const wrongTupleReservedRunDir = seedTree(
+  join(tempRoot, 'wrong-tuple-reserved-unqualified-run'),
+).runDir;
+const wrongTupleReservedRunId = 'run-requested';
+const wrongTupleReservedRunNodeId = 'v2-r.cnVuLW5vZGUtb3RoZXI.cnVuLW90aGVy';
+const wrongTupleReservedRunCandidate = `eow-${wrongTupleReservedRunNodeId}`;
+assert.deepEqual(
+  decodeCanonicalEowId(wrongTupleReservedRunCandidate),
+  {
+    graphType: 'run',
+    attachedToType: 'runNode',
+    attachedToId: 'run-node-other',
+    runId: 'run-other',
+  },
+);
+seedRunEow(
+  join(
+    wrongTupleReservedRunDir,
+    'nodes',
+    `${wrongTupleReservedRunCandidate}.md`,
+  ),
+  {
+    id: wrongTupleReservedRunCandidate,
+    runId: wrongTupleReservedRunId,
+    runNodeId: wrongTupleReservedRunNodeId,
+  },
+);
+assert.throws(
+  () => resolveExistingRunEowFile({
+    runDir: wrongTupleReservedRunDir,
+    runId: wrongTupleReservedRunId,
+    runNodeId: wrongTupleReservedRunNodeId,
+  }, stateWriterIo()),
+  /Reserved EoW candidate.*does not encode requested run tuple/i,
+);
+
+const malformedReservedTask = seedTree(
+  join(tempRoot, 'malformed-reserved-qualified-task'),
+);
+const malformedReservedTaskVersionDir = dirname(
+  dirname(malformedReservedTask.taskPath),
+);
+const malformedReservedTaskVersionId = 'version-reserved';
+const malformedReservedTaskId = 'v2-t.reserved';
+const malformedReservedTaskCandidate = legacyQualifiedTaskEowId({
+  taskGroupVersionId: malformedReservedTaskVersionId,
+  taskId: malformedReservedTaskId,
+});
+assert.match(malformedReservedTaskCandidate, /^eow-v2-/);
+assert.throws(
+  () => decodeCanonicalEowId(malformedReservedTaskCandidate),
+  /malformed canonical EoW id/i,
+);
+seedTaskEow(
+  join(
+    malformedReservedTaskVersionDir,
+    'eow',
+    `${malformedReservedTaskCandidate}.md`,
+  ),
+  {
+    id: malformedReservedTaskCandidate,
+    taskGroupVersionId: malformedReservedTaskVersionId,
+    taskId: malformedReservedTaskId,
+  },
+);
+assert.throws(
+  () => resolveExistingTaskEowFile({
+    versionDir: malformedReservedTaskVersionDir,
+    taskGroupVersionId: malformedReservedTaskVersionId,
+    taskId: malformedReservedTaskId,
+  }, stateWriterIo()),
+  /Reserved EoW candidate.*malformed canonical/i,
+);
+
+const wrongTupleReservedTask = seedTree(
+  join(tempRoot, 'wrong-tuple-reserved-unqualified-task'),
+);
+const wrongTupleReservedTaskVersionDir = dirname(
+  dirname(wrongTupleReservedTask.taskPath),
+);
+const wrongTupleReservedTaskVersionId = 'version-requested';
+const wrongTupleReservedTaskId = 'v2-t.dGFzay1vdGhlcg.dmVyc2lvbi1vdGhlcg';
+const wrongTupleReservedTaskCandidate = `eow-${wrongTupleReservedTaskId}`;
+assert.deepEqual(
+  decodeCanonicalEowId(wrongTupleReservedTaskCandidate),
+  {
+    graphType: 'task',
+    attachedToType: 'task',
+    attachedToId: 'task-other',
+    taskGroupVersionId: 'version-other',
+  },
+);
+seedTaskEow(
+  join(
+    wrongTupleReservedTaskVersionDir,
+    'eow',
+    `${wrongTupleReservedTaskCandidate}.md`,
+  ),
+  {
+    id: wrongTupleReservedTaskCandidate,
+    taskGroupVersionId: wrongTupleReservedTaskVersionId,
+    taskId: wrongTupleReservedTaskId,
+  },
+);
+assert.throws(
+  () => resolveExistingTaskEowFile({
+    versionDir: wrongTupleReservedTaskVersionDir,
+    taskGroupVersionId: wrongTupleReservedTaskVersionId,
+    taskId: wrongTupleReservedTaskId,
+  }, stateWriterIo()),
+  /Reserved EoW candidate.*does not encode requested task tuple/i,
+);
+
 const separatorRun = seedTree(join(tempRoot, 'separator-run-candidate'));
 const separatorRunId = 'run-separator';
 const separatorRunNodeId = 'nested/run-node';
@@ -815,29 +1202,101 @@ seedRunEow(unsafeRunCandidatePath, {
   runId: separatorRunId,
   runNodeId: separatorRunNodeId,
 });
-const separatorRunEdgePath = join(
-  separatorRun.runDir,
-  'edges',
-  `edge-${separatorRunNodeId}-to-eow.md`,
-);
-mkdirSync(dirname(separatorRunEdgePath), { recursive: true });
-const tracedRunIo = tracingStateWriterIo();
-closeRunNodeWithEowFiles({
-  runDir: separatorRun.runDir,
-  runId: separatorRunId,
-  runNodeId: separatorRunNodeId,
-  reason: 'manual_close',
-  closureRole: 'supporting',
-  finishedAt: fixedNow,
-}, tracedRunIo.io);
 const separatorRunCanonicalId = runEowId({
   runId: separatorRunId,
   runNodeId: separatorRunNodeId,
 });
+assert.equal(
+  decodeCanonicalEowId(separatorRunCanonicalId).attachedToId,
+  separatorRunNodeId,
+  'identity codec support for separator-bearing strings must remain unchanged',
+);
 const separatorRunCanonicalPath = join(
   separatorRun.runDir,
   'nodes',
   `${separatorRunCanonicalId}.md`,
+);
+const tracedRunCandidateIo = tracingStateWriterIo();
+assert.equal(
+  resolveExistingRunEowFile({
+    runDir: separatorRun.runDir,
+    runId: separatorRunId,
+    runNodeId: separatorRunNodeId,
+  }, tracedRunCandidateIo.io),
+  null,
+);
+
+const traversalRun = seedTree(join(tempRoot, 'traversal-run-edge-write'));
+const traversalRunNodeId = 'segment/../../../outside-run-edge';
+const traversalRunEdgePath = join(
+  traversalRun.runDir,
+  'edges',
+  `edge-${traversalRunNodeId}-to-eow.md`,
+);
+assert.match(
+  relative(traversalRun.runDir, traversalRunEdgePath),
+  /^\.\.(?:[/\\]|$)/,
+  'run-edge traversal fixture must resolve outside the trusted run directory',
+);
+const tracedTraversalRunIo = tracingStateWriterIo();
+assert.throws(
+  () => closeRunNodeWithEowFiles({
+    runDir: traversalRun.runDir,
+    runId: 'run-traversal',
+    runNodeId: traversalRunNodeId,
+    reason: 'manual_close',
+    closureRole: 'supporting',
+    finishedAt: fixedNow,
+  }, tracedTraversalRunIo.io),
+  /Unsafe runNodeId path component/,
+);
+assert.deepEqual(
+  tracedTraversalRunIo.calls,
+  {
+    appendTextFile: [],
+    ensureDir: [],
+    exists: [],
+    parseMarkdownFile: [],
+    readBody: [],
+    writeTextFile: [],
+  },
+  'unsafe run-edge identity must fail before any read, mkdir, write, or append adapter call',
+);
+
+const symlinkRun = seedTree(join(tempRoot, 'symlink-run-edge-write'));
+const symlinkOutsideDir = join(tempRoot, 'outside-symlink-run-edge');
+mkdirSync(symlinkOutsideDir, { recursive: true });
+rmSync(join(symlinkRun.runDir, 'edges'), { recursive: true });
+symlinkSync(symlinkOutsideDir, join(symlinkRun.runDir, 'edges'), 'dir');
+const tracedSymlinkRunIo = tracingStateWriterIo();
+assert.throws(
+  () => writeRunEdgeFile({
+    runDir: symlinkRun.runDir,
+    runId: 'run-symlink',
+    edgeId: 'edge-safe-name',
+    fromRunNodeId: 'run-node-source',
+    toRunNodeId: 'run-node-target',
+    edgeType: 'depends_on',
+    createdAt: fixedNow,
+  }, tracedSymlinkRunIo.io),
+  /Unsafe derived path traverses symbolic link/,
+);
+assert.deepEqual(
+  tracedSymlinkRunIo.calls,
+  {
+    appendTextFile: [],
+    ensureDir: [],
+    exists: [],
+    parseMarkdownFile: [],
+    readBody: [],
+    writeTextFile: [],
+  },
+  'symlinked run-edge directory must fail before adapter I/O',
+);
+assert.deepEqual(
+  readdirSync(symlinkOutsideDir),
+  [],
+  'symlinked run-edge directory must receive no outside write',
 );
 
 const traversalTask = seedTree(join(tempRoot, 'traversal-task-candidate'));
@@ -875,15 +1334,14 @@ const traversalTaskCanonicalPath = join(
 
 assert.deepEqual(
   {
-    runUnsafeExistsProbe: tracedRunIo.calls.exists.includes(
+    runUnsafeExistsProbe: tracedRunCandidateIo.calls.exists.includes(
       unsafeRunCandidatePath,
     ),
     runUnsafeReadProbe: [
-      ...tracedRunIo.calls.parseMarkdownFile,
-      ...tracedRunIo.calls.readBody,
+      ...tracedRunCandidateIo.calls.parseMarkdownFile,
+      ...tracedRunCandidateIo.calls.readBody,
     ].includes(unsafeRunCandidatePath),
     runCanonicalCreated: existsSync(separatorRunCanonicalPath),
-    runEdgeTarget: parseMarkdownFile(separatorRunEdgePath).toRunNodeId,
     taskUnsafeExistsProbe: tracedTaskIo.calls.exists.includes(
       unsafeTaskCandidatePath,
     ),
@@ -896,8 +1354,7 @@ assert.deepEqual(
   {
     runUnsafeExistsProbe: false,
     runUnsafeReadProbe: false,
-    runCanonicalCreated: true,
-    runEdgeTarget: separatorRunCanonicalId,
+    runCanonicalCreated: false,
     taskUnsafeExistsProbe: false,
     taskUnsafeReadProbe: false,
     taskCanonicalCreated: true,
@@ -986,6 +1443,126 @@ assert.equal(
   false,
 );
 
+const authenticV0Task = seedTree(join(tempRoot, 'authentic-v0-task-reuse'));
+const authenticV0TaskVersionDir = dirname(dirname(authenticV0Task.taskPath));
+const authenticV0TaskEowPath = join(
+  authenticV0TaskVersionDir,
+  'eow',
+  'eow-task-a.md',
+);
+mkdirSync(dirname(authenticV0TaskEowPath), { recursive: true });
+writeFileSync(
+  authenticV0TaskEowPath,
+  [
+    '---',
+    'taskOpsVersion: v1',
+    'entityType: eow',
+    'id: eow-task-a',
+    'graphType: task',
+    'attachedToType: task',
+    'attachedToId: task-a',
+    'reason: completed',
+    'declaredBy: fixture',
+    `declaredAt: ${fixedNow}`,
+    `createdAt: ${fixedNow}`,
+    'status: done',
+    '---',
+    '# Authentic pre-hardening task EoW',
+    '',
+  ].join('\n'),
+  'utf8',
+);
+const authenticV0TaskBefore = readFileSync(authenticV0TaskEowPath, 'utf8');
+closeTaskWithEowFile({
+  task: { id: 'task-a', path: authenticV0Task.taskPath },
+  reason: 'completed',
+  finishedAt: fixedNow,
+}, stateWriterIo());
+assert.equal(
+  readFileSync(authenticV0TaskEowPath, 'utf8'),
+  authenticV0TaskBefore,
+  'authentic v0 task EoW reuse must remain byte-identical',
+);
+assert.equal(
+  existsSync(join(
+    authenticV0TaskVersionDir,
+    'eow',
+    `${taskEowId({
+      taskGroupVersionId: 'tgv-root-v1',
+      taskId: 'task-a',
+    })}.md`,
+  )),
+  false,
+);
+
+for (const [name, storedVersionId] of [
+  ['conflicting', 'tgv-other-v1'],
+  ['malformed', ''],
+]) {
+  const fixture = seedTree(join(tempRoot, `${name}-authentic-v0-task-version`));
+  const versionDir = dirname(dirname(fixture.taskPath));
+  seedTaskEow(
+    join(versionDir, 'eow', 'eow-task-a.md'),
+    {
+      id: 'eow-task-a',
+      taskGroupVersionId: storedVersionId,
+      taskId: 'task-a',
+    },
+  );
+  assert.throws(
+    () => resolveExistingTaskEowFile({
+      versionDir,
+      taskGroupVersionId: 'tgv-root-v1',
+      taskId: 'task-a',
+    }, stateWriterIo()),
+    /Unqualified EoW candidate.*owned by another tuple/,
+    `authentic v0 ${name} present taskGroupVersionId must not be inferred`,
+  );
+}
+
+for (const {
+  name,
+  id,
+  format,
+} of [
+  {
+    name: 'qualified-v1',
+    id: legacyQualifiedTaskEowId({
+      taskGroupVersionId: 'tgv-root-v1',
+      taskId: 'task-a',
+    }),
+    format: 'qualified-v1',
+  },
+  {
+    name: 'canonical-v2',
+    id: taskEowId({
+      taskGroupVersionId: 'tgv-root-v1',
+      taskId: 'task-a',
+    }),
+    format: 'canonical-v2',
+  },
+]) {
+  const fixture = seedTree(join(tempRoot, `${name}-task-version-omission`));
+  const versionDir = dirname(dirname(fixture.taskPath));
+  seedTaskEow(join(versionDir, 'eow', `${id}.md`), {
+    id,
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 'task-a',
+    omitTaskGroupVersionId: true,
+  });
+  assert.throws(
+    () => resolveExistingTaskEowFile({
+      versionDir,
+      taskGroupVersionId: 'tgv-root-v1',
+      taskId: 'task-a',
+    }, stateWriterIo()),
+    format === 'canonical-v2'
+      ? /Canonical EoW candidate.*owned by another tuple/
+      : /Qualified EoW candidate.*(?:owned by another tuple|wrong task version container)/,
+    `${name} must not receive the v0 missing-version compatibility`,
+  );
+}
+
 const collisionTask = seedTree(join(tempRoot, 'task-collision-owner'));
 const collisionVersionDir = dirname(dirname(collisionTask.taskPath));
 const collisionLegacyTaskId = 'eow-task-a-tgv-root-v1';
@@ -1019,6 +1596,53 @@ assert.equal(
     `${collisionCanonicalTaskId}.md`,
   )).attachedToId,
   'task-a',
+);
+
+const wrongContainerTask = seedTree(
+  join(tempRoot, 'wrong-container-qualified-task-collision'),
+);
+const wrongContainerTaskVersionDir = dirname(
+  dirname(wrongContainerTask.taskPath),
+);
+const wrongContainerRequestedVersionId = 'tgv+root-v1';
+const wrongContainerRequestedTaskId = 'task+collision';
+const wrongContainerStoredVersionId = 'tgv-root-v1';
+const wrongContainerStoredTaskId = 'task-collision';
+const wrongContainerTaskCandidate = legacyQualifiedTaskEowId({
+  taskGroupVersionId: wrongContainerRequestedVersionId,
+  taskId: wrongContainerRequestedTaskId,
+});
+assert.equal(
+  legacyQualifiedTaskEowId({
+    taskGroupVersionId: wrongContainerStoredVersionId,
+    taskId: wrongContainerStoredTaskId,
+  }),
+  wrongContainerTaskCandidate,
+  'wrong-container task fixture must be a real qualified-v1 lossy collision',
+);
+assert.notEqual(
+  wrongContainerStoredVersionId,
+  wrongContainerRequestedVersionId,
+);
+seedTaskEow(
+  join(
+    wrongContainerTaskVersionDir,
+    'eow',
+    `${wrongContainerTaskCandidate}.md`,
+  ),
+  {
+    id: wrongContainerTaskCandidate,
+    taskGroupVersionId: wrongContainerStoredVersionId,
+    taskId: wrongContainerStoredTaskId,
+  },
+);
+assert.throws(
+  () => resolveExistingTaskEowFile({
+    versionDir: wrongContainerTaskVersionDir,
+    taskGroupVersionId: wrongContainerRequestedVersionId,
+    taskId: wrongContainerRequestedTaskId,
+  }, stateWriterIo()),
+  /Qualified EoW candidate.*wrong task version container/i,
 );
 
 const mismatchTask = seedTree(join(tempRoot, 'task-immutable-mismatch'));

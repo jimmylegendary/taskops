@@ -119,6 +119,51 @@ export function legacyQualifiedTaskEowId({
   return `eow-${safePart(task)}-${safePart(version)}`;
 }
 
+export function classifyRunEowIdentityFormat({
+  id,
+  runId,
+  runNodeId,
+} = {}) {
+  if (typeof id !== 'string') return 'unknown';
+  if (id.startsWith('eow-v2-')) return 'canonical-v2';
+  try {
+    if (id === legacyQualifiedRunEowId({ runId, runNodeId })) {
+      return 'qualified-v1';
+    }
+    if (id === `eow-${requireEowComponent(runNodeId, 'runNodeId')}`) {
+      return 'unqualified-v0';
+    }
+  } catch {
+    return 'unknown';
+  }
+  return 'unknown';
+}
+
+export function classifyTaskEowIdentityFormat({
+  id,
+  taskGroupVersionId,
+  taskId,
+} = {}) {
+  if (typeof id !== 'string') return 'unknown';
+  if (id.startsWith('eow-v2-')) return 'canonical-v2';
+  try {
+    if (
+      id === legacyQualifiedTaskEowId({
+        taskGroupVersionId,
+        taskId,
+      })
+    ) {
+      return 'qualified-v1';
+    }
+    if (id === `eow-${requireEowComponent(taskId, 'taskId')}`) {
+      return 'unqualified-v0';
+    }
+  } catch {
+    return 'unknown';
+  }
+  return 'unknown';
+}
+
 const unique = (values) => [...new Set(values)];
 
 export function runEowIdCandidates({ runId, runNodeId } = {}) {

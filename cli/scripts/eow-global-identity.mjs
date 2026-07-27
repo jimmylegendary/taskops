@@ -12,6 +12,8 @@ import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import {
   decodeCanonicalEowId,
+  legacyQualifiedRunEowId,
+  legacyQualifiedTaskEowId,
   runEowId,
   taskEowId,
 } from '../lib-run-identity.js';
@@ -144,13 +146,20 @@ function duplicateEowErrors(parsed) {
   return parsed.errors.filter((error) => /duplicate EoW id/i.test(error));
 }
 
-function writeRunEow(fixture, id, frontmatterOverrides = {}) {
+function writeRunEow(
+  fixture,
+  id,
+  {
+    omitClosureRole = false,
+    ...frontmatterOverrides
+  } = {},
+) {
   const path = join(
     fixture.workDir,
     'runs/run-main/nodes',
     `${id}.md`,
   );
-  writeMd(path, {
+  const frontmatter = {
     taskOpsVersion: 'v1',
     entityType: 'eow',
     id,
@@ -165,7 +174,9 @@ function writeRunEow(fixture, id, frontmatterOverrides = {}) {
     createdAt: now,
     status: 'done',
     ...frontmatterOverrides,
-  });
+  };
+  if (omitClosureRole) delete frontmatter.closureRole;
+  writeMd(path, frontmatter);
   return path;
 }
 
@@ -328,6 +339,177 @@ test('parser rejects a canonical task EoW with empty version frontmatter', () =>
   assertCanonicalErrorsAt(parsed, path, [
     'canonical task EoW tuple does not match frontmatter',
   ]);
+});
+
+test('parser grants missing task-version compatibility only to verified v0', () => {
+  const fixture = seedSingleTaskWork('qualified-task-version-missing');
+  const id = legacyQualifiedTaskEowId({
+    taskGroupVersionId: 'tgv-root-v1',
+    taskId: 'task',
+  });
+  const path = writeTaskEow(fixture, id, {
+    omitTaskGroupVersionId: true,
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assert.ok(
+    parsed.errors.some((error) => (
+      error.startsWith(`${path}: `)
+      && /missing required field 'taskGroupVersionId'/i.test(error)
+    )),
+    'qualified-v1 task EoW omission must not be normalized as v0',
+  );
+});
+
+test('parser grants missing run-role compatibility only to verified v0', () => {
+  for (const [name, id] of [
+    [
+      'qualified-v1',
+      legacyQualifiedRunEowId({
+        runId: 'run-main',
+        runNodeId: 'run-node-missing',
+      }),
+    ],
+    [
+      'canonical-v2',
+      runEowId({
+        runId: 'run-main',
+        runNodeId: 'run-node-missing',
+      }),
+    ],
+  ]) {
+    const fixture = seedSingleTaskWork(`${name}-run-role-missing`);
+    const path = writeRunEow(fixture, id, {
+      omitClosureRole: true,
+    });
+    const parsed = parseProject(fixture.workDir);
+    assert.ok(
+      parsed.errors.some((error) => (
+        error.startsWith(`${path}: `)
+        && /missing required field 'closureRole'/i.test(error)
+      )),
+      `${name} run EoW omission must not be normalized as v0`,
+    );
+  }
+});
+
+test('parser preserves authentic v0 omission compatibility', () => {
+  const fixture = seedSingleTaskWork('authentic-v0-parser-omissions');
+  const taskEowPath = writeTaskEow(fixture, 'eow-task', {
+    omitTaskGroupVersionId: true,
+  });
+  const runNodeId = 'run-node-authentic-v0';
+  writeMd(
+    join(fixture.workDir, 'runs/run-main/nodes', `${runNodeId}.md`),
+    {
+      taskOpsVersion: 'v1',
+      entityType: 'runNode',
+      id: runNodeId,
+      runId: 'run-main',
+      type: 'verification',
+      title: 'Authentic v0 run node',
+      status: 'done',
+      createdAt: now,
+    },
+  );
+  const runEowPath = writeRunEow(fixture, `eow-${runNodeId}`, {
+    attachedToId: runNodeId,
+    omitClosureRole: true,
+  });
+
+  const parsed = parseProject(fixture.workDir);
+  assert.deepEqual(
+    parsed.errors.filter((error) => (
+      (error.startsWith(`${taskEowPath}: `)
+        && /taskGroupVersionId|canonical/i.test(error))
+      || (error.startsWith(`${runEowPath}: `)
+        && /closureRole|canonical/i.test(error))
+    )),
+    [],
+    'verified unqualified-v0 omissions must remain parse-compatible',
+  );
+  assert.equal(
+    parsed.eowNodes.get('eow-task').taskGroupVersionId,
+    'tgv-root-v1',
+    'v0 task ownership must derive from the trusted containing version',
+  );
+  assert.equal(
+    parsed.eowNodes.get('eow-task').identityFormat,
+    'unqualified-v0',
+  );
+  assert.equal(
+    parsed.eowNodes.get(`eow-${runNodeId}`).identityFormat,
+    'unqualified-v0',
+  );
+});
+
+test('frontmatter writers round-trip the full primitive identity string domain', () => {
+  const fixture = seedSingleTaskWork('frontmatter-identity-round-trip');
+  const identityValues = [
+    '1',
+    '\uFEFFrun-bom',
+    ' run-with-outer-space ',
+    '실행-α',
+  ];
+  for (const value of identityValues) {
+    const runId = value;
+    const runNodeId = value;
+    writeRunIndex(fixture.workDir, runId, 'frontmatter-identity-round-trip');
+    writeMd(
+      join(fixture.workDir, 'runs', runId, 'nodes', `${runNodeId}.md`),
+      {
+        taskOpsVersion: 'v1',
+        entityType: 'runNode',
+        id: runNodeId,
+        runId,
+        type: 'verification',
+        actionKind: 'verify',
+        attempt: 1,
+        title: `Verify ${value}`,
+        status: 'done',
+        createdAt: now,
+      },
+    );
+    const eowId = runEowId({ runId, runNodeId });
+    const eowPath = join(
+      fixture.workDir,
+      'runs',
+      runId,
+      'nodes',
+      `${eowId}.md`,
+    );
+    writeMd(eowPath, {
+      taskOpsVersion: 'v1',
+      entityType: 'eow',
+      id: eowId,
+      runId,
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: runNodeId,
+      reason: 'verification_recorded',
+      closureRole: 'supporting',
+      declaredBy: 'fixture',
+      declaredAt: now,
+      createdAt: now,
+      status: 'done',
+    });
+    const emitted = parseMarkdownFile(eowPath);
+    assert.equal(emitted.runId, runId);
+    assert.equal(emitted.attachedToId, runNodeId);
+    assert.deepEqual(decodeCanonicalEowId(emitted.id), {
+      graphType: 'run',
+      attachedToType: 'runNode',
+      attachedToId: runNodeId,
+      runId,
+    });
+  }
+
+  const parsed = parseProject(fixture.workDir);
+  assert.deepEqual(
+    parsed.errors.filter((error) => /canonical .*EoW|id must match/i.test(error)),
+    [],
+    'writers must be able to parse their own emitted identity tuples without normalization or canonical mismatch',
+  );
 });
 
 test('separate runs of one task write run-qualified EoWs', () => {

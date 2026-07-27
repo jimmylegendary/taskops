@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { inspectNonEmptyUtf8File } from './lib-artifact-contract.js';
+import { classifyRunEowIdentityFormat } from './lib-run-identity.js';
 
 const CLAIM_REASONS = new Set(['approved_result', 'execution_path_closed']);
 const POLICY_MODES = new Set(['enforced', 'guarded', 'runner-managed']);
+const CLOSURE_ROLES = new Set(['supporting', 'claim-bearing']);
 const ACTION_KIND_TYPES = Object.freeze({
   execute: new Set(['implementation', 'execute']),
   decompose: new Set(['decomposition', 'decompose']),
@@ -92,11 +94,35 @@ export function resolveRunNodeActionIdentity({ node, eow } = {}) {
     actionKind: node?.actionKind,
     requireActionKind: true,
   });
+  const issues = [...validated.issues];
+  if (
+    hasOwn(node, 'attempt')
+    && (!Number.isInteger(node.attempt) || node.attempt <= 0)
+  ) {
+    issues.push('run-node attempt must be a positive integer');
+  }
+  if (
+    hasOwn(node, 'predecessorRunNodeId')
+    && (
+      typeof node.predecessorRunNodeId !== 'string'
+      || node.predecessorRunNodeId.trim() === ''
+    )
+  ) {
+    issues.push(
+      'run-node predecessorRunNodeId must be a non-empty primitive string',
+    );
+  }
+  if (
+    hasOwn(eow, 'closureRole')
+    && !CLOSURE_ROLES.has(eow.closureRole)
+  ) {
+    issues.push(`invalid closureRole '${eow.closureRole}'`);
+  }
   return {
     mode: 'explicit',
     actionKind: validated.actionKind,
-    valid: validated.valid,
-    issues: validated.issues,
+    valid: issues.length === 0,
+    issues,
   };
 }
 
@@ -104,6 +130,50 @@ function inferredRole(node, eow) {
   return node?.type === 'implementation' && CLAIM_REASONS.has(eow?.reason)
     ? 'claim-bearing'
     : 'supporting';
+}
+
+export function resolveRunClosureRole({ node, eow } = {}) {
+  const expectedRole = inferredRole(node, eow);
+  if (!hasOwn(eow, 'closureRole')) {
+    const hasDeclaredIdentityFormat = hasOwn(eow, 'identityFormat');
+    const identityFormat = hasDeclaredIdentityFormat
+      ? eow.identityFormat
+      : classifyRunEowIdentityFormat({
+        id: eow?.id,
+        runId: eow?.runId,
+        runNodeId: eow?.attachedToId,
+      });
+    if (
+      identityFormat !== 'unqualified-v0'
+      && (hasDeclaredIdentityFormat || identityFormat !== 'unknown')
+    ) {
+      return {
+        mode: 'explicit',
+        role: null,
+        valid: false,
+        issues: ['run EoW closureRole is required outside unqualified-v0'],
+      };
+    }
+    return {
+      mode: 'legacy-inferred',
+      role: expectedRole,
+      valid: true,
+      issues: [],
+    };
+  }
+  const role = eow.closureRole;
+  const issues = [];
+  if (!CLOSURE_ROLES.has(role)) {
+    issues.push(`invalid closureRole '${role}'`);
+  } else if (role !== expectedRole) {
+    issues.push(`closureRole spoof: expected ${expectedRole}`);
+  }
+  return {
+    mode: 'explicit',
+    role,
+    valid: issues.length === 0,
+    issues,
+  };
 }
 
 function reviewEvidence(node, task, eow, runNodes, runEdges) {
@@ -173,18 +243,18 @@ export function classifyRunClosure({
   versions,
   selectedVersionIds,
 } = {}) {
-  const expectedRole = inferredRole(node, eow);
-  const hasExplicitRole = Boolean(eow && Object.prototype.hasOwnProperty.call(eow, 'closureRole'));
-  const role = hasExplicitRole ? eow.closureRole : expectedRole;
+  const roleResolution = resolveRunClosureRole({ node, eow });
+  const role = roleResolution.role;
   const selected = !node?.sourceTaskGroupVersionId
     || selectedVersionIds.size === 0
     || selectedVersionIds.has(node.sourceTaskGroupVersionId);
   const issues = [];
   const actionIdentity = resolveRunNodeActionIdentity({ node, eow });
   issues.push(...actionIdentity.issues);
+  for (const issue of roleResolution.issues) {
+    if (!issues.includes(issue)) issues.push(issue);
+  }
   const actionKind = actionIdentity.actionKind;
-  if (!['supporting', 'claim-bearing'].includes(role)) issues.push(`invalid closureRole '${role}'`);
-  if (hasExplicitRole && role !== expectedRole) issues.push(`closureRole spoof: expected ${expectedRole}`);
   if (role === 'supporting' && CLAIM_REASONS.has(eow?.reason)) {
     issues.push(`supporting closure cannot use claim reason '${eow.reason}'`);
   }

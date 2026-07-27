@@ -1,15 +1,22 @@
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSync, watch } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, lstatSync, statSync, writeFileSync, existsSync, watch } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
+  assertRunEowImmutableReuse,
+  closeRunNodeWithEowFiles,
   resolveExistingRunEowFile,
   updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter,
 } from './lib-state-writer.js';
 import { classifyRunClosure } from './lib-run-closure.js';
 import {
+  assertPortablePathComponent,
+  resolveContainedPath,
+} from './lib-path-containment.js';
+import {
   assertEowFilenameBudget,
+  classifyRunEowIdentityFormat,
+  classifyTaskEowIdentityFormat,
   decodeCanonicalEowId,
-  runEowId,
   taskEowId,
 } from './lib-run-identity.js';
 import {
@@ -595,6 +602,14 @@ function validateEowResolverBacklink({ eow, taskGroups, tasks, errors, warnings,
 
 export function parseScalar(value) {
   const stripped = String(value).trim();
+  if (stripped.startsWith('"')) {
+    try {
+      const decoded = JSON.parse(stripped);
+      if (typeof decoded === 'string') return decoded;
+    } catch {
+      // Fall through for legacy unquoted values that merely start with a quote.
+    }
+  }
   if (stripped === 'true') return true;
   if (stripped === 'false') return false;
   if (stripped === '[]') return [];
@@ -720,13 +735,28 @@ export function resolveLanguage(startPath, fallback = DEFAULT_LANGUAGE) {
 }
 
 function listDirs(path) {
-  if (!fileExists(path)) return [];
-  return readdirSync(path).map((name) => join(path, name)).filter((p) => statSync(p).isDirectory()).sort();
+  const rootStat = lstatSync(path, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return [];
+  return readdirSync(path)
+    .map((name) => join(path, name))
+    .filter((entryPath) => {
+      const entryStat = lstatSync(entryPath, { throwIfNoEntry: false });
+      return entryStat?.isDirectory() && !entryStat.isSymbolicLink();
+    })
+    .sort();
 }
 
 function listMd(path) {
-  if (!fileExists(path)) return [];
-  return readdirSync(path).map((name) => join(path, name)).filter((p) => p.endsWith('.md')).sort();
+  const rootStat = lstatSync(path, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return [];
+  return readdirSync(path)
+    .map((name) => join(path, name))
+    .filter((entryPath) => {
+      if (!entryPath.endsWith('.md')) return false;
+      const entryStat = lstatSync(entryPath, { throwIfNoEntry: false });
+      return entryStat?.isFile() && !entryStat.isSymbolicLink();
+    })
+    .sort();
 }
 
 function checkFields(fm, required, filePath, errors, language = DEFAULT_LANGUAGE) {
@@ -942,6 +972,11 @@ export function parseProject(projectDir) {
 
       for (const eowPath of listMd(join(versionDir, 'eow'))) {
         const eow = parseMarkdownFile(eowPath);
+        const identityFormat = classifyTaskEowIdentityFormat({
+          id: eow.id,
+          taskGroupVersionId: v.id,
+          taskId: eow.attachedToId,
+        });
         checkFields(eow, ['taskOpsVersion', 'entityType', 'id', 'graphType', 'attachedToType', 'attachedToId', 'reason', 'declaredBy', 'declaredAt', 'createdAt', 'status'], eowPath, errors, language);
         if (eow.entityType !== 'eow') errors.push(withPath(eowPath, t.entityTypeMustBe('eow')));
         if (eow.id !== basename(eowPath, '.md')) errors.push(withPath(eowPath, t.idMustMatchFileName(basename(eowPath, '.md'))));
@@ -950,10 +985,31 @@ export function parseProject(projectDir) {
         if (!EOW_ATTACHED_TO_TYPES.includes(eow.attachedToType)) errors.push(withPath(eowPath, t.invalidEowAttachedToType(eow.attachedToType)));
         if (eow.graphType !== 'task') errors.push(withPath(eowPath, t.invalidEowGraphType(eow.graphType)));
         if (eow.attachedToType !== 'task') errors.push(withPath(eowPath, t.invalidEowAttachedToType(eow.attachedToType)));
-        if (eow.taskGroupVersionId && eow.taskGroupVersionId !== v.id) errors.push(withPath(eowPath, t.taskGroupVersionIdMustBe(v.id)));
+        if (
+          !hasOwn(eow, 'taskGroupVersionId')
+          && identityFormat !== 'unqualified-v0'
+        ) {
+          errors.push(
+            withPath(
+              eowPath,
+              t.missingRequiredField('taskGroupVersionId'),
+            ),
+          );
+        } else if (
+          hasOwn(eow, 'taskGroupVersionId')
+          && eow.taskGroupVersionId !== v.id
+        ) {
+          errors.push(withPath(eowPath, t.taskGroupVersionIdMustBe(v.id)));
+        }
         const attachedKey = taskKey(v.id, eow.attachedToId);
         if (!tasks.has(attachedKey)) errors.push(withPath(eowPath, t.eowAttachedTaskNotFound(eow.attachedToId)));
-        const eowRecord = { ...eow, path: eowPath, taskGroupId: tg.id, taskGroupVersionId: v.id };
+        const eowRecord = {
+          ...eow,
+          path: eowPath,
+          taskGroupId: tg.id,
+          taskGroupVersionId: v.id,
+          identityFormat,
+        };
         addEow(eowRecord, eowPath, eow);
         versionRecord.eows.push(eowRecord);
         if (!taskEowsByTaskKey.has(attachedKey)) taskEowsByTaskKey.set(attachedKey, []);
@@ -1022,13 +1078,26 @@ export function parseProject(projectDir) {
     for (const nodePath of listMd(join(runDir, 'nodes'))) {
       const node = parseMarkdownFile(nodePath);
       if (node.entityType === 'eow') {
+        const identityFormat = classifyRunEowIdentityFormat({
+          id: node.id,
+          runId: run.id,
+          runNodeId: node.attachedToId,
+        });
         checkFields(node, ['taskOpsVersion', 'entityType', 'id', 'runId', 'graphType', 'attachedToType', 'attachedToId', 'reason', 'declaredBy', 'declaredAt', 'createdAt', 'status'], nodePath, errors, language);
         if (node.id !== basename(nodePath, '.md')) errors.push(withPath(nodePath, t.idMustMatchFileName(basename(nodePath, '.md'))));
         if (node.runId !== run.id) errors.push(withPath(nodePath, t.runIdMustBe(run.id)));
         if (!STATUS_VALUES.includes(node.status)) errors.push(withPath(nodePath, t.invalidStatus(node.status)));
         if (node.graphType !== 'run') errors.push(withPath(nodePath, t.invalidEowGraphType(node.graphType)));
         if (node.attachedToType !== 'runNode') errors.push(withPath(nodePath, t.invalidEowAttachedToType(node.attachedToType)));
-        const eowRecord = { ...node, path: nodePath };
+        if (
+          !hasOwn(node, 'closureRole')
+          && identityFormat !== 'unqualified-v0'
+        ) {
+          errors.push(
+            withPath(nodePath, t.missingRequiredField('closureRole')),
+          );
+        }
+        const eowRecord = { ...node, path: nodePath, identityFormat };
         addEow(eowRecord, nodePath);
         runRecord.eows.push(eowRecord);
         graphNodes.set(node.id, eowRecord);
@@ -2248,23 +2317,44 @@ export function writeSummary(parsed, fileName = 'summary.md') {
 
 function isoNow() { return new Date().toISOString(); }
 
-function fmScalar(value) {
+function fmScalar(value, key = '') {
   if (value == null) return '';
   if (typeof value === 'boolean' || typeof value === 'number') return String(value);
-  return String(value).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const text = String(value);
+  const isIdentityScalar = key === 'id'
+    || key.endsWith('Id')
+    || key.endsWith('Ids');
+  if (!isIdentityScalar) {
+    return text
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  const requiresQuotedScalar = (
+    text === ''
+    || text.trim() !== text
+    || /[\u0000-\u001f]/.test(text)
+    || text === 'true'
+    || text === 'false'
+    || text === '[]'
+    || text === '{}'
+    || /^-?\d+$/.test(text)
+    || text.startsWith('"')
+  );
+  return requiresQuotedScalar ? JSON.stringify(text) : text;
 }
 
 export function fmBlock(data) {
   const lines = ['---'];
   const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
-  const emitArrayItem = (item, indent) => {
+  const emitArrayItem = (item, indent, key = '') => {
     if (Array.isArray(item)) {
       if (item.length === 0) {
         lines.push(`${indent}- []`);
         return;
       }
       lines.push(`${indent}-`);
-      for (const nested of item) emitArrayItem(nested, `${indent}  `);
+      for (const nested of item) emitArrayItem(nested, `${indent}  `, key);
       return;
     }
     if (isObject(item)) {
@@ -2278,7 +2368,9 @@ export function fmBlock(data) {
         if (firstV.length === 0) lines.push(`${indent}- ${firstK}: []`);
         else {
           lines.push(`${indent}- ${firstK}:`);
-          for (const nested of firstV) emitArrayItem(nested, `${indent}  `);
+          for (const nested of firstV) {
+            emitArrayItem(nested, `${indent}  `, firstK);
+          }
         }
       } else if (isObject(firstV)) {
         if (Object.keys(firstV).length === 0) lines.push(`${indent}- ${firstK}: {}`);
@@ -2287,12 +2379,12 @@ export function fmBlock(data) {
           for (const [k, v] of Object.entries(firstV)) emit(k, v, `${indent}  `);
         }
       } else {
-        lines.push(`${indent}- ${firstK}: ${fmScalar(firstV)}`);
+        lines.push(`${indent}- ${firstK}: ${fmScalar(firstV, firstK)}`);
       }
       for (const [k, v] of entries.slice(1)) emit(k, v, `${indent}  `);
       return;
     }
-    lines.push(`${indent}- ${fmScalar(item)}`);
+    lines.push(`${indent}- ${fmScalar(item, key)}`);
   };
   const emit = (key, value, indent = '') => {
     if (Array.isArray(value)) {
@@ -2302,7 +2394,7 @@ export function fmBlock(data) {
       }
       lines.push(`${indent}${key}:`);
       for (const item of value) {
-        emitArrayItem(item, `${indent}  `);
+        emitArrayItem(item, `${indent}  `, key);
       }
       return;
     }
@@ -2316,7 +2408,7 @@ export function fmBlock(data) {
       for (const [k, v] of entries) emit(k, v, `${indent}  `);
       return;
     }
-    lines.push(`${indent}${key}: ${fmScalar(value)}`);
+    lines.push(`${indent}${key}: ${fmScalar(value, key)}`);
   };
   for (const [k,v] of Object.entries(data)) emit(k,v);
   lines.push('---', '');
@@ -3303,77 +3395,141 @@ function appendWorkLog(projectDir, line) {
   appendTextFile(workLogPath, existsSync(workLogPath) ? line : `# Work log\n\n${line}`);
 }
 
-function closePromotedPartialSourceRunNode(projectDir, partial, now) {
-  const runId = partial?.sourceRunId;
-  const runNodeId = partial?.sourceRunNodeId;
-  if (!runId || !runNodeId) return null;
+function promotionStateWriterIo() {
+  return {
+    exists: existsSync,
+    fmBlock,
+    parseMarkdownFile,
+    writeTextFile: (path, text) => writeFileSync(path, text, 'utf8'),
+  };
+}
 
-  const runDir = join(projectDir, 'runs', runId);
-  const runNodePath = join(runDir, 'nodes', `${runNodeId}.md`);
-  if (!existsSync(runNodePath)) {
-    return { runId, runNodeId, closed: false, reason: 'missing_source_run_node' };
+function promotedSourceReferenceError(partial, detail) {
+  return new Error(
+    `Unsafe promoted source reference for partial '${partial?.id || '<unknown>'}': ${detail}`,
+  );
+}
+
+function preparePromotedPartialSourceRunNode(parsed, partial) {
+  const hasRunId = partial?.sourceRunId != null && partial.sourceRunId !== '';
+  const hasRunNodeId = partial?.sourceRunNodeId != null
+    && partial.sourceRunNodeId !== '';
+  if (!hasRunId && !hasRunNodeId) return null;
+  if (!hasRunId || !hasRunNodeId) {
+    throw promotedSourceReferenceError(
+      partial,
+      'sourceRunId and sourceRunNodeId must both be present',
+    );
   }
 
-  ensureDir(join(runDir, 'nodes'));
-  ensureDir(join(runDir, 'edges'));
+  try {
+    assertPortablePathComponent(partial.sourceRunId, 'sourceRunId');
+    assertPortablePathComponent(
+      partial.sourceRunNodeId,
+      'sourceRunNodeId',
+    );
+  } catch (error) {
+    throw promotedSourceReferenceError(partial, error.message);
+  }
 
-  const canonicalId = runEowId({ runId, runNodeId });
+  const run = parsed.runs.get(partial.sourceRunId);
+  const node = [...parsed.runNodes.values()].find((candidate) => (
+    candidate.runId === partial.sourceRunId
+    && candidate.id === partial.sourceRunNodeId
+  ));
+  if (!run || !node) {
+    throw promotedSourceReferenceError(
+      partial,
+      'reference does not resolve to a trusted parsed run/node record',
+    );
+  }
+
+  try {
+    assertPortablePathComponent(run.id, 'trusted run id');
+    assertPortablePathComponent(node.id, 'trusted run-node id');
+  } catch (error) {
+    throw promotedSourceReferenceError(partial, error.message);
+  }
+  const trustedRunsDir = resolveContainedPath(parsed.projectDir, 'runs');
+  const runDir = resolveContainedPath(trustedRunsDir, run.id);
+  if (resolve(run.path) !== runDir) {
+    throw promotedSourceReferenceError(
+      partial,
+      'trusted run path does not match its containing parsed work',
+    );
+  }
+  const runNodePath = resolveContainedPath(
+    runDir,
+    'nodes',
+    `${node.id}.md`,
+  );
+  if (resolve(node.path) !== runNodePath) {
+    throw promotedSourceReferenceError(
+      partial,
+      'trusted run-node path does not match its containing parsed run',
+    );
+  }
+
+  const io = promotionStateWriterIo();
   const existing = resolveExistingRunEowFile({
     runDir,
-    runId,
-    runNodeId,
-  }, {
-    exists: existsSync,
-    parseMarkdownFile,
-  });
-  const eowRunNodeId = existing?.id || canonicalId;
-  const edgeId = `edge-${runNodeId}-to-eow`;
-  const edgePath = join(runDir, 'edges', `${edgeId}.md`);
-  let wroteEow = false;
-  let wroteEdge = false;
+    runId: run.id,
+    runNodeId: node.id,
+  }, io);
+  const recordedPartial = node?.result?.partialCompletion;
+  const closesAuthenticRecordedPartial = (
+    existing?.frontmatter?.reason === 'partial_recorded'
+    && recordedPartial?.partialId === partial.id
+    && recordedPartial?.sourceRunId === run.id
+    && recordedPartial?.sourceRunNodeId === node.id
+  );
+  const closureReason = closesAuthenticRecordedPartial
+    ? 'partial_recorded'
+    : 'partial_follow_up_promoted';
+  assertRunEowImmutableReuse({
+    existing,
+    runDir,
+    runId: run.id,
+    runNodeId: node.id,
+    reason: closureReason,
+    closureRole: 'supporting',
+  }, io);
 
-  if (!existing) {
-    const canonicalPath = join(runDir, 'nodes', `${canonicalId}.md`);
-    assertEowFilenameBudget(canonicalId);
-    writeFileSync(canonicalPath, fmBlock({
-      taskOpsVersion: 'v1',
-      entityType: 'eow',
-      id: canonicalId,
-      runId,
-      graphType: 'run',
-      attachedToType: 'runNode',
-      attachedToId: runNodeId,
-      reason: 'partial_follow_up_promoted',
-      closureRole: 'supporting',
-      declaredBy: 'taskops-promote-partials',
-      declaredAt: now,
-      createdAt: now,
-      status: 'done',
-    }) + `# EoW: ${runNodeId}\n`, 'utf8');
-    wroteEow = true;
-  }
+  return {
+    runDir,
+    runId: run.id,
+    runNodeId: node.id,
+    closureReason,
+    nodesDir: resolveContainedPath(runDir, 'nodes'),
+    edgesDir: resolveContainedPath(runDir, 'edges'),
+    runLogPath: resolveContainedPath(runDir, 'run-log.md'),
+  };
+}
 
-  if (!existsSync(edgePath)) {
-    writeFileSync(edgePath, fmBlock({
-      taskOpsVersion: 'v1',
-      entityType: 'runEdge',
-      id: edgeId,
-      runId,
-      fromRunNodeId: runNodeId,
-      toRunNodeId: eowRunNodeId,
-      edgeType: 'closes_with',
-      createdAt: now,
-      status: 'done',
-    }) + `# Run edge: ${runNodeId} closes with EoW\n`, 'utf8');
-    wroteEdge = true;
-  }
-
+function closePromotedPartialSourceRunNode(prepared, partial, now) {
+  if (!prepared) return null;
+  ensureDir(prepared.nodesDir);
+  ensureDir(prepared.edgesDir);
+  const closed = closeRunNodeWithEowFiles({
+    runDir: prepared.runDir,
+    runId: prepared.runId,
+    runNodeId: prepared.runNodeId,
+    reason: prepared.closureReason,
+    closureRole: 'supporting',
+    declaredBy: 'taskops-promote-partials',
+    finishedAt: now,
+  }, promotionStateWriterIo());
   appendTextFile(
-    join(runDir, 'run-log.md'),
-    `${now} partial_source_run_node_closed runNodeId=${runNodeId} partialId=${partial.id || ''} reason=partial_follow_up_promoted\n`,
+    prepared.runLogPath,
+    `${now} partial_source_run_node_closed runNodeId=${prepared.runNodeId} partialId=${partial.id || ''} reason=${prepared.closureReason}\n`,
   );
 
-  return { runId, runNodeId, eowRunNodeId, edgeId, closed: true, wroteEow, wroteEdge };
+  return {
+    runId: prepared.runId,
+    runNodeId: prepared.runNodeId,
+    ...closed,
+    closed: true,
+  };
 }
 
 function applyRepeatedPartialReviewPatches(parsed, patches) {
@@ -3395,6 +3551,22 @@ function applyRepeatedPartialReviewPatches(parsed, patches) {
 }
 
 function applyPartialPromotion({ plan, parsed, activeSnapshot, now }) {
+  const preparedSourceRunNodes = new Map();
+  for (const versionPlan of plan.versionPlans) {
+    for (const promotion of versionPlan.promotions) {
+      const partial = parsed.partialNodes.get(promotion.partialId);
+      if (!partial) {
+        throw new Error(
+          `Cannot promote partials: partial '${promotion.partialId}' disappeared before apply`,
+        );
+      }
+      preparedSourceRunNodes.set(
+        partial.path,
+        preparePromotedPartialSourceRunNode(parsed, partial),
+      );
+    }
+  }
+
   const appliedVersionPlans = [];
   const repeatedReviewApplied = applyRepeatedPartialReviewPatches(parsed, plan.repeatedReviewPatches);
 
@@ -3452,7 +3624,11 @@ function applyPartialPromotion({ plan, parsed, activeSnapshot, now }) {
         fm.followUpTaskGroupVersionId = versionPlan.toVersionId;
         return fm;
       });
-      const closedSourceRunNode = closePromotedPartialSourceRunNode(plan.projectDir, partial, now);
+      const closedSourceRunNode = closePromotedPartialSourceRunNode(
+        preparedSourceRunNodes.get(partial.path) || null,
+        partial,
+        now,
+      );
       if (closedSourceRunNode) {
         closedSourceRunNodes.push({
           partialId: promotion.partialId,

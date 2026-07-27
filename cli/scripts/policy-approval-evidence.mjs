@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   classifyRunClosure,
+  resolveRunClosureRole,
   resolveRunNodeActionIdentity,
 } from '../lib-run-closure.js';
 import { fmBlock, parseProject } from '../lib-taskops.js';
@@ -244,6 +245,71 @@ assert.equal(historicalMissingClassification.selected, false);
 assert.equal(historicalMissingClassification.reviewEvidenceValid, true);
 assert.equal(historicalMissingClassification.policyApproved, false);
 
+const malformedModernWitnesses = [
+  {
+    name: 'actionKind',
+    node: { ...missingNode, actionKind: null },
+    eow: { ...missingEow },
+    issue: /actionKind is required/i,
+  },
+  {
+    name: 'attempt',
+    node: { ...missingNode, actionKind: 'execute', attempt: 0 },
+    eow: { ...missingEow },
+    issue: /attempt must be a positive integer/i,
+  },
+  {
+    name: 'predecessorRunNodeId',
+    node: {
+      ...missingNode,
+      actionKind: 'execute',
+      predecessorRunNodeId: '   ',
+    },
+    eow: { ...missingEow },
+    issue: /predecessorRunNodeId must be a non-empty primitive string/i,
+  },
+  {
+    name: 'closureRole',
+    node: { ...missingNode, actionKind: 'execute' },
+    eow: { ...missingEow, closureRole: 'spoofed-role' },
+    issue: /invalid closureRole/i,
+  },
+];
+
+for (const witness of malformedModernWitnesses) {
+  const classify = (selectedVersionIds) => classifyRunClosure({
+    node: witness.node,
+    task: missingClaim.tasks.get('tgv-root-v1:task-review'),
+    eow: witness.eow,
+    runNodes: missingClaim.runNodes,
+    runEdges: missingClaim.runEdges,
+    versions: missingClaim.versions,
+    selectedVersionIds,
+  });
+  const live = classify(new Set(['tgv-root-v1']));
+  assert.equal(
+    live.policyApproved,
+    false,
+    `live malformed ${witness.name} must not remain policy-approved`,
+  );
+  assert.ok(
+    live.issues.some((issue) => witness.issue.test(issue)),
+    `live malformed ${witness.name} must expose its witness validation issue`,
+  );
+
+  const historical = classify(new Set(['tgv-other-v1']));
+  assert.equal(historical.selected, false);
+  assert.equal(
+    historical.policyApproved,
+    false,
+    `historical malformed ${witness.name} must not remain policy-approved`,
+  );
+  assert.ok(
+    historical.issues.some((issue) => witness.issue.test(issue)),
+    `historical malformed ${witness.name} must retain its witness validation issue`,
+  );
+}
+
 assert.deepEqual(
   resolveRunNodeActionIdentity({
     node: { type: 'implementation' },
@@ -255,6 +321,31 @@ assert.deepEqual(
     valid: true,
     issues: [],
   },
+);
+
+for (const identityFormat of ['unknown', 'qualified-v1', 'canonical-v2']) {
+  const resolved = resolveRunClosureRole({
+    node: { type: 'implementation' },
+    eow: {
+      identityFormat,
+      reason: 'approved_result',
+    },
+  });
+  assert.equal(resolved.valid, false);
+  assert.ok(
+    resolved.issues.some((issue) => /closureRole is required/i.test(issue)),
+    `${identityFormat} must not receive v0 closureRole inference`,
+  );
+}
+assert.equal(
+  resolveRunClosureRole({
+    node: { type: 'implementation' },
+    eow: {
+      identityFormat: 'unqualified-v0',
+      reason: 'approved_result',
+    },
+  }).valid,
+  true,
 );
 
 for (const node of [
@@ -270,6 +361,67 @@ for (const node of [
   assert.equal(resolved.mode, 'explicit');
   assert.equal(resolved.valid, false);
   assert.ok(resolved.issues.some((issue) => /actionKind is required/i.test(issue)));
+}
+
+for (const attempt of [null, '', '1', 0, -1, 1.5, Number.NaN]) {
+  const resolved = resolveRunNodeActionIdentity({
+    node: { type: 'implementation', actionKind: 'execute', attempt },
+    eow: { reason: 'approved_result', closureRole: 'claim-bearing' },
+  });
+  assert.equal(resolved.mode, 'explicit');
+  assert.equal(resolved.valid, false);
+  assert.ok(
+    resolved.issues.some((issue) => /attempt must be a positive integer/i.test(issue)),
+    `own-present attempt=${String(attempt)} must be rejected`,
+  );
+}
+assert.equal(
+  resolveRunNodeActionIdentity({
+    node: { type: 'implementation', actionKind: 'execute', attempt: 1 },
+    eow: { reason: 'approved_result', closureRole: 'claim-bearing' },
+  }).valid,
+  true,
+);
+
+for (const predecessorRunNodeId of [null, '', '   ', 1, new String('run-node-prior')]) {
+  const resolved = resolveRunNodeActionIdentity({
+    node: {
+      type: 'implementation',
+      actionKind: 'execute',
+      predecessorRunNodeId,
+    },
+    eow: { reason: 'approved_result', closureRole: 'claim-bearing' },
+  });
+  assert.equal(resolved.mode, 'explicit');
+  assert.equal(resolved.valid, false);
+  assert.ok(
+    resolved.issues.some((issue) => /predecessorRunNodeId must be a non-empty primitive string/i.test(issue)),
+    `own-present predecessorRunNodeId=${String(predecessorRunNodeId)} must be rejected`,
+  );
+}
+assert.equal(
+  resolveRunNodeActionIdentity({
+    node: {
+      type: 'implementation',
+      actionKind: 'execute',
+      predecessorRunNodeId: 'run-node-prior',
+    },
+    eow: { reason: 'approved_result', closureRole: 'claim-bearing' },
+  }).valid,
+  true,
+);
+
+for (const closureRole of [null, '', ' ', 'supporting ', 'spoofed-role', 1]) {
+  const resolved = resolveRunNodeActionIdentity({
+    node: { type: 'implementation', actionKind: 'execute' },
+    eow: { reason: 'approved_result', closureRole },
+  });
+  assert.equal(resolved.mode, 'explicit');
+  assert.equal(resolved.valid, false);
+  assert.ok(
+    resolved.issues.some((issue) => /invalid closureRole/i.test(issue)),
+    `own-present closureRole=${String(closureRole)} must be rejected`,
+  );
 }
 
 for (const closureRole of ['claim-bearing', null, '']) {

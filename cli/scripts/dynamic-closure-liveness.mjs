@@ -325,16 +325,28 @@ try {
   writeFileSync(legacyNodePath, legacyNodeAfter, 'utf8');
 
   const legacyEowBefore = readFileSync(legacyEowPath, 'utf8');
-  const legacyEowAfter = legacyEowBefore.replace(
+  const legacyV0EowId = `eow-${legacyNode.id}`;
+  const legacyEowWithV0Identity = legacyEowBefore.replace(
+    /^id: .+$/m,
+    `id: ${legacyV0EowId}`,
+  );
+  assert.notEqual(
+    legacyEowWithV0Identity,
+    legacyEowBefore,
+    'legacy inference fixture must use an authentic unqualified-v0 identity',
+  );
+  const legacyEowAfter = legacyEowWithV0Identity.replace(
     /^closureRole: supporting\n/m,
     '',
   );
   assert.notEqual(
     legacyEowAfter,
-    legacyEowBefore,
+    legacyEowWithV0Identity,
     'legacy inference fixture must remove closureRole',
   );
-  writeFileSync(legacyEowPath, legacyEowAfter, 'utf8');
+  const legacyV0EowPath = join(dirname(legacyEowPath), `${legacyV0EowId}.md`);
+  writeFileSync(legacyV0EowPath, legacyEowAfter, 'utf8');
+  if (legacyV0EowPath !== legacyEowPath) rmSync(legacyEowPath);
   const legacyInference = parseProject(legacyInferenceDir);
   assert.equal(legacyInference.closure.invalidSupportingRunEowClosureCount, 0);
   assert.equal(legacyInference.closure.validSupportingRunEowClosureCount, 3);
