@@ -243,14 +243,15 @@ Suggested fields:
 - `createdAt`
 - `status: done`
 
-Example:
+Canonical v2 write example:
 
 ```yaml
 entityType: eow
-id: eow-task-verify-example
+id: eow-v2-t.dGFzay12ZXJpZnktZXhhbXBsZQ.dGd2LXJvb3QtdjE
 graphType: task
 attachedToType: task
 attachedToId: task-verify-example
+taskGroupVersionId: tgv-root-v1
 reason: no_further_decomposition
 declaredBy: ai
 declaredAt: 2026-05-08T04:45:00+09:00
