@@ -22,7 +22,7 @@ pred = EVAL / "preflight" / f"pred-{rid}.json"
 json.dump([{"instance_id": INSTANCE, "model_name_or_path": "taskops", "model_patch": patch}], open(pred, "w"))
 
 CACHE = os.environ.get("SWEBENCH_CACHE_LEVEL", "instance")  # a 500-instance run sets 'env' so per-instance images
-subprocess.run(                                              # (~1GB each) are not retained — disk would not survive.
+proc = subprocess.run(                                       # (~1GB each) are not retained — disk would not survive.
     [PY, "-m", "swebench.harness.run_evaluation", "--dataset_name", DS, "--predictions_path", str(pred),
      "--instance_ids", INSTANCE, "--max_workers", "1", "--cache_level", CACHE, "--run_id", rid],
     cwd=str(EVAL), capture_output=True, text=True,
@@ -34,7 +34,14 @@ if not report.exists():
     # verified500 run (verify PASSed 3x, then the final grade's harness crashed pre-log and was scored as a
     # real FAIL). Same contract as swebench_pro_grade.py: exit 2 + NO "resolved" token → caller records
     # null + grade_error and the close stays out of the F1 denominator.
-    print(f"GRADE_INFRA_ERROR: harness produced no report ({report.name}) — not a verdict.", file=sys.stderr)
+    # The harness output is CAPTURED, so it must also be SURFACED: discarding it is exactly why the verified500
+    # incident and the gpt-5.4 smoke both left an unexplainable "no report". The caller stores this text.
+    def _tail(s, n=12):
+        return "\n".join((s or "").strip().splitlines()[-n:]) or "(empty)"
+    print(f"GRADE_INFRA_ERROR: harness produced no report ({report.name}) — not a verdict. "
+          f"harness_exit={proc.returncode}", file=sys.stderr)
+    print(f"--- harness stderr tail ---\n{_tail(proc.stderr)}", file=sys.stderr)
+    print(f"--- harness stdout tail ---\n{_tail(proc.stdout)}", file=sys.stderr)
     sys.exit(2)
 resolved = json.load(open(report)).get("resolved_instances", 0) == 1
 # emit a machine-readable line the scorer can capture, plus a diagnostic for retry feedback
