@@ -123,16 +123,23 @@ try {
 }
 
 const verifiedDone = task.status === 'done' && review.decision === 'approved' && review.verified === true;
+// 결과 격리 태그(A arm과 동일 규약): 같은 인스턴스를 다른 모델로 채점한 결과는 다른 측정이므로 경로를 나눈다.
+// claude_model을 함께 박아 결과 파일이 스스로 출처를 증언하게 한다 — 모델 주입 누락을 파일만으로 검출하기 위함.
+const resultTag = (process.env.TASKOPS_SWE_RESULT_TAG || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
+const tagDir = resultTag ? `-${resultTag}` : '';
 const rec = {
-  instance_id: instanceId, dataset, taskops_status: task.status, review_decision: review.decision || null,
+  instance_id: instanceId, dataset, executor: sweExecutor,
+  claude_model: process.env.TASKOPS_CLAUDE_MODEL || null, result_tag: resultTag || null,
+  taskops_status: task.status, review_decision: review.decision || null,
   verified_done: verifiedDone, official_resolved: officialResolved, grade_error: gradeError,
   false_completion: verifiedDone && officialResolved === false,   // the metric that must be 0
   missed_honest: !verifiedDone && officialResolved === true,       // solved but TaskOps didn't credit it
   agent_edited: diffLines != null && diffLines > 0,   // wiring check: did the agent actually edit the seeded workspace?
   diff_lines: diffLines, verifyRetries, wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-// namespace under results/pro so Pro runs never collide with the classic Lite/Verified baselines.
-const proDir = noVerify ? join(EVAL, 'results', 'pro', 'noverify') : join(EVAL, 'results', 'pro');
+// namespace under results/pro so Pro runs never collide with the classic Lite/Verified baselines; the model tag
+// further splits per-model runs so the existing codex-cli Pro results (6건) are never clobbered.
+const proDir = noVerify ? join(EVAL, 'results', `pro${tagDir}`, 'noverify') : join(EVAL, 'results', `pro${tagDir}`);
 mkdirSync(proDir, { recursive: true });
 const outFile = join(proDir,
   noVerify ? `swebench-pro-noverify-${instanceId}.json`

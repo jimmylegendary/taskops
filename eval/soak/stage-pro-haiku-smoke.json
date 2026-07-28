@@ -1,0 +1,37 @@
+{
+  "stage": "stage-pro-haiku-smoke",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "judgeField": "official_resolved",
+  "pairedTest": { "a": "A", "b": "C" },
+  "arms": [
+    {
+      "key": "A",
+      "adapter": "run_swebench_pro_bare.mjs",
+      "extraArgs": [],
+      "claimField": "claimed_done",
+      "resultPattern": "results/bare/pro-haiku-smoke/bare-swepro-claude-code-haiku-smoke-{id}.json"
+    },
+    {
+      "key": "C",
+      "adapter": "run_swebench_pro.mjs",
+      "extraArgs": ["2"],
+      "claimField": "verified_done",
+      "resultPattern": "results/pro-haiku-smoke/swebench-pro-k2-{id}.json"
+    }
+  ],
+  "instances": [
+    "instance_ansible__ansible-0ea40e09d1b35bcb69ff4d9cecf3d0defa4b36e8-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+    "instance_flipt-io__flipt-02e21636c58e86c51119b63e0fb5ca7b813b07b1"
+  ],
+  "concurrency": 1,
+  "globalWallMin": 100,
+  "perRunTimeoutMin": 45,
+  "maxAttemptsPerJob": 1,
+  "haltOnConsecutiveFailures": 2,
+  "env": {
+    "TASKOPS_SWE_EXECUTOR": "claude-code",
+    "TASKOPS_CLAUDE_MODEL": "claude-haiku-4-5-20251001",
+    "TASKOPS_SWE_RESULT_TAG": "haiku-smoke",
+    "TASKOPS_MAX_WALL_MS": "1800000"
+  }
+}
