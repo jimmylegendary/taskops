@@ -479,6 +479,15 @@ function writeTextFileAtomic(filePath, text) {
 
 const FM_SCALAR_MAX_LEN = 500;
 const FM_SCALAR_FALLBACK = 'executor_failed';
+// Per-check slice of a failed required check's own output, carried into the retry feedback (see the failedChecks
+// push in the acceptance review). Kept well under the retry-feedback budget so several failing checks can each
+// contribute a diagnosis without one of them crowding the others out.
+const CHECK_DIAGNOSIS_MAX = 400;
+// Budget for the retry-feedback scalars (lastCheckFailure). The old 1000 predated diagnoses: a single absolute
+// grader path measured 622 chars on the SWE-bench Pro run, so a 1000-char cap truncated the diagnosis away
+// precisely when it mattered. This holds command + diagnosis for a couple of failing checks; it is a prompt line,
+// so it is bounded rather than unbounded.
+const RETRY_FEEDBACK_MAX_LEN = 2400;
 // Epistemic loop: beyond the verifyRetries FLOOR, keep retrying only while the verify failure is NOVEL (the model is
 // still converting unknown-unknowns into new frictions = making progress), up to this many extra rounds. A repeating
 // (non-novel) failure never extends — so a stuck task is bounded exactly at the floor and closes as saturation.
@@ -1561,7 +1570,18 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
     // An unverified check is NOT a passed check: a self-reported checkResult with no explicit
     // pass status (or a non-pass status) must not silently satisfy a required check.
     if (!['passed', 'pass', 'ok', 'success', 'succeeded'].includes(status)) {
-      failedChecks.push(`${command}: ${status || 'no pass status reported'}`);
+      // Carry the DIAGNOSIS, not just the verdict. executeRequiredChecks already captured the check's own output
+      // in `detail`; dropping it here was the only reason a retry knew WHICH command failed but never WHY —
+      // failedChecks feeds `feedback` → `lastCheckFailure` → the retry prompt. Measured on the gpt-5.4/low
+      // SWE-bench Pro run: attempt 1 novel=true → attempt 2 novel=false (the agent repeated itself) and the
+      // paired lift over the bare arm was 0. Sliced per-check so that N failing checks cannot blow up one
+      // frontmatter scalar; the command stays first so an operator can still re-run it by hand.
+      // Only a STRING detail is a diagnosis. A silent failure (no stdout/stderr) round-trips through frontmatter
+      // as an empty mapping, and String()-ing that yields "[object Object]" — a fake diagnosis that would teach
+      // the retry nothing while looking like evidence.
+      const rawDiagnosis = observed?.detail;
+      const diagnosis = typeof rawDiagnosis === 'string' ? rawDiagnosis.trim() : '';
+      failedChecks.push(`${command}: ${status || 'no pass status reported'}${diagnosis ? ` — check output: ${diagnosis.slice(0, CHECK_DIAGNOSIS_MAX)}` : ''}`);
     }
   }
 
@@ -3442,7 +3462,7 @@ function closeExecuteSuccess({
         fm.uncertaintyState = 'known';
         fm.verifyAttempts = attempts + 1;
         fm.attemptLedger = nextLedger;
-        fm.lastCheckFailure = sanitizeFmScalar(`Previous attempt failed verification: ${feedback}. First state FRICTION: <what this failure reveals you did not know>, then fix your implementation so the required check passes.`, { maxLen: 1000 });
+        fm.lastCheckFailure = sanitizeFmScalar(`Previous attempt failed verification: ${feedback}. First state FRICTION: <what this failure reveals you did not know>, then fix your implementation so the required check passes.`, { maxLen: RETRY_FEEDBACK_MAX_LEN });
         return fm;
       });
       logEvent(eventsPath, { timestamp: finishedAt, type: 'verify_retry', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, attempt: attempts + 1, maxRetries: ceiling, novel: isNovel, mode: withinFloor ? 'floor' : 'novel_extension' });
@@ -3471,7 +3491,7 @@ function closeExecuteSuccess({
           fm.escalatedResolvers = tried.concat([next]);
           fm.verifyAttempts = 0;   // fresh floor for the stronger resolver
           fm.attemptLedger = nextLedger;
-          fm.lastCheckFailure = sanitizeFmScalar(`A prior resolver SATURATED after ${attempts} verify attempts on: ${feedback}. You are a stronger/other resolver re-attempting with that friction history — cross it.`, { maxLen: 1000 });
+          fm.lastCheckFailure = sanitizeFmScalar(`A prior resolver SATURATED after ${attempts} verify attempts on: ${feedback}. You are a stronger/other resolver re-attempting with that friction history — cross it.`, { maxLen: RETRY_FEEDBACK_MAX_LEN });
           return fm;
         });
         logEvent(eventsPath, { timestamp: finishedAt, type: 'saturation_escalate', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, rung: 'delegate', resolver: next, afterAttempts: attempts });
@@ -3491,7 +3511,7 @@ function closeExecuteSuccess({
         fm.uncertaintyState = 'unknown_unknown';
         fm.saturationEscalated = true;
         fm.attemptLedger = nextLedger;
-        fm.lastCheckFailure = sanitizeFmScalar(`Prior atomic execution SATURATED after ${attempts} verify attempts (fixpoint). The task was not atomic — decompose it into finer, independently-verifiable sub-goals that together satisfy: ${feedback}.`, { maxLen: 1000 });
+        fm.lastCheckFailure = sanitizeFmScalar(`Prior atomic execution SATURATED after ${attempts} verify attempts (fixpoint). The task was not atomic — decompose it into finer, independently-verifiable sub-goals that together satisfy: ${feedback}.`, { maxLen: RETRY_FEEDBACK_MAX_LEN });
         return fm;
       });
       logEvent(eventsPath, { timestamp: finishedAt, type: 'saturation_escalate', runId, taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, rung: 'decompose', afterAttempts: attempts });
