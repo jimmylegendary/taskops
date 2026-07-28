@@ -100,7 +100,12 @@ const review = rr.runNodeId && existsSync(join(w, 'runs', rr.runId, 'nodes', `re
 // official verdict = re-grade the final workspace directly (independent of TaskOps' own gate)
 let officialResolved = null, diffLines = null, gradeError = null;
 try {
-  const out = execFileSync(VENV_PY, [GRADE, instanceId, workspace], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // dataset MUST ride the final re-grade too. Without it swebench_grade.py falls back to its Lite default and any
+  // Verified instance outside the Lite∩Verified intersection (93/500) dies as GRADE_INFRA_ERROR → official_resolved
+  // =null → undetermined. The requiredCheck (line ~81) already passed dataset, so before this fix only the FINAL
+  // verdict was broken — which is why 35/45 of the gpt-5.5 Verified results had to be rescued post-hoc by
+  // eval/soak/regrade-from-preds.py. No regression on Lite: the argument equals the grader's own default there.
+  const out = execFileSync(VENV_PY, [GRADE, instanceId, workspace, dataset], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   officialResolved = /"resolved":\s*true/.test(out);
   const m = out.match(/"diff_lines":\s*(\d+)/); diffLines = m ? Number(m[1]) : null;
 } catch (e) {
@@ -109,24 +114,48 @@ try {
   const out = `${(e.stdout || '').toString()}`;
   const m2 = out.match(/"resolved":\s*(true|false)/);
   if (m2) { officialResolved = m2[1] === 'true'; const dm = out.match(/"diff_lines":\s*(\d+)/); diffLines = dm ? Number(dm[1]) : null; }
-  else { officialResolved = null; gradeError = ((e.stderr || e.message || '').toString()).slice(0, 300); }
+  // 슬라이스 600자: swebench_grade.py의 `GRADE_INFRA_ERROR ...` 헤드라인 뒤에 오는 `--- harness stderr tail ---`
+  // 첫 줄들(진짜 원인)까지 살아남게 한다. bare arm과 동일 규칙 — 두 arm의 진단 정보 보존이 비대칭이면 안 된다.
+  else { officialResolved = null; gradeError = ((e.stderr || e.message || '').toString()).slice(0, 600); }
 }
 
 const verifiedDone = task.status === 'done' && review.decision === 'approved' && review.verified === true;
+// MECHANISM INSTRUMENTATION: `verifyRetries` below is the CONFIGURED ceiling, not what actually fired — every one of
+// the 45 gpt-5.5 Verified records carries verifyRetries=1 and therefore cannot answer "did the retry gate ever
+// engage?". Without this counter a measured lift cannot be attributed to the gate at all. Event types are emitted by
+// cli/lib-runner.js (verify_retry @3448, verify_pass_flaky @3405). Must run BEFORE the rmSync(root) below.
+let verifyRetryCount = 0, verifyFlakyCount = 0;
+try {
+  for (const line of readFileSync(join(w, 'runs', runId, 'events.jsonl'), 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    const ev = JSON.parse(line);
+    if (ev.type === 'verify_retry') verifyRetryCount++;
+    else if (ev.type === 'verify_pass_flaky') verifyFlakyCount++;
+  }
+} catch {}
+// namespace by retries/arm/dataset so a k>0, no-verify, or Verified run never clobbers the pristine Lite k=0 baseline.
+// TASKOPS_SWE_RESULT_TAG additionally namespaces by MODEL (e.g. "gpt54"): the same instance graded under a different
+// native model is a different measurement, and the Verified path is already occupied by the gpt-5.5 run (45 results).
+// 태그 계산을 rec보다 먼저 한다 — rec에 태그·모델·executor를 함께 박아 결과 파일이 스스로 출처를 증언하게 만든다.
+const verifiedSplit = /verified/i.test(dataset);
+const resultTag = (process.env.TASKOPS_SWE_RESULT_TAG || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
+const tagDir = resultTag ? `-${resultTag}` : '';
+
 const rec = {
   instance_id: instanceId, dataset, taskops_status: task.status, review_decision: review.decision || null,
+  // 이 실험의 유일한 독립변수(모델)와 그 라벨링 근거를 산출물에 박는다. 디렉터리 태그는 config가 준 자유 문자열이라
+  // 스스로 오라벨링을 검출하지 못하고, 이전에는 C arm rec에 executor조차 없어 "이 결과가 Haiku로 나왔다"를 결과
+  // 파일만으로 증명할 수 없었다. report-stage.mjs가 스테이지 내 단일값 여부를 대조한다.
+  executor: sweExecutor, claude_model: process.env.TASKOPS_CLAUDE_MODEL || null, result_tag: resultTag || null,
   verified_done: verifiedDone, official_resolved: officialResolved,
   false_completion: verifiedDone && officialResolved === false,   // the metric that must be 0
   missed_honest: !verifiedDone && officialResolved === true,       // solved but TaskOps didn't credit it
   agent_edited: diffLines != null && diffLines > 0,   // wiring check: did claude actually edit the seeded workspace?
   diff_lines: diffLines, verifyRetries, wallclock_s: Math.round((Date.now() - t0) / 1000),
+  grade_error: gradeError,                                        // null = a real verdict was rendered
+  verify_retry_count: verifyRetryCount,                           // times the verify gate actually re-dispatched
+  verify_pass_flaky_count: verifyFlakyCount,                      // times a PASS was quarantined as flaky
 };
-// namespace by retries/arm/dataset so a k>0, no-verify, or Verified run never clobbers the pristine Lite k=0 baseline.
-// TASKOPS_SWE_RESULT_TAG additionally namespaces by MODEL (e.g. "gpt54"): the same instance graded under a different
-// native model is a different measurement, and the Verified path is already occupied by the gpt-5.5 run (45 results).
-const verifiedSplit = /verified/i.test(dataset);
-const resultTag = (process.env.TASKOPS_SWE_RESULT_TAG || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
-const tagDir = resultTag ? `-${resultTag}` : '';
 if (noVerify) mkdirSync(join(EVAL, 'results', 'noverify'), { recursive: true });
 if (verifiedSplit) mkdirSync(join(EVAL, 'results', `verified${tagDir}`), { recursive: true });
 const outFile = join(EVAL, 'results',

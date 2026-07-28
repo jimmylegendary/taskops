@@ -56,24 +56,38 @@ let gradeError = null;
 // a throw with NO verdict on stdout is infra (null + grade_error, kept out of the F1 denominator). The prior
 // blanket `catch { null }` mislabeled every honest NOT_RESOLVED as undetermined.
 try {
-  officialResolved = /"resolved":\s*true/.test(execFileSync(VENV_PY, [GRADE, instanceId, repoDir], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000 }));
+  // dataset MUST be passed (same defect+fix as run_swebench.mjs): the grader defaults to Lite, so a Verified
+  // instance outside the Lite∩Verified intersection would be scored as an infra error instead of judged. BOTH arms
+  // are fixed together — fixing only one would give the paired design two different grading conditions.
+  officialResolved = /"resolved":\s*true/.test(execFileSync(VENV_PY, [GRADE, instanceId, repoDir, dataset], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000 }));
 } catch (e) {
   const so = String(e?.stdout || '');
   if (/"resolved":\s*(true|false)/.test(so)) officialResolved = /"resolved":\s*true/.test(so);
-  else { officialResolved = null; gradeError = String(e?.message || e).slice(0, 300); }
+  // stderr 우선 (run_swebench.mjs:117과 동일 규칙). execFileSync의 e.message는 "Command failed: <전체 명령줄>\n<stderr>"
+  // 형태고 여기 명령줄만 ~226자라, message를 300자로 자르면 swebench_grade.py가 stderr에 찍는 헤드라인
+  // `GRADE_INFRA_ERROR: ... harness_exit=N`(~90자)조차 잘리고 그 뒤 `--- harness stderr tail ---`(진짜 원인)은 전부
+  // 소실된다. 페어드 설계는 "양 arm 동일 채점 조건"을 표방하는데, 하필 undetermined가 인프라 실패인지 판별하는
+  // 필드에서 진단 정보 보존이 비대칭이었다. 슬라이스도 양쪽 600자로 통일해 tail 첫 줄들이 살아남게 한다.
+  else { officialResolved = null; gradeError = ((e?.stderr || e?.message || e || '').toString()).slice(0, 600); }
 }
+
+// TASKOPS_SWE_RESULT_TAG namespaces by MODEL (e.g. "gpt54") — the executor alone does not identify the native model,
+// so without it a gpt-5.4 bare run would clobber a same-instance result produced under a different model.
+// 태그 계산을 rec보다 먼저 한다: rec에 태그와 모델을 함께 박아 결과 파일이 스스로 출처를 증언하게 만든다.
+const resultTag = (process.env.TASKOPS_SWE_RESULT_TAG || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
+const tagDir = resultTag ? `-${resultTag}` : '';
 
 const rec = {
   instance_id: instanceId, dataset, executor, arm: 'bare',
+  // 이 실험의 유일한 독립변수(모델)를 산출물에 박는다. 태그(=디렉터리명)는 config가 준 자유 문자열이라 스스로
+  // 오라벨링을 검출하지 못하고, TASKOPS_CLAUDE_MODEL을 빠뜨린 채 실행해도 파일만으로는 알 수 없었다.
+  // report-stage.mjs가 스테이지 내 claude_model 단일값 여부를 검사해 재개 실행 중 드리프트까지 잡는다.
+  claude_model: process.env.TASKOPS_CLAUDE_MODEL || null, result_tag: resultTag || null,
   adapter_ok: adapterOk, claimed_done: claimedDone, official_resolved: officialResolved, grade_error: gradeError, diff_files: diffLines,
   false_completion: claimedDone && officialResolved === false, // claimed done but the official judge disagrees (null = infra, not a verdict)
   missed_honest: !claimedDone && officialResolved === true,     // did not claim done but actually resolved
   wallclock_s: Math.round((Date.now() - t0) / 1000),
 };
-// TASKOPS_SWE_RESULT_TAG namespaces by MODEL (e.g. "gpt54") — the executor alone does not identify the native model,
-// so without it a gpt-5.4 bare run would clobber a same-instance result produced under a different model.
-const resultTag = (process.env.TASKOPS_SWE_RESULT_TAG || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
-const tagDir = resultTag ? `-${resultTag}` : '';
 const bareDir = /verified/i.test(dataset) ? join(EVAL, 'results', 'bare', `verified${tagDir}`) : join(EVAL, 'results', 'bare');
 mkdirSync(bareDir, { recursive: true });
 writeFileSync(join(bareDir, `bare-swe-${executor}${tagDir}-${instanceId}.json`), JSON.stringify(rec, null, 2), 'utf8');

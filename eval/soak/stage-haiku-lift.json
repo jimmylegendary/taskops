@@ -1,0 +1,68 @@
+{
+  "stage": "stage-haiku-lift",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "judgeField": "official_resolved",
+  "pairedTest": { "a": "A", "b": "C" },
+  "invalidRunMaxWallS": 60,
+  "arms": [
+    {
+      "key": "A",
+      "adapter": "run_swebench_bare.mjs",
+      "extraArgs": [],
+      "claimField": "claimed_done",
+      "resultPattern": "results/bare/verified-haiku/bare-swe-claude-code-haiku-{id}.json"
+    },
+    {
+      "key": "C",
+      "adapter": "run_swebench.mjs",
+      "extraArgs": ["2"],
+      "claimField": "verified_done",
+      "resultPattern": "results/verified-haiku/swebench-verified-{id}.json"
+    }
+  ],
+  "instances": [
+    "django__django-11179",
+    "astropy__astropy-7336",
+    "django__django-11119",
+    "astropy__astropy-7166",
+    "django__django-11066",
+    "astropy__astropy-14309",
+    "django__django-11133",
+    "astropy__astropy-7671",
+    "django__django-11163",
+    "astropy__astropy-14365",
+    "django__django-11276",
+    "astropy__astropy-14995",
+    "django__django-10880",
+    "astropy__astropy-14539",
+    "django__django-10973",
+    "astropy__astropy-14096",
+    "django__django-11099",
+    "astropy__astropy-12907",
+    "django__django-11239",
+    "astropy__astropy-13236",
+    "django__django-11087",
+    "astropy__astropy-14508",
+    "django__django-11206",
+    "astropy__astropy-14598",
+    "django__django-11149",
+    "astropy__astropy-13033",
+    "django__django-11292",
+    "astropy__astropy-14182",
+    "django__django-11095",
+    "astropy__astropy-13977"
+  ],
+  "concurrency": 1,
+  "globalWallMin": 720,
+  "perRunTimeoutMin": 60,
+  "maxAttemptsPerJob": 2,
+  "haltOnConsecutiveFailures": 3,
+  "env": {
+    "TASKOPS_SWE_EXECUTOR": "claude-code",
+    "TASKOPS_CLAUDE_MODEL": "claude-haiku-4-5-20251001",
+    "TASKOPS_SWE_RESULT_TAG": "haiku",
+    "TASKOPS_MAX_WALL_MS": "2700000",
+    "SWEBENCH_CACHE_LEVEL": "instance"
+  },
+  "postJobCleanup": "test -f /home/jimmy/repos/taskops/eval/results/verified-haiku/swebench-verified-{id}.json && { I={id1776}; docker rmi -f swebench/sweb.eval.x86_64.$I:latest sweb.eval.x86_64.$I:latest >/dev/null 2>&1; }; true"
+}

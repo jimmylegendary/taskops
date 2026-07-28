@@ -1,0 +1,14 @@
+{
+  "instance_id": "django__django-11179",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "executor": "claude-code",
+  "arm": "bare",
+  "adapter_ok": true,
+  "claimed_done": true,
+  "official_resolved": true,
+  "grade_error": null,
+  "diff_files": 5,
+  "false_completion": false,
+  "missed_honest": false,
+  "wallclock_s": 326
+}

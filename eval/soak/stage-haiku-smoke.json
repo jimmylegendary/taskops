@@ -1,0 +1,37 @@
+{
+  "stage": "stage-haiku-smoke",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "judgeField": "official_resolved",
+  "pairedTest": { "a": "A", "b": "C" },
+  "invalidRunMaxWallS": 60,
+  "arms": [
+    {
+      "key": "A",
+      "adapter": "run_swebench_bare.mjs",
+      "extraArgs": [],
+      "claimField": "claimed_done",
+      "resultPattern": "results/bare/verified-haiku-smoke/bare-swe-claude-code-haiku-smoke-{id}.json"
+    },
+    {
+      "key": "C",
+      "adapter": "run_swebench.mjs",
+      "extraArgs": ["2"],
+      "claimField": "verified_done",
+      "resultPattern": "results/verified-haiku-smoke/swebench-verified-{id}.json"
+    }
+  ],
+  "instances": ["django__django-11179"],
+  "concurrency": 1,
+  "globalWallMin": 90,
+  "perRunTimeoutMin": 40,
+  "maxAttemptsPerJob": 1,
+  "haltOnConsecutiveFailures": 2,
+  "env": {
+    "TASKOPS_SWE_EXECUTOR": "claude-code",
+    "TASKOPS_CLAUDE_MODEL": "claude-haiku-4-5-20251001",
+    "TASKOPS_SWE_RESULT_TAG": "haiku-smoke",
+    "TASKOPS_MAX_WALL_MS": "780000",
+    "SWEBENCH_CACHE_LEVEL": "instance"
+  },
+  "postJobCleanup": "test -f /home/jimmy/repos/taskops/eval/results/verified-haiku-smoke/swebench-verified-{id}.json && { I={id1776}; docker rmi -f swebench/sweb.eval.x86_64.$I:latest sweb.eval.x86_64.$I:latest >/dev/null 2>&1; }; true"
+}
