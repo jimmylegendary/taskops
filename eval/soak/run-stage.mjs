@@ -35,6 +35,10 @@ const ledger = existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf8').split('
 const attempts = new Map();
 const doneOk = new Set();
 for (const row of ledger) {
+  // DRY rows are wiring checks, not evidence: the stub always exits 0, so counting them would mark every job
+  // 'done' and make the NEXT REAL run skip the entire stage while reporting success. Never let a dry run
+  // consume the resume budget.
+  if (row.dry) continue;
   const k = `${row.arm}:${row.id}`;
   if (row.status === 'done') doneOk.add(k);
   if (['done', 'failed', 'timeout'].includes(row.status)) attempts.set(k, (attempts.get(k) || 0) + 1);
@@ -75,12 +79,15 @@ function runJob(job) {
         const rp = resultPath(job.arm, job.id);
         if (existsSync(rp)) { try { const r = JSON.parse(readFileSync(rp, 'utf8')); resultSummary = { official_resolved: r.official_resolved ?? null, wallclock_s: r.wallclock_s ?? null }; } catch {} }
       }
-      log({ ts: new Date().toISOString(), stage: cfg.stage, arm: job.arm.key, id: job.id, status, exitCode: code, startedAt: started, elapsedS: Math.round((Date.now() - jt0) / 1000), resultSummary, stdoutTail: out.slice(-1000), stderrTail: err.slice(-500) });
+      log({ ts: new Date().toISOString(), stage: cfg.stage, arm: job.arm.key, id: job.id, status, exitCode: code, startedAt: started, elapsedS: Math.round((Date.now() - jt0) / 1000), resultSummary, stdoutTail: out.slice(-1000), stderrTail: err.slice(-500), ...(DRY ? { dry: true } : {}) });
       // Disk hygiene for long runs: after the instance is fully done (verify + final grade all used the same
       // instance-level image), remove that image. Done here — never mid-grade — so the removal cannot race the
       // harness the way env-level cleanup did (the 35-forged-FAIL incident). {id1776} = swebench image tag form.
       if (cfg.postJobCleanup && !DRY) {
-        const cmd = cfg.postJobCleanup.replace('{id1776}', job.id.replace('__', '_1776_')).replace('{id}', job.id);
+        // replaceAll (not replace): String#replace with a string pattern substitutes only the FIRST occurrence, so a
+        // cleanup template that mentions {id} twice (e.g. a result-file guard + a docker rmi) would silently emit a
+        // literal "{id}" into the shell. Existing configs use each token once, so this is a no-op for them.
+        const cmd = cfg.postJobCleanup.replaceAll('{id1776}', job.id.replace('__', '_1776_')).replaceAll('{id}', job.id);
         try { execFileSync('/bin/sh', ['-c', cmd], { stdio: 'ignore', timeout: 60000 }); } catch {}
       }
       console.log(`[${cfg.stage}] ${job.arm.key}:${job.id} → ${status} (${Math.round((Date.now() - jt0) / 60000)}min, elapsed ${(Math.round((Date.now() - t0) / 60000))}min)`);

