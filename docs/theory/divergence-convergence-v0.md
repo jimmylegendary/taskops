@@ -331,3 +331,184 @@ best-effort 기준(`F[q_τ]−F*_B≈0`)이 비볼록·기만적 `U`에서 조�
 - **Ghosal, Ghosh, van der Vaart (2000)**, "Convergence rates of posterior distributions," *Ann. Statist.* 28(2):500-531. — 수축률 = prior 집중 + metric entropy. (렌즈4)
 
 *unverified(원문 미확인, 인용 시 그대로 표기):* Grünwald 2007, Li–Vitányi book, Schwartz 1965, Pesin 1977, Allis+ 1994, Parr–Pezzulo–Friston 2022. Kirkpatrick 1983(simulated annealing)·Strathern 1997(Goodhart)은 널리 확립되어 있으나 이번 세션 원문 재확인은 안 함.
+---
+
+## 추기 (2026-07-29): 예측된 공백의 실측과 그 처방
+
+이 문서가 예측한 공백 — objective U 는 수렴 target 이자 **발산을 유한히 가두는 울타리**(Z_T<∞ ⟺ U coercive)이고
+순수 why(U≡const)면 Z=∞, 평형 부재 = 무한발산 — 이 ALE 벤치에서 그대로 실측되었다.
+
+`ranking_node_feature_parity_recovery`(full-spectrum tier, gpt-5.4/low, 31분) 1건:
+decomposition 5 · exploration 5 · surprise 1 · **execute 0**. 예산을 전부 계획에 소비하고 산출물을 하나도 만들지 못했다.
+realizedDepth 는 `expectedPlan.expectedDepth=2` 를 넘어 3+ 로 자랐고, 자식 17개는 전부 `requiredChecks` 가 없었다.
+
+taskops 에는 발산 압력만 있고 수렴 압력이 없었다. execute 로 가는 유일한 문(`uncertaintyState:'known'` +
+runnable contract)으로 미는 힘이 없었던 것이다.
+
+처방은 `docs/specs/convergence-pressure.md` 의 **3축 × 2단계 게이트**다(예산 / 깊이 / 발산잔여, soft·hard, OR 결합).
+soft 는 "발산이 실제로 새 possibility mass 를 여는가"(novelty)를 요구하고, hard 는 계획을 차단하고 실행만 남긴다.
+실행할 것이 정말 없으면 억지로 done 을 만들지 않고 **정직하게 blocked** 로 끝낸다.
+
+### 이 문서의 P4/P5 지표와의 경계
+
+게이트는 `lib-progress-ledger.js` 의 `openDiv` / `closedShare` / `kappaReabsorb` / `confinementRatio` 를
+**읽지 않는다.** 그 스칼라들의 gate·reward 사용 금지는 해당 파일 LIMITATIONS 에 명시돼 있고 그대로 유효하다.
+게이트 전용 지표(`openPlanDebt`)는 ledger **밖**(`cli/lib-convergence.js`)에 새로 정의했으며, ledger 에서
+재사용한 것은 순수 구조 측정 함수 `realizedDepthBelow` 의 export 하나뿐이다.
+즉 이 추기는 **LIMITATIONS 의 개정이 아니다** — 그 제약을 우회하지 않고 지킨 채로 처방을 만든 기록이다.
+
+## 추기 (2026-08-04): 3차 — 분해 품질 게이트
+
+1·2차 게이트(3축 압력, soft/hard, 자식 계약 clamp, 예산 연장)를 넣고도 ALE 실측의 `execute` 는 여전히 0 이었다.
+2차 실측(`conv2-K6gpho`)을 events.jsonl 로 직접 재확인한 결과 원인이 1차와 **다르다**:
+게이트는 정상 발화했고(hard, `stopReason=convergence_blocked`) 억지 done 도 만들지 않았다.
+문제는 **강제 실행 후보 풀이 구조적으로 비어 있었다**는 것이다.
+
+- 생성된 자식 18개 중 `requiredChecks`/`requiredArtifacts` 를 가진 것은 **0개**. 검증 가능 acceptance 보유는
+  루트 하나뿐이었고 그마저 분해가 `status=done` 으로 소비해 tier-1 에서 빠졌다.
+- tier-2(연기된 부모 acceptance 재검증)는 살릴 수 있었으나 두 조건이 막았다.
+  ① `convergenceDeferredAcceptance` 가 "부모 체크가 자식에 안 내려갔을 때만" 기록됐고,
+  ② 설사 있어도 `hasOpenChildren` 이 걸렸다 — hard 미달 상황은 정의상 자식이 전부 열려 있으므로
+  tier-2 는 **영원히 발화할 수 없었다**.
+
+즉 병리는 "게이트가 약하다"가 아니라 **분해가 실행 가능한 단위를 하나도 만들지 못한다**는 것이다.
+분해 LLM 은 "설계하기/도출하기" 류만 쏟아내고 실제로 만드는 일은 blocked/needs_exploration 으로 남겼다.
+
+### 실행 가능(executable)의 정의 — 두 조건 AND
+
+`readiness === 'runnable'` **AND** 검증 가능한 완료조건 보유(비어있지 않은 `requiredChecks` 명령 또는
+`requiredArtifacts` 경로 1개 이상). 두 번째 조건이 빠지면 강제가 **거짓완료 공장**이 된다 — 실측 확인:
+checks 도 artifacts 도 없는 task 는 `verifyChecks=true` 여도 검증을 건너뛰고 `status=done` 이 된다.
+이 술어(`isExecutableTask`)는 **세 지점이 공유**한다: 분해 품질 평가 / `openPlanDebtPressure` / 강제 실행 후보 선택.
+
+### 사다리 — 유도 → 강제 → 폴백 → 정직한 blocked
+
+| 구간 | 동작 |
+|---|---|
+| soft 전(`level=none`) | **자유.** 넓은 분해를 막지 않는다(막으면 제1원칙 사고가 죽는다). 단 계측은 **항상** 한다. |
+| soft | 거부하지 않고 **수치 피드백**만 다음 분해 프롬프트에 싣는다. |
+| hard + enforce | `executable >= 1 AND unresolvedBlockerCount === 0` 요구. 미달이면 재분해 **1회**. |
+| 재분해도 미달 | 분해 포기 → **부모를 통째로 실행**(부모가 검증 가능 acceptance 보유 시). |
+| 부모도 검증 불가 | **정직한 blocked** + `needsManualReview`. `blockedBy` 는 건드리지 않는다(가짜 blocker 금지). |
+
+경로 C — 자식 readiness 를 억지로 `runnable` 로 clamp — 는 **절대 금지**다. 실제로 못 하는데 할 수 있다고
+우기는 것이 거짓완료다. 회귀 테스트(T8)가 "분해 직후 대비 상향된 자식 0개"를 전수 검사로 고정한다.
+
+### soft 유도는 문구가 아니라 수치여야 한다
+
+프롬프트에 "실행 가능하게 만들어라"라고 쓰는 것만으로는 행동이 안 바뀐다. 같은 교훈을 이 저장소에서 이미 얻었다 —
+verify 재시도가 "실패했다"만 받고 *왜*를 못 받아 같은 접근을 반복했고(커밋 `ac2a545` 에서 수정), 분해도 똑같았다.
+그래서 직전 분해의 **실측 정수**(자식 N개 중 실행가능 M개, runnable/verifiable/blocked/해소불가 blockedBy 내역)를
+다음 분해 프롬프트에 싣는다. 피드백 소스는 부모 frontmatter `decompositionQuality` 우선,
+없으면 런 스코프 미러(`runs/<runId>/index.md` 의 `convergenceDecompositionFeedback`, restart 내성).
+이 피드백은 **pressure gate 의 통과/차단과 무관하게** 프롬프트 조립 단계에 붙는다 —
+`divergenceNovelty` 의 `first_divergence` 규칙이 각 task/kind 의 첫 시도를 무조건 통과시키므로,
+gate 결정에 얹으면 soft 가 행동을 바꿀 기회를 놓친다.
+
+### 조기 종료의 급소 두 줄
+
+- **적재를 항상 한다**: 부모가 검증 가능 acceptance 를 가지면 분해 성공 시 `convergenceDeferredAcceptance` 를
+  **무조건** 기록한다(`uncovered` / `full` 분리 보관). `convergence_acceptance_descent_gap` **이벤트**는
+  여전히 uncovered>0 일 때만 발화하므로 2차의 R2 의미는 불변이다.
+- **`hasOpenChildren` → `hasExecutableOpenDescendant`**: 열린 자손 중 executable 이 하나라도 있으면 tier-2 제외,
+  **전부 비실행일 때만** 부모가 되살아난다. 실행 가능한 자식이 있으면 tier-1 이 이미 그 자식을 골랐을 것이므로
+  선점 위험이 없다. 이 한 줄이 폴백 B 를 실제로 작동시킨다.
+
+### hard 에서 분해를 통과시키는 예외 (전체 스위트가 강제한 보정)
+
+2차의 hard 는 planning 을 전면 차단한다. 그러면 hard 분해 품질 게이트가 **발화할 기회 자체가 없다**.
+그래서 hard 에서 `decompose` 는 다음 두 조건이 **모두** 참일 때만 bounded 품질 게이트까지 통과시킨다:
+① 이 런에 이미 `execute` 시도가 한 번이라도 있었고, ② 자기 자신을 제외한 강제 실행 후보가 하나도 없다.
+실행 없이 planning 만 반복된 런은 기존 hard 사다리를 그대로 타 즉시 실행으로 수렴한다(2차 계약 불변,
+`convergence-pressure-gate` 가 이를 고정한다). 통과한 분해도 수용/재분해 1회/부모 폴백/정직한 blocked 중
+하나로 **반드시 종결**하므로 순환하지 않는다.
+
+### 무한루프 방지 (5중)
+
+(i) 재분해는 task 당 1회(`decompositionAttempt` + `CONVERGENCE_DEFAULTS.decomposition.maxRetries=1`).
+(ii) `convergenceDecompositionAbandoned` 는 그 task 의 decompose 를 종결시킨다(어떤 level 에서도 execute 로 강등).
+(iii) tier-2 는 `reverifiedAt` 스탬프로 부모당 1회.
+(iv) `blockHonestly` 는 여전히 `stopReason` 을 세워 런을 종료한다 — 사다리가 길어졌을 뿐 순환하지 않는다.
+(v) budget 축은 단조 증가라 level 이 hard 에서 내려가지 않는다.
+
+구현 세부: `deriveDecompositionIds` 가 `tgv-<suffix>-v<attempt>` 를 반환하도록 확장했다(attempt=1 이면 기존 `-v1`).
+이게 없으면 `performAgentDecomposition` 의 "이미 존재 → 재사용" 조기반환 때문에 재분해가 그대로 no-op 이 된다.
+
+### debt 축의 두 결함도 함께 고쳤다
+
+① `readiness === 'blocked'` 를 debt 계산에서 건너뛰고 있었다 — 분해 LLM 이 blocked 자식만 양산하면
+debt 가 **오히려 내려가** 잡아야 할 병리를 축이 못 봤다. 이제 blocked 를 planDebt 에 포함하되
+`blockedDebt` 로 분리 계상한다. ② executable 계산을 주입 술어로 교체해 정의를 통일했다.
+debt 는 여전히 **soft 전용**이다 — hard 로 올리면 계획을 광범위하게 차단해 억지 분해를 유발한다.
+
+### 관측
+
+`decomposition_quality_evaluated` 는 mode(off/observe/enforce)와 level(none 포함) **무관하게 항상** 발화한다.
+soft 전 자유 구간의 분해 품질을 계측해야 "유도 없이도 괜찮았는가"를 사후 판정할 수 있고, 게이트 도입 전/후 비교의
+유일한 공통 지표가 되기 때문이다. 결정 이벤트는 `decomposition_quality_rejected` /
+`decomposition_fallback_parent_execute` / `decomposition_quality_blocked_honest` 3종.
+이벤트 payload 는 **정수와 id 배열만** 담는다 — 이벤트가 그대로 다음 프롬프트 피드백의 소스가 되므로
+자유 텍스트를 실으면 프롬프트 인젝션 표면이 된다.
+
+측정 타당성도 함께 고쳤다: `eval/adapters/run_ale.mjs` 의 `steps_used` 가 `countType('task_selected')` 였다 —
+그건 **execute 스텝 수**이지 실제 소비 스텝이 아니다("예산 3/12" 라는 허상의 출처). 이제
+`runner_stopped.stepsRun` 을 읽고 `execute_steps` 를 별도 필드로 분리한다.
+
+## 추기 (2026-08-05): 5차 — `blocked_only` 앞의 사다리 선개입
+
+### 진단: 게이트보다 먼저 이기는 종료
+
+1~4차 내내 hard 사다리(재분해 → 폴백B → 정직한 blocked)는 **한 번도 발화하지 못했다**. 원인은 압력
+임계가 아니라 **런루프의 순서**였다.
+
+- `lib-runner.js` 런루프는 매 스텝 `pickNextAction` 을 부른다. 열린 task 가 전부 blocked 면
+  `{ kind: 'stop', reason: 'blocked_only' }` 를 돌려준다.
+- 그 `stop` 은 **즉시 `break`** 로 이어졌다. 반면 `computeConvergencePressure` /
+  `applyConvergencePressure` 는 그 `if (next.kind === 'stop')` 블록 **뒤에** 있었다.
+
+즉 게이트는 "next 가 있을 때만" 적용되는 후처리였고, "실행할 게 없다" 는 언제나 게이트보다 먼저 이겼다.
+그래서 4차 실측이 `stepsRun 4 · stopReason=blocked_only · task_selected(execute)=0` 이었다.
+
+### 처방: 후보가 비면 사다리를 먼저 한 번 태운다
+
+`blocked_only` 로 끝내기 **전에** hard 사다리를 태운다(`attemptBlockedOnlyLadder`).
+
+1. 강제 실행 후보 tier-1 → **tier-2**(`convergenceDeferredAcceptance` 를 가진 부모 되살리기)
+2. 재분해를 포기한 부모 통째 실행(폴백B, `selectAbandonedParentExecutionCandidate`)
+3. 그래도 없으면 그때 정직하게 `blocked_only`
+
+**재분해가 이 사다리에 없는 이유**: 재분해 1회는 분해 품질 게이트(`closeDecomposeSuccess`)의 단계이고
+그 시점엔 계획 후보가 존재한다. `blocked_only` 지점에서는 열린 계획 후보가 **정의상 0개**다(있었다면
+`pickNextAction` 이 planning 을 반환했을 것). 그래서 사다리는 실행 단계에서 시작한다.
+
+### tier-2 는 폴백B의 급소였다
+
+루트처럼 **검증 가능한 acceptance 를 가진 부모**가 분해로 `status: done` 이 되면 후보 풀에서 영구
+제외된다. 그 부모의 acceptance 는 `closeDecomposeSuccess` 가 `convergenceDeferredAcceptance` 로
+스탬프해 두므로(mode≠off + 부모 검증가능일 때, 압력 level 과 무관), tier-2 가 그것을 되살려 재검증한다.
+필드 적재는 이미 되고 있었고 — **소비 경로가 도달 불가능했을 뿐이다.**
+
+### 거짓 완료 금지 / 자유도 보존 / 무한루프 금지
+
+- 사다리는 후보를 **만들지 않는다**. `taskHasVerifiableAcceptance` 를 통과한 것만 고르고, 강제 실행
+  스텝은 `verifyRequiredChecks: true` 로 runner 검증된다. 체크가 실패하면 부모는 `done` 이 아니다.
+- `mode !== 'enforce'`(off/observe)에서는 절대 발화하지 않는다 — observe 는 측정만 한다.
+- 무한루프 3중 방지: ① 런당 시도 상한(`BLOCKED_ONLY_LADDER_MAX_ATTEMPTS`), ② 이미 태운 taskId 재선택
+  금지(런 스코프), ③ tier-2 는 `reverifiedAt` 스탬프가 찍힌 부모를 영구 제외(파일에 남는 단조 표식).
+- 사다리 자체가 터져도(예: frontmatter 쓰기 EACCES) 런을 죽이지 않고
+  `convergence_blocked_only_ladder_error` 를 남긴 뒤 원래의 정직한 `blocked_only` 로 되돌아간다.
+
+### debt hard 임계는 그대로 둔다 (sustain=3)
+
+4스텝 런은 dispatch 마다 평가하므로 debt 축을 4회 본다. 임계 초과가 계속되면 레벨은
+`soft → soft → hard → hard` 로 3번째 평가에서 hard 에 **도달한다**. 즉 4스텝 런에서도 도달 가능하므로
+임계를 낮출 근거가 없고, 낮추면 첫 평가부터 hard 가 되어 **soft 전 자유도(초기 넓은 분해)** 가 죽는다.
+이 도달성은 `convergence-blocked-only-ladder.mjs` 가 결정적으로 검증한다.
+
+### 관측
+
+`convergence_blocked_only_ladder`(발화, `stopReasonDeferred` 포함) ·
+`convergence_forced_execute`(`reason: 'blocked_only_ladder'`) ·
+`convergence_deferred_acceptance_reverify` · `convergence_blocked_only_ladder_exhausted` ·
+`convergence_blocked_only_ladder_error`. 런 결과에는 `convergence.blockedOnlyLadder`
+(attempts / forcedExecutes / exhausted / errors / maxAttempts / rescuedTaskIds) 로 집계된다.

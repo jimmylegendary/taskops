@@ -354,7 +354,13 @@ try {
   assert.equal(deferredChild.status, 'blocked');
   assert.equal(deferredChild.runReadiness, 'blocked');
   assert.match(deferredChild.runReadinessReason, /Committing scope deferred by taskops-runner/);
-  assert.equal(deferredChild.expectedPlan.expectedDepth, 1, 'guard must not overwrite expectedPlan normalization');
+  // 이 assertion 의 주제는 "committing guard 가 expectedPlan 을 덮어쓰지 않는다"이며 그 성질은 그대로다.
+  // 값이 1 → 0 으로 바뀐 것은 guard 때문이 아니라 normalizeChildConvergenceContracts 의 **의도된**
+  // expectedDepth 단조감소(child = min(선언값, parent-1)) 때문이다. 이 픽스처의 부모는 expectedDepth=0
+  // (committing = 계획 소진)이므로 자식 상한도 0 이다. 자식이 유효한 depth 를 재선언해 깊이가 계속 자라던 것이
+  // ALE 에서 realizedDepth 가 3+ 로 폭증한 실제 기전이라, 그 구멍을 막은 결과다.
+  // 기대값을 낮춘 것이 아니라 새 계약을 반영한 것이다 — guard 는 여전히 expectedPlan 을 건드리지 않는다.
+  assert.equal(deferredChild.expectedPlan.expectedDepth, 0, 'guard must not overwrite expectedPlan normalization');
 
   const runnableChild = parseMarkdownFile(childTaskPath(mixedWorkDir, mixedId, 'task-child-runnable'));
   assert.equal(runnableChild.status, 'pending');

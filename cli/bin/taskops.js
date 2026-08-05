@@ -116,6 +116,21 @@ function maxStepsExplicitFlag(flags) {
   return flagHasValue(flags, 'max-steps') || flags['max-steps-explicit'] === true || flags['max-steps-explicit'] === 'true';
 }
 
+// 수렴 압력 게이트 설정. 플래그가 하나도 없으면 null 을 돌려 runner 가 env/기본값 경로를 그대로 쓰게 한다.
+function convergenceFlagsToOptions(flags) {
+  const out = {};
+  if (flagHasValue(flags, 'convergence')) out.mode = String(flags.convergence);
+  const budget = {};
+  if (flagHasValue(flags, 'convergence-budget-soft')) budget.soft = flags['convergence-budget-soft'];
+  if (flagHasValue(flags, 'convergence-budget-hard')) budget.hard = flags['convergence-budget-hard'];
+  if (Object.keys(budget).length) out.budget = budget;
+  const debt = {};
+  if (flagHasValue(flags, 'convergence-debt-count')) debt.count = flags['convergence-debt-count'];
+  if (flagHasValue(flags, 'convergence-debt-ratio')) debt.ratio = flags['convergence-debt-ratio'];
+  if (Object.keys(debt).length) out.debt = debt;
+  return Object.keys(out).length ? out : null;
+}
+
 function requireFlag(flags, key) {
   if (!flags[key] || flags[key] === true) fail(`Missing required --${key}`);
   return String(flags[key]);
@@ -540,6 +555,8 @@ export async function main(argv = process.argv.slice(2)) {
       continueOnFailure: flags['continue-on-failure'] === true,
       verifyRetries: flags['verify-retries'] != null && flags['verify-retries'] !== true ? flags['verify-retries'] : null,
       aiResolver: flags['ai-resolver'] != null && flags['ai-resolver'] !== true ? flags['ai-resolver'] : null,
+      childAcceptancePropagation: flags['child-acceptance-propagation'] != null && flags['child-acceptance-propagation'] !== true ? String(flags['child-acceptance-propagation']) : null,
+      convergence: convergenceFlagsToOptions(flags),
     });
     if (flags.json) {
       await writeJson(result);

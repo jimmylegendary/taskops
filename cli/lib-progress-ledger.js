@@ -126,7 +126,10 @@ const TERMINAL_DIV_CLOSURE_STATUS = new Set(['done', 'blocked', 'cancelled', 'fa
 // P4 realizedDepth: childTaskGroupVersionId 서브트리의 최장 분해 hop 수. version-scoped(sel 안 자식만 따라감),
 // cycle-guard seen-set(방문한 childTaskGroupVersionId), leaf(자식 없음)=0, throw-free 재귀. 상태합산이 아니라 구조적
 // 깊이 측정이다. seen을 branch마다 복제해 tree는 정확·DAG/cycle은 유한 종료(재방문 버전 → 0).
-function realizedDepthBelow(sel, task, seen = new Set()) {
+// NOTE(수렴 게이트): 게이트(lib-convergence)는 이 **구조적 깊이 측정치**만 소비한다.
+// confinementRatio / breachCount / closedShare / kappa 는 아래 LIMITATIONS 대로 여전히 measurement-only ·
+// non-gating 이며 게이트는 그 스칼라들을 읽지 않는다(게이트 전용 지표는 이 파일 밖에 별도로 정의되어 있다).
+export function realizedDepthBelow(sel, task, seen = new Set()) {
   const childVer = task?.childTaskGroupVersionId;
   if (!childVer || seen.has(childVer)) return 0;
   const children = sel.filter((t) => t.taskGroupVersionId === childVer);
@@ -158,9 +161,9 @@ const LIMITATIONS = [
   'A_div and A_conv are theoretically SLAVED, not independent — both derive from one field δF/δμ (theory §4.1); in a best-effort trajectory they are expected to co-vary (prediction P1), so kappa is a ratio of dynamically-coupled channels, NOT an independent-reabsorption efficiency. This ledger performs channel attribution (which §4.1 permits) and is the instrument for TESTING slaving, not a claim of axis independence.',
   'transportReabsorb is a rank-weighted analog of the theory §5.1 R̂ (certified-solve reabsorption), NOT the literal bounded [0,1] count-ratio: transport is tier-rank (0-3) weighted while divergence is penalty-magnitude weighted, so it is unbounded (>1 possible; TC2=5.0). The theory\'s R̂∈[0,1] is idealized-continuous with no bounded Tier-1 realization.',
   // ---- P4-P7 규범적 완성 한계(2026-07-21; §4 적대검증대로 강등) ----
-  'P4 confinement: expectedPlan.expectedDepth는 self-declared 분해 FLOOR(준비도 추정, lib-taskops.js:1401-1406; expectedDepth>=1이면 needs_decomposition)이지 이론 §2.2/C2의 coercive potential U가 아니다. breach를 confinement와 동일시함은 §4.2 명명규약(non-identified)이라 breachCount는 a decomposition-depth OVERRUN proxy이며, 이 규범적 confinement 주장은 demotedToLimitations(실 run 데이터 0건: 17/19 empty·canonical/minimal depth 미특성화).',
+  'P4 confinement: expectedPlan.expectedDepth는 self-declared 분해 FLOOR(준비도 추정, lib-taskops.js:1682-1687; expectedDepth>=1이면 needs_decomposition)이지 이론 §2.2/C2의 coercive potential U가 아니다. breach를 confinement와 동일시함은 §4.2 명명규약(non-identified)이라 breachCount는 a decomposition-depth OVERRUN proxy이며, 이 규범적 confinement 주장은 demotedToLimitations(실 run 데이터 0건: 17/19 empty·canonical/minimal depth 미특성화).',
   'P4 confinement는 DEPTH만 가둔다: A_div가 세는 breadth-발산(log2(1+childCount) branching)은 미봉쇄라 no-breach ⇏ 발산 유한(얕고 무성한 tree는 A_div 큰데 breach 0). confinementRatio<1은 good confinement 증거 아님(dark-room §3.4c 미탐색일 수 있음); 방향성 신호는 overrun(breach 또는 ratio>1)뿐이며 그마저 실패 아닌 pressure다 — reward/gate 절대 금지.',
-  'P4 confinement breach는 runner의 planProgress와 SAME EVENT·DIFFERENT LENS다(모순 아님): progressRatio(lib-runner.js:4027; 회귀락 scripts/expected-plan-progress.mjs:176)는 realizedDepth>=expectedDepth를 plan-complete로 clamp(1.0)하는데, breachCount는 동일 사건(realized>D)에 confinement 렌즈를 적용해 deeper-than-estimated=울타리 초과압(pressure)으로 센다. 두 수치는 같은 분해-깊이 비교(T9 차원 정합)에 대한 별개 렌즈이지 상충이 아니다 — runner=계획소진 100%/good, P4=overrun/pressure. 공식 불변(measurement-only, non-gating; breachCount는 claimSafe/κ 미접촉).',
+  'P4 confinement breach는 runner의 planProgress와 SAME EVENT·DIFFERENT LENS다(모순 아님): progressRatio(lib-runner.js:4152-4154; 회귀락 scripts/expected-plan-progress.mjs:176)는 realizedDepth>=expectedDepth를 plan-complete로 clamp(1.0)하는데, breachCount는 동일 사건(realized>D)에 confinement 렌즈를 적용해 deeper-than-estimated=울타리 초과압(pressure)으로 센다. 두 수치는 같은 분해-깊이 비교(T9 차원 정합)에 대한 별개 렌즈이지 상충이 아니다 — runner=계획소진 100%/good, P4=overrun/pressure. 공식 불변(measurement-only, non-gating; breachCount는 claimSafe/κ 미접촉).',
   'P5 divSplit closedDiv는 raw 종단 STATUS로 닫힘을 판정 → elim 채널의 certification gate(위 line)보다 WEAKER: uncertified/undetermined 실패로 닫힌 서브트리가 closedDiv엔 full magnitude로 세지만 κ의 elim 분자엔 0 기여(infra-flake 배제). \'closed\'는 \'no longer unfolding\'이지 \'correct\'도 \'credited reabsorption\'도 아니다(구조축 vs 인증축 의도적 분리).',
   'P5 openDiv는 중립적 진행중(unfolding 중) 발산이지 낭비가 아니다(§4.3): 높은 openDiv/낮은 closedShare를 진행부진으로 읽지 말 것이며 closedShare를 reward/gate로 절대 자동사용 말 것(κ와 동일한 Goodhart 함정이 자리만 옮긴 것). \'open\'은 현재 열린 상태의 기술일 뿐 closure가 뒤따른다 가정하지 않는다(미검증 SLAVED §4.1). \'생산적/옳은 발산\'이라는 가치판단은 §5.3/O2 online-금지 사후판별이라 이름(closed≠valuable)·formula 양쪽에서 배제한다.',
   'P4/P5 데이터 유예: maxWallClockMs/maxSteps budget_exhausted는 events.jsonl 전용·parseProject 미파싱 → 시간/step confinement 소진율 직접계산 불가(Tier-1.5, committing_scope_deferred와 동형); relevance(on-topic vs off-topic 발산) 판별은 informs 엣지·의미링크 부재로 유예(예산-confinement/구조적 closure만 formula화).',

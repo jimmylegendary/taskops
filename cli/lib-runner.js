@@ -47,6 +47,25 @@ import {
   updateMarkdownFrontmatter as updateMarkdownFrontmatterViaStateWriter,
   writeRunEdgeFile as writeRunEdgeViaStateWriter,
 } from './lib-state-writer.js';
+import { realizedDepthBelow } from './lib-progress-ledger.js';
+import {
+  budgetPressure,
+  canonicalStringSetSignature,
+  canonicalizeElement,
+  classifyChildExecutability,
+  combinePressure,
+  CONVERGENCE_DEFAULTS,
+  decompositionQualityVerdict,
+  depthPressure,
+  divergenceNovelty,
+  evaluateExtensionRequest,
+  gateAwareActionForReadiness,
+  isExecutableTask,
+  normalizeConvergenceConfig,
+  openPlanDebtPressure,
+  rankForcedExecutionCandidates,
+  PLANNING_ACTION_KINDS,
+} from './lib-convergence.js';
 
 export const RUNNER_LOCK_DIR = '.taskops-runner.lock';
 export { MUTATION_LOCK_DIR } from './lib-mutation-lock.js';
@@ -70,6 +89,9 @@ export const STOP_REASONS = Object.freeze({
   BUDGET_EXHAUSTED: 'budget_exhausted',
   TASK_FAILED: 'task_failed',
   VALIDATION_FAILED: 'validation_failed',
+  // 수렴 게이트: hard 압력에서 계획은 차단됐는데 강제 실행할 자격 있는 task 가 하나도 없는 상태.
+  // 억지로 done 을 만들지 않고 **정직하게 blocked** 로 끝낸다(거짓 완료 금지 원칙).
+  CONVERGENCE_BLOCKED: 'convergence_blocked',
   ERROR: 'error',
 });
 
@@ -123,6 +145,7 @@ export function computeStepBudget({ stepsRun = 0, maxSteps = null, budgetEnabled
 
 export const PARTIAL_REQUEST_PREFIX = 'TASKOPS_PARTIAL_REQUEST:';
 export const SURPRISE_REPORT_PREFIX = 'TASKOPS_SURPRISE_REPORT:';
+export const BUDGET_EXTENSION_REQUEST_PREFIX = 'TASKOPS_BUDGET_EXTENSION_REQUEST:';
 export const SELF_RESOLUTION_GUIDE = `<self_resolution_mode>
  <context>
  This execution has no human or external agent available to make decisions on your behalf.
@@ -377,6 +400,64 @@ export function parseSurpriseReportFromExecutorResult(executorResult, extraTexts
   return malformed || { surpriseReported: false, markerFound: false };
 }
 
+function normalizeBudgetExtensionPayload(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    throw new Error('budget extension request must be a JSON object');
+  }
+  const requestedStepsNumber = obj.requestedSteps == null || obj.requestedSteps === ''
+    ? null
+    : Number(obj.requestedSteps);
+  return {
+    requested: obj.requested === true,
+    reason: compactString(obj.reason),
+    evidence: normalizeObjectList(obj.evidence).map((entry) => ({
+      claim: compactString(entry.claim),
+      observed: compactString(entry.observed),
+    })),
+    remainingWork: compactString(obj.remainingWork),
+    ...(Number.isFinite(requestedStepsNumber) && requestedStepsNumber > 0
+      ? { requestedSteps: requestedStepsNumber }
+      : {}),
+  };
+}
+
+function parseBudgetExtensionRequestText(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  let malformed = null;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith(BUDGET_EXTENSION_REQUEST_PREFIX)) continue;
+    const jsonText = trimmed.slice(BUDGET_EXTENSION_REQUEST_PREFIX.length).trim();
+    try {
+      return {
+        ...normalizeBudgetExtensionPayload(JSON.parse(jsonText)),
+        rawLine: line,
+      };
+    } catch {
+      if (!malformed) malformed = { malformed: true, rawLine: line };
+    }
+  }
+  return malformed;
+}
+
+export function parseBudgetExtensionRequestFromExecutorResult(executorResult, extraTexts = []) {
+  const texts = [...collectPartialRequestTexts(executorResult), ...asArray(extraTexts)];
+  let malformed = null;
+  for (const text of texts) {
+    const parsed = parseBudgetExtensionRequestText(text);
+    if (!parsed) continue;
+    if (parsed.malformed !== true) return parsed;
+    if (!malformed) malformed = parsed;
+  }
+  return malformed;
+}
+
+function withBudgetExtensionRequest(stepResult, budgetExtensionRequest) {
+  return budgetExtensionRequest
+    ? { ...stepResult, budgetExtensionRequest }
+    : stepResult;
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -494,13 +575,12 @@ const RETRY_FEEDBACK_MAX_LEN = 2400;
 const VERIFY_NOVEL_EXTENSION = 6;
 // A resource-relative fixpoint signature of a verify failure: the sorted, normalized set of what the checker
 // reported. Two rounds with the same signature = the model reproduced the same failed map (non-novel = fixpoint).
+// 정규화 규칙만 lib-convergence 의 canonicalStringSetSignature 와 공유한다(동작 동일). 재사용은 여기까지이며
+// isNovel 의 history-wide 실패집합 동일성 POLICY 는 divergence novelty 와 별개로 그대로 둔다 — 세 술어는 다르다.
 function failureSignature(reviewReport) {
-  const parts = []
-    .concat(reviewReport.failedChecks || [], reviewReport.missingExpected || [], reviewReport.unsupportedObserved || [])
-    .map((s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .sort();
-  return parts.join(' | ').slice(0, 500);
+  return canonicalStringSetSignature(
+    [].concat(reviewReport.failedChecks || [], reviewReport.missingExpected || [], reviewReport.unsupportedObserved || []),
+  );
 }
 // U7 — "assume unknown-unknowns exist" quantified as a per-task PRIOR [0,1] from proxies (higher => the map is more
 // likely incomplete => surface preconditions + decompose harder). Advisory + observable; U6 gates elicitation on it.
@@ -1033,6 +1113,21 @@ function refText(value) {
 function commandText(value) {
   if (value && typeof value === 'object') return String(value.command || value.name || value.id || '');
   return String(value || '');
+}
+
+// verify와 convergence 게이트가 같은 실행 가능 acceptance 술어를 쓰게 하는 단일 SoT.
+// 빈 command/ref는 실제 검증 루프가 건너뛰므로 검증 가능한 신호로 세지 않는다.
+function verifiableAcceptanceSignals(acceptance) {
+  const executableChecks = (acceptance.requiredChecks || [])
+    .filter((check) => String(commandText(check) || '').trim().length > 0);
+  const concreteArtifacts = (acceptance.requiredArtifacts || [])
+    .filter((artifact) => String(refText(artifact) || '').trim().length > 0);
+  return { executableChecks, concreteArtifacts };
+}
+
+function taskHasVerifiableAcceptance(task) {
+  const { executableChecks, concreteArtifacts } = verifiableAcceptanceSignals(normalizeAcceptance(task));
+  return executableChecks.length > 0 || concreteArtifacts.length > 0;
 }
 
 function checkStatus(value) {
@@ -1599,8 +1694,7 @@ function buildReviewReport({ projectDir, task, runNode, verifyMode = false }) {
   // signal — otherwise a vacuous requiredChecks:[{command:''}] mints claimSafe with zero evidence (and
   // defeats verify mode too).
   const semantic = acceptance.semanticAssertions || {};
-  const executableChecks = (acceptance.requiredChecks || []).filter((c) => String(commandText(c) || '').trim().length > 0);
-  const concreteArtifacts = (acceptance.requiredArtifacts || []).filter((a) => String(refText(a) || '').trim().length > 0);
+  const { executableChecks, concreteArtifacts } = verifiableAcceptanceSignals(acceptance);
   const hasCheckableAcceptance = concreteArtifacts.length > 0
     || executableChecks.length > 0
     || Object.values(semantic).some((v) => Array.isArray(v) && v.some((x) => String(x ?? '').trim().length > 0));
@@ -2564,7 +2658,113 @@ function surpriseReportPromptLines({ artifactRequired = false } = {}) {
   ];
 }
 
-export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null, delegationMode = false, selfResolutionGuide = null }) {
+function convergenceFiredAxesText(convergence) {
+  return (Array.isArray(convergence?.firedAxes) ? convergence.firedAxes : [])
+    .map((axis) => String(axis || '').trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+// 예산 prompt와 독립된 수렴 protocol. budget.enabled=false인 런에서도 사라지면 안 된다.
+function budgetExtensionProtocolLines(convergence) {
+  if (
+    convergence?.level !== 'soft'
+    || convergence.extensionWindowOpen !== true
+    || !(Number(convergence.grantsRemaining) > 0)
+  ) return [];
+  return [
+    '예산 연장 신청(남은 신청 ' + convergence.grantsRemaining + '회): 지금 남은 예산으로는 이 일을 정직하게 끝낼 수 없다고 판단하면, 최종 응답에 정확히 한 줄을 다음 접두사와 유효한 JSON 으로 포함하라: TASKOPS_BUDGET_EXTENSION_REQUEST: {"requested":true,"reason":"<지금 예산이 부족한 이유>","evidence":[{"claim":"<주장>","observed":"<이번 런에서 실제로 관찰한 사실>"}],"remainingWork":"<남은 열린 task id 또는 구체 산출물>"}',
+    '근거(evidence.observed)가 비어 있으면 신청은 거부되고 거부 사유가 기록된다. 자동 연장은 없다. 이 창은 압력이 HARD 로 올라가면 닫히며, 그 뒤의 신청은 거부된다 — 필요하다면 지금 신청하라.',
+  ];
+}
+
+// 미집행 계획 부채의 **수치** 피드백. soft 를 novelty 로 통과했든 hard 로 차단됐든 상관없이 전달된다 —
+// 게이트가 막지 못하는 상황에서도 계획자가 "지금 증거를 만들 수 있는 task 가 0개"라는 사실은 알아야 한다.
+function openPlanDebtPromptLines(convergence) {
+  const debt = convergence?.debt;
+  if (!debt || typeof debt !== 'object' || Array.isArray(debt)) return [];
+  if (debt.level !== 'soft' && debt.level !== 'hard') return [];
+  const lines = [
+    '',
+    '미집행 계획 부채 실측: 열린 계획 task ' + debt.planDebt + '개(그중 blocked ' + debt.blockedDebt
+      + '개) 대비 즉시 실행 가능한 task ' + debt.executable + '개 — 부채비율 ' + debt.debtRatio + '.',
+    '즉시 실행 가능 = readiness 가 runnable 이면서 acceptance.requiredChecks(실제로 실행되는 명령) 또는 acceptance.requiredArtifacts(구체 경로)를 보유하는 것이다. 둘 중 하나라도 없으면 실행 후보에서 제외된다.',
+  ];
+  if (debt.executable === 0) {
+    lines.push('지금 이 계획에는 증거를 만들 수 있는 task 가 하나도 없다. 계획을 더 벌리기 전에 최소 1개를 즉시 실행 가능하게 만들어라.');
+  }
+  lines.push(debt.level === 'hard'
+    ? '이 상태가 ' + debt.criticalStreak + '스텝 연속이라 계획 확장이 HARD 로 차단되었다.'
+    : '이 상태가 ' + debt.criticalStreak + '스텝 연속이다. ' + debt.sustain + '스텝 연속이면 계획 확장이 HARD 로 차단된다.');
+  return lines;
+}
+
+function decompositionConvergencePromptLines(convergence) {
+  if (!convergence) return [];
+  const debtLines = openPlanDebtPromptLines(convergence);
+  const rawFeedback = convergence.decompositionFeedback;
+  const feedback = rawFeedback && typeof rawFeedback === 'object' && !Array.isArray(rawFeedback)
+    ? rawFeedback
+    : null;
+  // 실행 가능한 자식이 이미 있으면 직전 분해를 실패 사례처럼 되먹임하지 않는다.
+  const includeFeedback = feedback
+    && (normalizeNonNegativeInteger(feedback.executableChildrenCount) ?? 0) === 0;
+  if (convergence.level === 'none' && !includeFeedback && debtLines.length === 0) return [];
+
+  const lines = [];
+  if (includeFeedback) {
+    const childCount = normalizeNonNegativeInteger(feedback.childCount) ?? 0;
+    const executableChildrenCount = normalizeNonNegativeInteger(feedback.executableChildrenCount) ?? 0;
+    const runnableCount = normalizeNonNegativeInteger(feedback.runnableCount) ?? 0;
+    const verifiableCount = normalizeNonNegativeInteger(feedback.verifiableCount) ?? 0;
+    const blockedCount = normalizeNonNegativeInteger(feedback.blockedCount) ?? 0;
+    const unresolvedBlockerCount = normalizeNonNegativeInteger(feedback.unresolvedBlockerCount) ?? 0;
+    lines.push(
+      '',
+      '직전 분해 실측: 자식 ' + childCount + '개 중 즉시 실행 가능한 자식 ' + executableChildrenCount
+        + '개. (runnable=' + runnableCount + ', 검증가능 acceptance 보유=' + verifiableCount
+        + ', blocked=' + blockedCount + ', 해소불가 blockedBy 마커=' + unresolvedBlockerCount + ')',
+      '실행 가능의 정의는 readiness가 runnable이면서 acceptance.requiredChecks(실제로 실행되는 명령) 또는 acceptance.requiredArtifacts(구체 경로)를 보유하는 것이다. 둘 중 하나라도 빠지면 실행 후보에서 제외된다.',
+    );
+    if (unresolvedBlockerCount > 0) {
+      lines.push(
+        '직전 분해의 blockedBy ' + unresolvedBlockerCount
+          + '건이 어떤 task id와도 매칭되지 않아 영구 blocked가 되었다. blockedBy는 반드시 이 버전 안의 실제 task id 문자열 배열로 작성하라.',
+      );
+    }
+    lines.push(
+      '최소 1개 자식을 즉시 실행 가능하게 만들어라. 정말 불가능하면 이유를 expectedPlan.rationale에 쓰고 status=blocked로 정직하게 선언하라. 억지 runnable은 금지한다.',
+    );
+  }
+
+  lines.push(...debtLines);
+
+  const firedAxes = convergenceFiredAxesText(convergence);
+  if (convergence.level === 'soft') {
+    lines.push(
+      '',
+      '수렴 압력: SOFT (발화 축: ' + firedAxes + '). 남은 예산이 절반 아래다.',
+      '가능하면 각 자식을 **즉시 실행 가능한 단위**로 쪼개라: 자식마다 acceptance.requiredChecks(실행 가능한 명령) 또는 requiredArtifacts(구체 경로)를 선언하라.',
+      '그래도 더 분해가 필요한 자식이 있다면, 그 자식의 expectedPlan.rationale 에 **왜 지금 실행 불가능하고 무엇을 알아야 실행 가능해지는지**를 명시하라. 근거 없는 추가 분해는 다음 스텝에서 차단된다.',
+      '이 부모가 requiredChecks 를 들고 있다면, 자식들의 acceptance 가 그것을 **집합적으로 대체**하도록 설계하라(부모 체크를 자식에 그대로 복사하지는 마라 — 자식 단독으로는 통과할 수 없다).',
+    );
+    return lines;
+  }
+  if (convergence.level === 'hard') {
+    lines.push(
+      '',
+      '수렴 압력: HARD (발화 축: ' + firedAxes + '). 계획 확장은 차단되었다.',
+      '**자식은 전부 즉시 실행 가능해야 한다. needs_decomposition / needs_exploration 자식을 만들지 마라.**',
+      '**각 자식에 검증 가능한 완료조건을 반드시 붙여라**: acceptance.requiredChecks 에 실제로 실행되는 명령을, 또는 acceptance.requiredArtifacts 에 이번 실행이 생성/변경할 구체 파일 경로를 적어라. 둘 다 없는 자식은 실행 후보에서 제외되어 이 분해 자체가 무의미해진다.',
+      '각 자식의 expectedPlan.expectedDepth 는 0 이어야 한다(리프).',
+      '검증할 수 없는 일을 done 으로 만들지 마라. 정말 실행 불가능한 자식이라면 status=blocked 와 blockedBy 로 정직하게 선언하라.',
+    );
+    return lines;
+  }
+  return lines;
+}
+
+export function buildAgentExecutionPrompt({ project, task, budget = null, inheritedContext = null, projectDir = null, artifactWorkspacePath = null, convergence = null, delegationMode = false, selfResolutionGuide = null }) {
   const projectDirForPrompt = projectDir ? resolve(projectDir) : null;
   const artifactWorkspaceForPrompt = artifactWorkspacePath ? resolve(artifactWorkspacePath) : null;
   const injectSelfGuide = delegationMode === true || task?.resolverKind === 'self';
@@ -2595,6 +2795,7 @@ export function buildAgentExecutionPrompt({ project, task, budget = null, inheri
       'The runner invokes you with the task artifact workspace as cwd. Relative paths for new files must stay inside that workspace.',
     ] : []),
     'You may inspect local files and produce task artifacts when the task requires it. If the task is only a runtime invocation proof, the successful OpenClaw turn itself is the evidence; return a concise success summary.',
+    ...budgetExtensionProtocolLines(convergence),
     ...surpriseReportPromptLines(),
     'When done, reply with a short summary of what was accomplished and any artifacts produced.',
     ...selfResolutionGuideLines(injectSelfGuide, selfResolutionGuide),
@@ -2619,11 +2820,13 @@ function decompositionShapeContractLines(task) {
   return lines;
 }
 
-export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null, blockerCatalog = [] }) {
+export function buildAgentDecompositionPrompt({ project, projectDir, task, childTaskGroupId, versionId, budget = null, inheritedContext = null, blockerCatalog = [], convergence = null, previousAttemptFailure = null }) {
   if (!projectDir) throw new Error('Missing projectDir for decomposition prompt');
   const workDirForPrompt = resolve(projectDir);
   return promptWithBudget([
     'You are a TaskOps decomposition agent.',
+    // 진단 없는 재시도는 같은 실패를 반복한다(커밋 ac2a545 의 교훈). 직전 실패를 프롬프트 최상단에 싣는다.
+    ...(previousAttemptFailure ? [describeDecompositionFailureForPrompt(previousAttemptFailure)] : []),
     `Work: ${project.id} — ${project.title || ''}`.trim(),
     `Work objective: ${project.objective || ''}`,
     '',
@@ -2651,6 +2854,8 @@ export function buildAgentDecompositionPrompt({ project, projectDir, task, child
     ...childTaskExpectedPlanPromptLines(),
     ...childTaskBlockedByPromptLines(versionId, blockerCatalog),
     ...decompositionShapeContractLines(task),
+    ...decompositionConvergencePromptLines(convergence),
+    ...budgetExtensionProtocolLines(convergence),
     'Do not mark child tasks as runnable unless they truly meet the runnable criteria. Use needs_exploration or blocked with a reason field when the inputs are not yet known.',
     'Do not recursively invoke `taskops run`.',
   ], budget, { actionKind: 'decompose' });
@@ -2678,7 +2883,7 @@ export function buildAgentLoopbackPrompt({ project, delegate, runId, loopbackNod
   ], budget, { actionKind: 'loopback' });
 }
 
-export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget = null, inheritedContext = null }) {
+export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget = null, inheritedContext = null, convergence = null }) {
   if (!artifactPath) throw new Error('Missing artifactPath for exploration prompt');
   const artifactPathForPrompt = resolve(artifactPath);
   return promptWithBudget([
@@ -2700,6 +2905,9 @@ export function buildAgentExplorationPrompt({ project, task, runId, runNodeId, a
     'Run a minimal, safe exploration pass: search/read/try just enough to record learned facts, discovered constraints, failed/successful approaches, remaining unknowns, and a recommended next decomposition or runnable task.',
     `Write the exploration artifact at: ${artifactPathForPrompt}`,
     `Run id: ${runId}, run node id: ${runNodeId}.`,
+    // 탐색도 부채를 늘리는 축이다 — 부채 수치는 분해와 동일하게 탐색 계획자에게도 전달한다.
+    ...openPlanDebtPromptLines(convergence),
+    ...budgetExtensionProtocolLines(convergence),
     ...surpriseReportPromptLines({ artifactRequired: true }),
     'Do not mark the parent task as done; the runner manages task graph state. Do not recursively invoke `taskops run`.',
   ], budget, { actionKind: 'explore' });
@@ -2726,7 +2934,7 @@ function openClawWorkerSessionKey({ agentId, projectId, taskId, action }) {
   return `agent:${agentId}:` + parts.join('-');
 }
 
-function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null, delegationMode = false, selfResolutionGuide = null }) {
+function invokeExecutor({ project, projectDir = null, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, artifactWorkspacePath = null, convergence = null, delegationMode = false, selfResolutionGuide = null }) {
   if (executor === 'dry-run') {
     return {
       ok: true,
@@ -2742,7 +2950,10 @@ function invokeExecutor({ project, projectDir = null, task, executor, agentId, s
     return { ok: false, message: `Unknown executor '${executor}'`, executor };
   }
   if (RUNTIME_ADAPTER_NAMES.includes(adapterName)) {
-    const prompt = buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, delegationMode, selfResolutionGuide });
+    // 기존 selfResolutionGuide 인자 순서 계약을 보존하면서, 창 상태가 있을 때만 additive convergence를 전달한다.
+    const prompt = convergence == null
+      ? buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, delegationMode, selfResolutionGuide })
+      : buildAgentExecutionPrompt({ project, task, budget, inheritedContext, projectDir, artifactWorkspacePath, convergence, delegationMode, selfResolutionGuide });
     const result = invokeRuntimeAdapter(executor, {
       prompt,
       agentId,
@@ -3018,6 +3229,71 @@ function closeRunNodeWithEow({
 
 function closeTaskWithEow({ task, reason, finishedAt, approvedReview = null, resolvedByTaskGroupId = null }) {
   return closeTaskWithEowViaStateWriter({ task, reason, finishedAt, approvedReview, resolvedByTaskGroupId }, stateWriterIo());
+}
+
+// R3 성공 경로 — 분해 종료 EoW를 지우거나 두 번째 EoW를 만들지 않고, 같은 식별자에 승인 증거를 승격한다.
+// 오직 deferred acceptance 재검증으로 되살아난 부모 + 원래 자식 그룹을 가리키는 runner 분해 EoW만 허용한다.
+function promoteDeferredAcceptanceTaskEow({ task, approvedReview, finishedAt }) {
+  const deferred = task?.convergenceDeferredAcceptance;
+  if (
+    !approvedReview
+    || !deferred
+    || typeof deferred !== 'object'
+    || Array.isArray(deferred)
+    || !String(deferred.reverifiedAt || '').trim()
+  ) return false;
+
+  const versionDir = dirname(dirname(task.path));
+  const existing = resolveExistingTaskEowFile({
+    versionDir,
+    taskGroupVersionId: task.taskGroupVersionId,
+    taskId: task.id,
+  }, stateWriterIo());
+  if (!existing) return false;
+
+  const promotableReasons = new Set([
+    'decomposed_by_runner',
+    'decomposed_by_runner_after_adapter_timeout_recovery',
+  ]);
+  const current = existing.frontmatter;
+  if (!promotableReasons.has(String(current.reason || ''))) return false;
+  const deferredChildTaskGroupId = String(deferred.childTaskGroupId || '').trim();
+  if (
+    deferredChildTaskGroupId
+    && String(current.resolvedByTaskGroupId || '').trim() !== deferredChildTaskGroupId
+  ) {
+    throw new Error('Deferred acceptance EoW mismatch for ' + task.id + ': childTaskGroupId');
+  }
+
+  updateMarkdownFrontmatter(existing.path, (fm) => {
+    const priorReason = String(fm.reason || '');
+    if (!promotableReasons.has(priorReason)) {
+      throw new Error('Deferred acceptance EoW mismatch for ' + task.id + ': reason');
+    }
+    if (
+      deferredChildTaskGroupId
+      && String(fm.resolvedByTaskGroupId || '').trim() !== deferredChildTaskGroupId
+    ) {
+      throw new Error('Deferred acceptance EoW mismatch for ' + task.id + ': childTaskGroupId');
+    }
+    fm.reverifiedFromReason = sanitizeFmScalar(priorReason);
+    if (fm.declaredAt || fm.createdAt) {
+      fm.reverifiedFromDeclaredAt = sanitizeFmScalar(fm.declaredAt || fm.createdAt);
+    }
+    fm.reason = 'approved_result';
+    fm.declaredAt = sanitizeFmScalar(finishedAt);
+    fm.acceptanceReverifiedAt = sanitizeFmScalar(deferred.reverifiedAt);
+    fm.approvedByReviewNodeId = approvedReview.reviewNodeId;
+    fm.approvedReviewMode = approvedReview.reviewMode;
+    fm.approvedReviewReportHash = approvedReview.reviewReportHash;
+    fm.reviewedAcceptanceHash = approvedReview.reviewedAcceptanceHash;
+    fm.reviewedResultHash = approvedReview.reviewedResultHash;
+    if (approvedReview.assuranceTier) fm.assuranceTier = approvedReview.assuranceTier;
+    fm.externallyVerified = approvedReview.externallyVerified === true;
+    if (approvedReview.oracleAccess) fm.oracleAccess = approvedReview.oracleAccess;
+    return fm;
+  });
+  return true;
 }
 
 function partialIdTimestamp(iso) {
@@ -3593,6 +3869,8 @@ function closeExecuteSuccess({
   }
   const approvedReview = review.approvedReview;
   const closeReason = approvedReview ? 'approved_result' : 'execution_path_closed';
+  // 분해로 이미 닫혔다가 R3가 되살린 부모는 기존 EoW 식별자를 보존한 채 승인 증거로 승격한다.
+  promoteDeferredAcceptanceTaskEow({ task, approvedReview, finishedAt });
   closeTaskWithEow({ task, reason: closeReason, finishedAt, approvedReview });
   closeRunNodeWithEow({ runDir, runId, runNodeId, reason: closeReason, closureRole: 'claim-bearing', finishedAt, approvedReview });
   // Clear retry state once the task is honestly closed, so a later re-run starts with a fresh budget.
@@ -3611,7 +3889,7 @@ function closeExecuteSuccess({
   return { taskId: task.id, runNodeId, reviewNodeId: review.reviewNodeId, kind: 'execute', status: 'completed', executor, message: result.message || null, reviewDecision: review.reviewReport.decision, budget, executionWorkspacePath: result.workspacePath || artifactWorkspacePath };
 }
 
-function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0, escalateOnSaturation = false, escalationResolvers = [] }) {
+function executeRunnableTask({ project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, selfResolutionGuide = null, verifyRequiredChecks = false, verifyRetries = 0, convergence = null, escalateOnSaturation = false, escalationResolvers = [] }) {
   const projectDir = dirname(dirname(runDir));
   if (task.status === 'waiting' && externalResolutionStateForTask(task).status === 'resolved') {
     updateMarkdownFrontmatter(task.path, (fm) => {
@@ -3668,11 +3946,12 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
 
   let result;
   try {
-    result = invokeExecutor({ project, projectDir, task, executor: (task.executorOverride || executor), agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, delegationMode, selfResolutionGuide });
+    result = invokeExecutor({ project, projectDir, task, executor: (task.executorOverride || executor), agentId, stepTimeoutMs, budget, inheritedContext, artifactWorkspacePath, convergence, delegationMode, selfResolutionGuide });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err), executor, workspacePath: artifactWorkspacePath };
   }
 
+  const budgetExtensionRequest = parseBudgetExtensionRequestFromExecutorResult(result);
   const finishedAt = isoNow();
 
   if (result.ok) {
@@ -3842,7 +4121,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
         },
       });
     }
-    return closeExecuteSuccess({
+    return withBudgetExtensionRequest(closeExecuteSuccess({
       projectDir,
       task,
       runDir,
@@ -3862,7 +4141,7 @@ function executeRunnableTask({ project, task, runDir, runId, eventsPath, executo
       verifyRetries,
       escalateOnSaturation,
       escalationResolvers,
-    });
+    }), budgetExtensionRequest);
   }
 
   return closeExecuteFailure({
@@ -3917,12 +4196,15 @@ export function extendActiveSnapshot(parsed, addition) {
   return true;
 }
 
-function deriveDecompositionIds(task) {
+function deriveDecompositionIds(task, { attempt } = {}) {
   const suffix = task.id.replace(/^task-/, '') || task.id;
+  const rawAttempt = attempt === undefined ? task?.decompositionAttempt : attempt;
+  const normalizedAttempt = normalizeNonNegativeInteger(rawAttempt) ?? 1;
   return {
     childTaskGroupId: `tg-${suffix}`,
-    versionId: `tgv-${suffix}-v1`,
+    versionId: `tgv-${suffix}-v${normalizedAttempt}`,
     suffix,
+    attempt: normalizedAttempt,
   };
 }
 
@@ -3963,29 +4245,36 @@ function ensureDecompositionBacklink({ projectDir, childTaskGroupId, versionId, 
 }
 
 function performDryRunDecomposition({ projectDir, task }) {
-  const { childTaskGroupId, versionId, suffix } = deriveDecompositionIds(task);
+  const { childTaskGroupId, versionId, suffix, attempt } = deriveDecompositionIds(task);
   const tgDir = join(projectDir, 'task-groups', childTaskGroupId);
+  const taskGroupIndex = join(tgDir, 'index.md');
   const versionIndex = join(tgDir, 'versions', versionId, 'index.md');
   if (existsSync(versionIndex)) {
     return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
   }
-  if (existsSync(tgDir)) {
+  const taskGroupExists = existsSync(tgDir);
+  if (taskGroupExists && attempt <= 1) {
     return { ok: false, message: `Child task group '${childTaskGroupId}' already exists without expected version '${versionId}'; refusing to overwrite a real or partial decomposition` };
+  }
+  if (taskGroupExists && !existsSync(taskGroupIndex)) {
+    return { ok: false, message: `Child task group '${childTaskGroupId}' is missing index.md; refusing to add retry version '${versionId}'` };
   }
   const now = isoNow();
   ensureDir(join(tgDir, 'versions', versionId, 'tasks'));
   ensureDir(join(tgDir, 'versions', versionId, 'eow'));
 
-  const tgFm = {
-    taskOpsVersion: 'v1', entityType: 'taskGroup', id: childTaskGroupId,
-    objective: `Synthetic dry-run decomposition of ${task.id}: ${task.title}`,
-    activeVersionId: versionId, createdAt: now, status: 'active',
-  };
-  writeTextFileAtomic(join(tgDir, 'index.md'), fmBlock(tgFm) + `# Task group ${childTaskGroupId}\n\nSynthetic placeholder created by the TaskOps dry-run runner. Real human input is required before the child tasks become runnable.\n`);
+  if (!taskGroupExists) {
+    const tgFm = {
+      taskOpsVersion: 'v1', entityType: 'taskGroup', id: childTaskGroupId,
+      objective: `Synthetic dry-run decomposition of ${task.id}: ${task.title}`,
+      activeVersionId: versionId, createdAt: now, status: 'active',
+    };
+    writeTextFileAtomic(taskGroupIndex, fmBlock(tgFm) + `# Task group ${childTaskGroupId}\n\nSynthetic placeholder created by the TaskOps dry-run runner. Real human input is required before the child tasks become runnable.\n`);
+  }
 
   const versionFm = {
     taskOpsVersion: 'v1', entityType: 'taskGroupVersion', id: versionId,
-    taskGroupId: childTaskGroupId, version: 'v1',
+    taskGroupId: childTaskGroupId, version: `v${attempt}`,
     summary: `Synthetic dry-run decomposition of ${task.title}`,
     createdAt: now, status: 'active',
   };
@@ -4021,6 +4310,13 @@ function performDryRunDecomposition({ projectDir, task }) {
     join(tgDir, 'versions', versionId, 'tasks', `${childTaskId}.md`),
     fmBlock(childFm) + `# ${childFm.title}\n\n${externalResolutionBody}\n`,
   );
+  if (taskGroupExists) {
+    // 재분해는 기존 그룹을 덮어쓰지 않고 새 version만 추가한 뒤 활성 버전 포인터만 전진시킨다.
+    updateMarkdownFrontmatter(taskGroupIndex, (fm) => {
+      fm.activeVersionId = versionId;
+      return fm;
+    });
+  }
   return { ok: true, childTaskGroupId, versionId, message: `Synthesized dry-run child task group ${childTaskGroupId}/${versionId}` };
 }
 
@@ -4055,12 +4351,195 @@ function activeBlockerCatalogForPrompt(projectDir, sourceTask) {
   return items.slice(0, 30);
 }
 
-function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null }) {
-  const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
-  const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
-  if (existsSync(versionIndex)) {
-    return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
+// ── 분해 실패의 원자성 ────────────────────────────────────────────────────────
+// 반쪽 자식 task group(= taskGroup index.md 의 activeVersionId 가 존재하지 않는 version 을 가리킴)은
+// parseProject 를 영구 실패시켜 work 그래프 전체를 무효화한다. 그러면 스케줄링이 꺼져 런이 즉사한다.
+// 따라서 분해는 "전부 성공하거나 전부 롤백" 이어야 한다.
+const DECOMPOSITION_ADAPTER_MAX_ATTEMPTS = 2;
+
+function snapshotChildTaskGroup(projectDir, childTaskGroupId) {
+  const groupDir = join(projectDir, 'task-groups', childTaskGroupId);
+  if (!existsSync(groupDir)) return { groupDir, preexisting: false, indexText: null, versionDirs: new Set() };
+  const indexPath = join(groupDir, 'index.md');
+  const versionsDir = join(groupDir, 'versions');
+  const versionDirs = new Set();
+  if (existsSync(versionsDir)) {
+    for (const entry of readdirSync(versionsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) versionDirs.add(entry.name);
+    }
   }
+  return {
+    groupDir,
+    preexisting: true,
+    indexText: existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null,
+    versionDirs,
+  };
+}
+
+function rollbackChildTaskGroup(snapshot) {
+  if (!snapshot) return { rolledBack: false };
+  const { groupDir, preexisting } = snapshot;
+  if (!preexisting) {
+    // 이 분해가 처음 만든 그룹이면 통째로 지운다 — 흔적이 곧 독이다.
+    if (existsSync(groupDir)) rmSync(groupDir, { recursive: true, force: true });
+    return { rolledBack: true, mode: 'removed_group', removedVersionDirs: [] };
+  }
+  const versionsDir = join(groupDir, 'versions');
+  const removedVersionDirs = [];
+  if (existsSync(versionsDir)) {
+    for (const entry of readdirSync(versionsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || snapshot.versionDirs.has(entry.name)) continue;
+      rmSync(join(versionsDir, entry.name), { recursive: true, force: true });
+      removedVersionDirs.push(entry.name);
+    }
+  }
+  const indexPath = join(groupDir, 'index.md');
+  // index.md 원문 복원 = activeVersionId 포인터를 실패 이전 상태로 되돌린다.
+  if (snapshot.indexText != null) writeTextFileAtomic(indexPath, snapshot.indexText);
+  else if (existsSync(indexPath)) rmSync(indexPath, { force: true });
+  return { rolledBack: true, mode: 'restored_group', removedVersionDirs };
+}
+
+function projectValidationErrorSet(projectDir) {
+  try {
+    const parsed = parseProject(projectDir);
+    return new Set((parsed.errors || []).map((e) => String(e)));
+  } catch (err) {
+    return new Set([`parseProject threw: ${err instanceof Error ? err.message : String(err)}`]);
+  }
+}
+
+// 커밋 게이트 시점에는 **부모 backlink 가 아직 없다**. fm.childTaskGroupId 는 게이트를 통과한 뒤
+// closeDecomposeSuccess 가 쓰기 때문이다. 그래서 parseProject 는 정상적인 분해에도 반드시
+// "parent task '<id>' points to childTaskGroupId ''" / "selected child task group '<tg>' has no selected parent task"
+// 를 낸다 — 이건 산출물의 결함이 아니라 쓰기 순서의 결과다.
+// ALE conv4 실측: 이 두 줄 때문에 온전한 분해가 graph_invalid 로 롤백되어 런이 blocked_only 로 끝났다.
+// 따라서 **이 분해가 곧 채울 backlink 한 쌍만** 예외로 둔다. 다른 값을 가리키는 진짜 불일치
+// (actual 이 빈 문자열이 아닌 경우)는 그대로 잡는다.
+//
+// versionId 를 주면 같은 '쓰기 순서' 부류의 세 번째 줄도 면제한다:
+//   "<child version index>: incomplete decomposition backlink; missing decomposedByRunId, ..."
+// DECOMPOSITION_BACKLINK_FIELDS 5개는 **전부** closeDecomposeSuccess 의 backlink 적용 단계가 채우는
+// 값이라(lib-runner.js canApplyDecompositionBacklink), 게이트 시점에 비어 있는 것은 산출물 결함이 아니다.
+// ALE conv4b 실측: 루트 분해는 adapter 가 우연히 이 필드를 써서 통과했지만 자식 분해는 쓰지 않아
+// 온전한 산출물이 graph_invalid 로 롤백되었다 — 같은 위양성이 LLM 변동에 따라 재발한 것이다.
+// 면제 범위는 **이 분해의 자식 version index 파일 한 줄**로 고정한다(경로+메시지를 한 덩어리로 매칭).
+// 값이 틀린 경우(mismatch / RunNodeNotFound)는 다른 메시지라 그대로 잡힌다.
+export function pendingBacklinkErrorPatterns(taskId, childTaskGroupId, versionId = null) {
+  if (!taskId || !childTaskGroupId) return [];
+  const patterns = [
+    `decomposition backlink parent task '${taskId}' points to childTaskGroupId '', expected '${childTaskGroupId}'`,
+    `decomposition backlink parent task '${taskId}'의 childTaskGroupId ''가 기대 '${childTaskGroupId}'와 다름`,
+    `selected child task group '${childTaskGroupId}' has no selected parent task`,
+    `selected child task group '${childTaskGroupId}'의 selected parent task가 없음`,
+  ];
+  if (versionId) {
+    const childVersionIndex = `task-groups/${childTaskGroupId}/versions/${versionId}/index.md`;
+    patterns.push(
+      `${childVersionIndex}: incomplete decomposition backlink; missing `,
+      `${childVersionIndex}: decomposition backlink가 불완전함; 누락: `,
+    );
+  }
+  return patterns;
+}
+
+function newProjectValidationErrors(projectDir, baselineErrors, pendingBacklink = []) {
+  const after = projectValidationErrorSet(projectDir);
+  return [...after]
+    .filter((e) => !baselineErrors.has(e))
+    .filter((e) => !pendingBacklink.some((pattern) => e.includes(pattern)));
+}
+
+// 스키마 준수 검사(커밋 전). 관측된 두 병리만 정밀하게 잡는다:
+//  ① blockedBy 를 JSON 배열/객체 '문자열' 로 통째 뱉음 → 파싱 실패 → type:unresolved 영구 좀비 blocker
+//  ② expectedPlan 이 object 가 아님 → expected_plan_fallback_applied 남발
+// 추가로 어떤 task 로도 해소될 수 없는 문자열 blocker 도 좀비이므로 잡는다.
+function assessDecompositionSchema({ versionDir }) {
+  const violations = [];
+  const childPaths = listChildTaskPaths(versionDir);
+  const childIds = new Set();
+  const childFms = [];
+  for (const p of childPaths) {
+    let fm;
+    try { fm = parseMarkdownFile(p); } catch (err) {
+      violations.push({ taskId: null, field: 'frontmatter', kind: 'unparseable', detail: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    if (fm.id) childIds.add(String(fm.id));
+    childFms.push(fm);
+  }
+  // 문자열 blockedBy ref 는 normalizeChildBlockedByRef 가 '이 자식 version 안의 task id' 로만 해소한다.
+  // 그 밖의 문자열은 예외 없이 type:unresolved 좀비가 되므로, 판정 범위를 정확히 그것에 맞춘다.
+  for (const fm of childFms) {
+    const taskId = fm.id ? String(fm.id) : null;
+    const rawBlockedBy = fm.blockedBy;
+    // frontmatter 파서가 따옴표를 벗기지 않는 경우가 있어 감싼 따옴표를 걷어내고 판정한다.
+    const unquotedBlockedBy = typeof rawBlockedBy === 'string'
+      ? rawBlockedBy.trim().replace(/^(['"])([\s\S]*)\1$/, '$2').trim()
+      : rawBlockedBy;
+    if (typeof unquotedBlockedBy === 'string' && /^[[{]/.test(unquotedBlockedBy)) {
+      violations.push({
+        taskId,
+        field: 'blockedBy',
+        kind: 'json_string',
+        detail: 'blockedBy was emitted as a JSON array/object STRING; it must be a real YAML list of refs. A string here becomes a permanent type:unresolved zombie blocker that no task can ever clear.',
+      });
+    } else {
+      const refs = Array.isArray(rawBlockedBy) ? rawBlockedBy : (rawBlockedBy ? [rawBlockedBy] : []);
+      for (const ref of refs) {
+        if (typeof ref === 'string') {
+          const id = ref.trim();
+          if (!id || !childIds.has(id)) {
+            violations.push({ taskId, field: 'blockedBy', kind: 'unresolvable_ref', detail: `blockedBy string ref '${ref}' matches no known task id; it would become a zombie blocker.` });
+          }
+        } else if (ref && typeof ref === 'object' && String(ref.type || '') === 'unresolved') {
+          violations.push({ taskId, field: 'blockedBy', kind: 'unresolved_marker', detail: 'blockedBy already carries a type:unresolved marker.' });
+        }
+      }
+    }
+    if (fm.expectedPlan !== undefined && fm.expectedPlan !== null) {
+      const normalized = normalizeExpectedPlan(fm.expectedPlan);
+      if (!normalized.ok) {
+        violations.push({ taskId, field: 'expectedPlan', kind: 'not_an_object', detail: normalized.reason || 'expectedPlan must be an object' });
+      }
+    }
+  }
+  return { violations, count: violations.length };
+}
+
+function describeDecompositionFailureForPrompt({ attempt, failureKind, diagnosis, violations }) {
+  const lines = [
+    '',
+    `PREVIOUS DECOMPOSITION ATTEMPT FAILED (attempt ${attempt}, failureKind=${failureKind}) — 직전 시도의 산출물은 전부 롤백되었다.`,
+    `무엇이 잘못됐는가: ${diagnosis}`,
+  ];
+  if (Array.isArray(violations) && violations.length > 0) {
+    lines.push('계약 위반 상세:');
+    for (const v of violations.slice(0, 8)) {
+      lines.push(`  - task=${v.taskId || '(unknown)'} field=${v.field} kind=${v.kind}: ${v.detail}`);
+    }
+  }
+  lines.push(
+    '이번 시도에서 반드시 만족해야 할 것:',
+    '  1) task-groups/<child-tg-id>/index.md 와 task-groups/<child-tg-id>/versions/<version-id>/index.md 를 둘 다 만들어라. 하나만 만들면 work 그래프가 통째로 무효화된다.',
+    '  2) 그 version 아래 tasks/ 에 자식 task 파일을 최소 1개 이상 써라. 자식 없는 분해는 거부된다.',
+    '  3) blockedBy 는 반드시 YAML 리스트로 써라 (JSON 문자열 금지). 예: blockedBy:\n       - type: task\n         id: task-foo\n         taskGroupVersionId: <version-id>',
+    '  4) blockedBy 가 가리키는 task id 는 실제로 존재해야 한다. 존재하지 않는 id 는 아무도 해소할 수 없는 좀비 blocker가 된다. 확신이 없으면 blockedBy 를 아예 쓰지 마라.',
+    '  5) expectedPlan 은 반드시 매핑(object)으로 써라. 예: expectedPlan:\n       expectedDepth: 1\n       expectedBreadth: 3',
+    '  같은 실패를 반복하지 마라. 위 진단을 그대로 반영해라.',
+    '',
+  );
+  return lines.join('\n');
+}
+
+function attemptAgentDecomposition({
+  projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, convergence,
+  childTaskGroupId, versionId, versionIndex, previousAttemptFailure, attempt, isFinalAttempt,
+}) {
+  const baselineErrors = projectValidationErrorSet(projectDir);
+  // 이 분해가 커밋 직후 스스로 채울 backlink 는 게이트에서 제외한다(쓰기 순서 인공물).
+  const pendingBacklink = pendingBacklinkErrorPatterns(task?.id, childTaskGroupId, versionId);
+  const snapshot = snapshotChildTaskGroup(projectDir, childTaskGroupId);
   const prompt = buildAgentDecompositionPrompt({
     project,
     projectDir,
@@ -4069,7 +4548,9 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
     versionId,
     budget,
     inheritedContext,
+    convergence,
     blockerCatalog: activeBlockerCatalogForPrompt(projectDir, task),
+    previousAttemptFailure,
   });
   const result = invokeRuntimeAdapter(executor, {
     prompt,
@@ -4078,11 +4559,114 @@ function performAgentDecomposition({ projectDir, project, task, executor, agentI
     timeoutMs: stepTimeoutMs,
     cwd: projectDir,
   });
-  if (!result.ok) return { ...result, ok: false, message: result.message };
-  if (!existsSync(versionIndex)) {
-    return { ok: false, message: `${normalizeExecutorSpec(executor).adapterName} did not author expected child task group at ${versionIndex}; refusing to mark decomposition done` };
+
+  const fail = (failureKind, diagnosis, extra = {}) => {
+    const rollback = rollbackChildTaskGroup(snapshot);
+    return {
+      ...result, ok: false, retryable: true, failureKind, diagnosis,
+      message: diagnosis, rollback, ...extra,
+    };
+  };
+
+  if (!result.ok) {
+    // adapter 자체 실패(대개 timeout). 여기서는 재시도하지 않는다 — 실질 구속조건이 wall-clock 이라
+    // 타임아웃 재시도는 예산을 두 배로 태운다. 게다가 timeout 이어도 산출물이 온전할 수 있어
+    // 호출부의 maybeRecoverCompletedDecomposition 이 이미 회수를 담당한다.
+    // 다만 그래프를 무효화한 반쪽 산출물만은 반드시 되돌린다.
+    const introduced = newProjectValidationErrors(projectDir, baselineErrors, pendingBacklink);
+    if (introduced.length > 0) {
+      const rollback = rollbackChildTaskGroup(snapshot);
+      return {
+        ...result, ok: false, retryable: false,
+        failureKind: 'graph_invalid',
+        diagnosis: `adapter failed and left the work graph invalid: ${introduced.join('; ')}`,
+        message: `${result.message || 'adapter failed'}; rolled back graph-invalidating partial decomposition (${introduced.join('; ')})`,
+        rollback,
+      };
+    }
+    return { ...result, ok: false, retryable: false, failureKind: 'adapter_failed', diagnosis: result.message || 'adapter failed', message: result.message };
   }
-  return { ok: true, childTaskGroupId, versionId, message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}` };
+
+  const adapterName = normalizeExecutorSpec(executor).adapterName;
+  if (!existsSync(versionIndex)) {
+    return fail(
+      'missing_version_index',
+      `${adapterName} did not author the expected child version index at ${versionIndex} (target task group ${childTaskGroupId}, target version ${versionId}); refusing to mark decomposition done`,
+    );
+  }
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const childPaths = listChildTaskPaths(versionDir);
+  if (childPaths.length === 0) {
+    return fail(
+      'no_child_tasks',
+      `${adapterName} authored ${childTaskGroupId}/${versionId} with zero child task files; an empty decomposition cannot be verified and is refused`,
+    );
+  }
+  const introduced = newProjectValidationErrors(projectDir, baselineErrors, pendingBacklink);
+  if (introduced.length > 0) {
+    return fail(
+      'graph_invalid',
+      `${adapterName} authored ${childTaskGroupId}/${versionId} but introduced work graph validation errors: ${introduced.join('; ')}`,
+    );
+  }
+
+  const schema = assessDecompositionSchema({ versionDir });
+  if (schema.count > 0) {
+    if (!isFinalAttempt) {
+      return fail(
+        'schema_violation',
+        `${adapterName} authored ${childTaskGroupId}/${versionId} with ${schema.count} schema violation(s) that would create zombie blockers or drop expectedPlan; rolled back for one informed retry`,
+        { violations: schema.violations },
+      );
+    }
+    // 마지막 시도: 그래프가 유효하고 자식이 있으므로 수용한다. 여기서 또 롤백하면 자식을 전부 잃고
+    // 부모가 죽는다. 좀비 blocker 를 가진 자식은 어차피 blocked 로 정직하게 분류되므로 거짓 완료가 아니다.
+    return {
+      ok: true, childTaskGroupId, versionId,
+      message: result.stdout || `Agent created ${childTaskGroupId}/${versionId} (with ${schema.count} accepted schema violation(s))`,
+      stdout: result.stdout || '',
+      schemaDebt: { attempt, violations: schema.violations, count: schema.count },
+    };
+  }
+
+  return {
+    ok: true,
+    childTaskGroupId,
+    versionId,
+    message: result.stdout || `Agent created ${childTaskGroupId}/${versionId}`,
+    stdout: result.stdout || '',
+  };
+}
+
+function performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget = null, inheritedContext = null, convergence = null }) {
+  const { childTaskGroupId, versionId } = deriveDecompositionIds(task);
+  const versionIndex = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId, 'index.md');
+  if (existsSync(versionIndex)) {
+    return { ok: true, childTaskGroupId, versionId, message: `Decomposition already present at ${versionIndex}; reusing.` };
+  }
+  const rollbackAttempts = [];
+  let previousAttemptFailure = null;
+  let last = null;
+  for (let attempt = 1; attempt <= DECOMPOSITION_ADAPTER_MAX_ATTEMPTS; attempt += 1) {
+    const isFinalAttempt = attempt === DECOMPOSITION_ADAPTER_MAX_ATTEMPTS;
+    last = attemptAgentDecomposition({
+      projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, convergence,
+      childTaskGroupId, versionId, versionIndex, previousAttemptFailure, attempt, isFinalAttempt,
+    });
+    if (last.ok) {
+      return rollbackAttempts.length > 0 ? { ...last, rollbackAttempts } : last;
+    }
+    if (last.retryable !== true || isFinalAttempt) break;
+    const record = {
+      attempt,
+      failureKind: last.failureKind || 'unknown',
+      diagnosis: last.diagnosis || last.message || 'unknown failure',
+      violations: last.violations || [],
+    };
+    rollbackAttempts.push(record);
+    previousAttemptFailure = record;
+  }
+  return { ...last, ok: false, rollbackAttempts, childTaskGroupId, versionId };
 }
 
 function isRecoverableDecompositionAdapterFailure(result) {
@@ -4125,6 +4709,23 @@ function listChildTaskPaths(versionDir) {
     .filter((entry) => entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'index.md')
     .map((entry) => join(tasksDir, entry.name))
     .sort();
+}
+
+function readinessOfFreshChild(child) {
+  if (String(child?.status || '').trim() === 'blocked') return 'blocked';
+  const blockers = Array.isArray(child?.blockedBy)
+    ? child.blockedBy
+    : (child?.blockedBy ? [child.blockedBy] : []);
+  if (blockers.some((blocker) => blocker && typeof blocker === 'object' && blocker.type === 'unresolved')) {
+    return 'blocked';
+  }
+  // 갓 태어난 자식은 아직 현재 parsed 스코프에 없어서 applyBlockerGate로 참조를 풀 수 없다.
+  // 분류 실패도 실행 가능으로 낙관하지 않고 blocked로 보수 판정한다.
+  try {
+    return classifyTaskReadiness(child).runReadiness;
+  } catch {
+    return 'blocked';
+  }
 }
 
 function normalizeNonNegativeInteger(value) {
@@ -4193,6 +4794,720 @@ function budgetWithExpectedPlanCoordinate(budget, { parsed, task, activeSnapshot
   const coordinate = computeExpectedPlanCoordinate({ parsed, task, activeSnapshot });
   if (!coordinate) return budget;
   return { ...budget, expectedPlanCoordinate: coordinate };
+}
+
+// ---- 수렴 압력 게이트(층1 깊이 울타리 + 층2 예산/발산잔여) --------------------------------------------------
+// 설계 원칙: 게이트는 **스케줄 결정만** 바꾼다. task 파일을 절대 쓰지 않고, execute 경로(normalizeAcceptance →
+// buildReviewReport → requiredChecks 실행)도 한 줄 건드리지 않는다. 그래서 acceptance 강제는 불변이다.
+// pickNextAction / computeNextAction / explainWork 도 무변경 — 게이트는 런루프 후처리에만 존재한다.
+
+function selectedTasksFor(parsed) {
+  return collectTaskCandidates(parsed).map((entry) => entry.task);
+}
+
+function childrenForTask(tasks, task) {
+  if (!task?.childTaskGroupId && !task?.childTaskGroupVersionId) return false;
+  return task.childTaskGroupVersionId
+    ? tasks.filter((t) => t.taskGroupVersionId === task.childTaskGroupVersionId)
+    : tasks.filter((t) => t.taskGroupId === task.childTaskGroupId);
+}
+
+// 열린(non-terminal) 자식이 남아 있으면 리프가 아니다.
+function hasOpenChildren(tasks, task) {
+  const children = childrenForTask(tasks, task);
+  if (!Array.isArray(children)) return false;
+  return children.some((t) => !['done', 'cancelled'].includes(String(t.status || '').trim()));
+}
+
+function hasExecutableOpenDescendant(tasks, task, parsed) {
+  const children = childrenForTask(tasks, task);
+  if (!Array.isArray(children)) return false;
+  for (const child of children) {
+    if (['done', 'cancelled'].includes(String(child.status || '').trim())) continue;
+    let classification;
+    try {
+      classification = applyBlockerGate(parsed, child, classifyTaskReadiness(child));
+    } catch {
+      continue;
+    }
+    if (isExecutableTask({
+      readiness: classification.runReadiness,
+      verifiable: taskHasVerifiableAcceptance(child),
+    })) return true;
+  }
+  return false;
+}
+
+// tier-1 강제 실행 자격 — 전부 AND. 조건 ④(requiredChecks/requiredArtifacts 보유)가 **거짓 완료 방화벽**이다:
+// 검증할 수 없는 task 는 애초에 강제 실행하지 않으므로 "억지로 done" 자체가 만들어질 수 없다.
+// 실행 가능(executable) 판정은 isExecutableTask 단일 술어를 세 지점(closeDecomposeSuccess 품질 평가 /
+// openPlanDebtPressure / 여기)이 공유한다.
+export function selectForcedExecutionCandidate({
+  parsed,
+  activeSnapshot = null,
+  targetTaskId = null,
+  excludeTaskId = null,
+  excludeTaskIds = [],
+  level = 'none',
+  mode = 'none',
+} = {}) {
+  const tasks = selectedTasksFor(parsed);
+  const targetedPool = targetTaskId ? tasks.filter((t) => t.id === targetTaskId) : tasks;
+  // 같은 런에서 이미 사다리가 태운 task 는 다시 고르지 않는다(무한 재선택 방지).
+  const excluded = new Set(
+    []
+      .concat(Array.isArray(excludeTaskIds) ? excludeTaskIds : [excludeTaskIds])
+      .concat(excludeTaskId == null ? [] : [excludeTaskId])
+      .filter((id) => id != null && id !== '')
+      .map((id) => String(id)),
+  );
+  const pool = excluded.size > 0 ? targetedPool.filter((t) => !excluded.has(String(t.id))) : targetedPool;
+  const eligible = [];
+  for (const task of pool) {
+    const status = String(task.status || '').trim();
+    if (['done', 'cancelled', 'blocked'].includes(status)) continue;
+    if (
+      task.convergenceDecompositionAbandoned
+      && typeof task.convergenceDecompositionAbandoned === 'object'
+      && !Array.isArray(task.convergenceDecompositionAbandoned)
+    ) continue;
+    if (taskPause(task)?.reason) continue;
+    let classification;
+    try {
+      classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
+    } catch {
+      continue;
+    }
+    if (classification.runReadiness === 'blocked') continue;
+    if (hasOpenChildren(tasks, task)) continue;
+    const uncertainty = String(task.uncertaintyState || '').trim();
+    // unknown_known 은 human pick quadrant 라 절대 강제 금지. unknown_unknown 은 지도가 없어 실행 대상이 아니다.
+    if (uncertainty === 'unknown_unknown' || uncertainty === 'unknown_known') continue;
+    // 층3 이 붙인 acceptance gap 자식은 검증 불가로 이미 판정된 상태다.
+    if (task.convergenceAcceptanceGap === true || task.needsManualReview === true) continue;
+    const acceptance = normalizeAcceptance(task);
+    if (!taskHasVerifiableAcceptance(task)) continue;
+    if (!String(task.objective || '').trim()) continue;
+    if (!String(task.completionCriteria || '').trim() && !String(task.expectedResult || '').trim()) continue;
+    const coordinate = computeExpectedPlanCoordinate({ parsed, task, activeSnapshot });
+    eligible.push({ task, acceptance, classification, consumedDepth: coordinate?.consumedDepth ?? 0 });
+  }
+  const ranked = rankForcedExecutionCandidates(eligible);
+  // tier-1 이 있으면 기존 선택/랭킹/무쓰기 동작을 그대로 보존한다.
+  if (ranked.length > 0) return ranked[0];
+
+  // tier-2 는 hard+enforce 에서만, 그리고 열린 검증 가능 후보가 하나도 없을 때만 이빨을 드러낸다.
+  if (level !== 'hard' || mode !== 'enforce') return null;
+  const deferred = [];
+  for (const task of pool) {
+    const deferredAcceptance = task.convergenceDeferredAcceptance;
+    if (!deferredAcceptance || typeof deferredAcceptance !== 'object' || Array.isArray(deferredAcceptance)) continue;
+    const legacyUncovered = {
+      checks: asArray(deferredAcceptance.requiredChecks),
+      artifacts: asArray(deferredAcceptance.requiredArtifacts),
+    };
+    const uncovered = deferredAcceptance.uncovered
+      && typeof deferredAcceptance.uncovered === 'object'
+      && !Array.isArray(deferredAcceptance.uncovered)
+      ? {
+          checks: asArray(deferredAcceptance.uncovered.checks),
+          artifacts: asArray(deferredAcceptance.uncovered.artifacts),
+        }
+      : legacyUncovered;
+    const full = deferredAcceptance.full
+      && typeof deferredAcceptance.full === 'object'
+      && !Array.isArray(deferredAcceptance.full)
+      ? {
+          checks: asArray(deferredAcceptance.full.checks),
+          artifacts: asArray(deferredAcceptance.full.artifacts),
+        }
+      : legacyUncovered;
+    const deferredContract = uncovered.checks.length > 0 || uncovered.artifacts.length > 0
+      ? uncovered
+      : full;
+    const rawAcceptance = task.acceptance && typeof task.acceptance === 'object' && !Array.isArray(task.acceptance)
+      ? task.acceptance
+      : {};
+    const deferredTask = {
+      ...task,
+      acceptance: {
+        ...rawAcceptance,
+        requiredChecks: deferredContract.checks,
+        requiredArtifacts: deferredContract.artifacts,
+      },
+    };
+    // 이미 성공/실패 여부를 실제 execute 경로에서 재검증한 acceptance 는 다시 강제하지 않는다.
+    if (String(deferredAcceptance.reverifiedAt || '').trim()) continue;
+    if (String(task.status || '').trim() !== 'done') continue;
+    if (hasExecutableOpenDescendant(tasks, task, parsed)) continue;
+    if (!taskHasVerifiableAcceptance(deferredTask)) continue;
+    if (taskPause(task)?.reason) continue;
+    if (task.convergenceAcceptanceGap === true || task.needsManualReview === true) continue;
+    const acceptance = normalizeAcceptance(deferredTask);
+    const coordinate = computeExpectedPlanCoordinate({ parsed, task: deferredTask, activeSnapshot });
+    deferred.push({
+      task: deferredTask,
+      acceptance,
+      classification: {
+        runReadiness: 'runnable',
+        source: 'convergence_deferred_acceptance',
+        reason: 'hard+enforce 수렴 압력으로 분해 시 연기된 부모 acceptance 를 재검증한다.',
+      },
+      consumedDepth: coordinate?.consumedDepth ?? 0,
+    });
+  }
+  const rankedDeferred = rankForcedExecutionCandidates(deferred);
+  if (rankedDeferred.length === 0) return null;
+
+  const selected = rankedDeferred[0];
+  const reverifiedAt = isoNow();
+  updateMarkdownFrontmatter(selected.task.path, (fm) => {
+    const existing = fm.convergenceDeferredAcceptance
+      && typeof fm.convergenceDeferredAcceptance === 'object'
+      && !Array.isArray(fm.convergenceDeferredAcceptance)
+      ? fm.convergenceDeferredAcceptance
+      : {};
+    fm.status = 'pending';
+    fm.acceptance = {
+      ...(fm.acceptance && typeof fm.acceptance === 'object' && !Array.isArray(fm.acceptance) ? fm.acceptance : {}),
+      requiredChecks: selected.acceptance.requiredChecks,
+      requiredArtifacts: selected.acceptance.requiredArtifacts,
+    };
+    fm.convergenceDeferredAcceptance = {
+      ...existing,
+      reverifiedAt: sanitizeFmScalar(reverifiedAt),
+    };
+    return fm;
+  });
+  // 같은 dispatch 안에서 파일과 메모리 표현이 엇갈리지 않게 선택 객체도 되살린 상태로 맞춘다.
+  selected.task.status = 'pending';
+  selected.task.convergenceDeferredAcceptance = {
+    ...selected.task.convergenceDeferredAcceptance,
+    reverifiedAt: sanitizeFmScalar(reverifiedAt),
+  };
+  selected.deferredAcceptanceReverify = true;
+  return selected;
+}
+
+// 폴백B 후보 선택 — "재분해를 포기한 부모를 통째로 실행한다". 순수 선택기(파일 쓰기 없음).
+// applyConvergencePressure 의 hard 사다리와 blocked_only 사다리가 **같은 술어**를 공유하게 한다.
+export function selectAbandonedParentExecutionCandidate({
+  parsed,
+  activeSnapshot = null,
+  targetTaskId = null,
+  excludeTaskIds = [],
+} = {}) {
+  const tasks = selectedTasksFor(parsed);
+  const excluded = new Set(
+    []
+      .concat(Array.isArray(excludeTaskIds) ? excludeTaskIds : [excludeTaskIds])
+      .filter((id) => id != null && id !== '')
+      .map((id) => String(id)),
+  );
+  const pool = (targetTaskId ? tasks.filter((task) => task.id === targetTaskId) : tasks)
+    .filter((task) => !excluded.has(String(task?.id)));
+  const eligible = [];
+  for (const task of pool) {
+    if (
+      !task?.convergenceDecompositionAbandoned
+      || typeof task.convergenceDecompositionAbandoned !== 'object'
+      || Array.isArray(task.convergenceDecompositionAbandoned)
+    ) continue;
+    if (['done', 'cancelled', 'blocked'].includes(String(task.status || '').trim())) continue;
+    // 거짓 완료 방화벽 — 검증 가능한 acceptance 가 없는 부모는 폴백B 대상이 아니다.
+    if (taskPause(task)?.reason || !taskHasVerifiableAcceptance(task)) continue;
+    let classification;
+    try {
+      classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
+    } catch {
+      continue;
+    }
+    if (classification.runReadiness === 'blocked') continue;
+    const coordinate = computeExpectedPlanCoordinate({ parsed, task, activeSnapshot });
+    eligible.push({
+      task,
+      classification,
+      acceptance: normalizeAcceptance(task),
+      consumedDepth: coordinate?.consumedDepth ?? 0,
+    });
+  }
+  const [candidate] = rankForcedExecutionCandidates(eligible);
+  return candidate || null;
+}
+
+// ---- blocked_only 사다리(라운드 E) --------------------------------------------------------------
+// 1~4차 실측의 급소: 런루프는 후보 수집이 비면 blocked_only 로 **즉시** 종료했고, 수렴 게이트는 next 가
+// 있을 때만 적용됐다. 그래서 "실행할 게 없다" 가 hard 사다리보다 먼저 이겨, tier-2(분해로 done 소비된
+// 부모의 지연 acceptance 되살리기)를 쓰는 코드 경로가 단 한 번도 실행된 적이 없었다.
+//
+// 처방: blocked_only 로 끝내기 **전에** hard 사다리를 태운다.
+//   (1) 강제 실행 후보 tier-1 → tier-2(폴백B의 급소: 지연 acceptance 부모 되살리기)
+//   (2) 재분해를 포기한 부모 통째 실행(폴백B)
+//   (3) 그래도 없으면 그때 정직하게 blocked_only
+// **재분해가 이 사다리에 없는 이유**: 재분해 1회는 분해 품질 게이트(closeDecomposeSuccess)의 단계이고
+// 그 시점에는 계획 후보가 존재한다. blocked_only 지점에서는 열린 계획 후보가 정의상 0개다(있었다면
+// pickNextAction 이 planning 을 반환했을 것). 그래서 사다리는 실행 단계에서 시작한다.
+//
+// 무한 루프 방지 3중: (i) 런당 시도 상한, (ii) 사다리가 태운 taskId 는 같은 런에서 재선택 금지,
+// (iii) tier-2 는 reverifiedAt 스탬프가 찍힌 부모를 영구 제외한다(파일에 남는 단조 표식).
+export const BLOCKED_ONLY_LADDER_MAX_ATTEMPTS = 3;
+export const BLOCKED_ONLY_LADDER_AXIS = 'blocked_only';
+
+export function attemptBlockedOnlyLadder({
+  parsed,
+  activeSnapshot = null,
+  targetTaskId = null,
+  config,
+  eventsPath,
+  runDir,
+  runId,
+  attempt = 1,
+  maxAttempts = BLOCKED_ONLY_LADDER_MAX_ATTEMPTS,
+  excludeTaskIds = [],
+} = {}) {
+  // observe/off 는 측정만 한다 — 스케줄을 절대 바꾸지 않는다(기존 계약 보존).
+  if (!config || config.mode !== 'enforce') return null;
+  const firedAxes = [BLOCKED_ONLY_LADDER_AXIS];
+  convergenceEvent(eventsPath, runDir, {
+    type: 'convergence_blocked_only_ladder',
+    runId,
+    level: 'hard',
+    firedAxes,
+    attempt,
+    maxAttempts,
+    stopReasonDeferred: STOP_REASONS.BLOCKED_ONLY,
+    detail: '실행 후보가 비었다 — blocked_only 로 끝내기 전에 hard 사다리를 한 번 태운다.',
+  });
+
+  const reason = 'blocked_only_ladder';
+  const forcedCandidate = selectForcedExecutionCandidate({
+    parsed,
+    activeSnapshot,
+    targetTaskId,
+    excludeTaskIds,
+    level: 'hard',
+    mode: config.mode,
+  });
+  if (forcedCandidate) {
+    if (forcedCandidate.deferredAcceptanceReverify === true) {
+      convergenceEvent(eventsPath, runDir, {
+        type: 'convergence_deferred_acceptance_reverify',
+        runId,
+        taskId: forcedCandidate.task.id,
+        level: 'hard',
+        firedAxes,
+      });
+    }
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_forced_execute',
+      runId,
+      taskId: forcedCandidate.task.id,
+      level: 'hard',
+      firedAxes,
+      reason,
+      displacedTaskId: null,
+      displacedKind: null,
+      attempt,
+    });
+    return {
+      kind: 'execute',
+      task: forcedCandidate.task,
+      classification: {
+        ...forcedCandidate.classification,
+        runReadiness: 'runnable',
+        source: 'convergence_blocked_only_ladder',
+        reason: 'blocked_only 로 끝내기 전에 검증 가능한 실행 후보를 강제 선택했다.',
+      },
+      convergence: { forced: true, level: 'hard', firedAxes, blockedOnlyLadder: true },
+    };
+  }
+
+  const abandonedParent = selectAbandonedParentExecutionCandidate({
+    parsed,
+    activeSnapshot,
+    targetTaskId,
+    excludeTaskIds,
+  });
+  if (abandonedParent) {
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_forced_execute',
+      runId,
+      taskId: abandonedParent.task.id,
+      level: 'hard',
+      firedAxes,
+      reason,
+      fallback: 'decomposition_abandoned_parent',
+      displacedTaskId: null,
+      displacedKind: null,
+      attempt,
+    });
+    return {
+      kind: 'execute',
+      task: abandonedParent.task,
+      classification: {
+        ...abandonedParent.classification,
+        runReadiness: 'runnable',
+        source: 'convergence_blocked_only_ladder_parent_fallback',
+        reason: '재분해를 포기한 부모를 blocked_only 앞에서 통째로 실행한다.',
+      },
+      convergence: { forced: true, level: 'hard', firedAxes, blockedOnlyLadder: true },
+    };
+  }
+
+  // 억지로 후보를 만들지 않는다 — 검증 가능한 것이 없으면 정직하게 blocked_only 로 끝난다.
+  convergenceEvent(eventsPath, runDir, {
+    type: 'convergence_blocked_only_ladder_exhausted',
+    runId,
+    level: 'hard',
+    firedAxes,
+    attempt,
+    maxAttempts,
+    detail: '검증 가능한 실행 후보가 없어 사다리를 소진했다; blocked_only 로 정직하게 종료한다.',
+  });
+  return null;
+}
+
+function convergenceEvent(eventsPath, runDir, payload) {
+  logEvent(eventsPath, { timestamp: isoNow(), ...payload });
+  appendRunLog(runDir, `${isoNow()} ${payload.type}${payload.taskId ? ` taskId=${payload.taskId}` : ''}${payload.level ? ` level=${payload.level}` : ''}${Array.isArray(payload.firedAxes) ? ` axes=${payload.firedAxes.join(',')}` : ''}`);
+}
+
+function extensionEventText(value, maxLen = 2000) {
+  return sanitizeFmScalar(value, { maxLen, fallback: '' });
+}
+
+function budgetExtensionAuditFields(request) {
+  const evidence = (Array.isArray(request?.evidence) ? request.evidence : []).map((entry) => ({
+    claim: extensionEventText(entry?.claim),
+    observed: extensionEventText(entry?.observed),
+  }));
+  return {
+    reason: extensionEventText(request?.reason),
+    evidence,
+    evidenceCount: evidence.length,
+    requestedSteps: Number.isFinite(Number(request?.requestedSteps)) ? Number(request.requestedSteps) : null,
+    rawLine: extensionEventText(request?.rawLine, 4000),
+  };
+}
+
+function appendBudgetExtensionRequestEntry(fm, entry) {
+  const existing = Array.isArray(fm.budgetExtensionRequests) ? fm.budgetExtensionRequests : [];
+  fm.budgetExtensionRequests = existing.concat([entry]).slice(-20);
+  return fm.budgetExtensionRequests;
+}
+
+// 3축 수렴 압력 계산. action kind와 무관하게 매 dispatch에서 계산하며 파일/이벤트 I/O는 하지 않는다.
+function computeConvergencePressure({
+  parsed, activeSnapshot, task, stepsRun = 0, maxSteps = null,
+  wallStartMs = Date.now(), maxWallClockMs = null, config, debtCriticalStreak = 0,
+} = {}) {
+  if (!config || config.mode === 'off') return { level: 'none', firedAxes: [], snapshot: {} };
+  const tasks = selectedTasksFor(parsed);
+  const coordinate = task ? computeExpectedPlanCoordinate({ parsed, task, activeSnapshot }) : null;
+  const axes = [
+    budgetPressure({
+      stepsRun,
+      maxSteps,
+      elapsedMs: Date.now() - wallStartMs,
+      maxWallClockMs,
+      thresholds: config.budget,
+    }),
+    depthPressure({
+      coordinate,
+      realizedDepth: (() => { try { return realizedDepthBelow(tasks, task); } catch { return 0; } })(),
+      thresholds: config.depth,
+    }),
+    // 부채축만 스텝 간 상태(연속 임계 초과 횟수)를 소비한다. 상태는 런 스코프 메모리에만 있고
+    // task 파일에는 쓰지 않는다 — "게이트는 스케줄 결정만 바꾼다"는 계약을 유지한다.
+    openPlanDebtPressure(tasks, config.debt, {
+      hasVerifiableAcceptance: taskHasVerifiableAcceptance,
+      priorCriticalStreak: debtCriticalStreak,
+    }),
+  ];
+  return combinePressure(axes);
+}
+
+// 부채 수치는 게이트가 planning 을 차단하지 **못한** 경우(= novelty 로 통과)에도 프롬프트로 전달된다.
+// 3차 실측의 원인 B("soft 는 novelty 로 무력화된다")에 대한 답: 발산을 벌하지 않으면서(차단 없음)
+// "지금 증거를 만들 수 있는 task 가 몇 개인지"라는 사실만 계획자에게 되돌려준다.
+function debtPromptSummary(debtAxis) {
+  if (!debtAxis || (debtAxis.level !== 'soft' && debtAxis.level !== 'hard')) return null;
+  return {
+    level: debtAxis.level,
+    planDebt: Number(debtAxis.planDebt) || 0,
+    blockedDebt: Number(debtAxis.blockedDebt) || 0,
+    executable: Number(debtAxis.executable) || 0,
+    debtRatio: Math.round((Number(debtAxis.debtRatio) || 0) * 100) / 100,
+    criticalStreak: Number(debtAxis.criticalStreak) || 0,
+    sustain: Number(debtAxis.sustain) || 0,
+  };
+}
+
+// 계산된 pressure에 정책만 적용한다. 반환 { next, blocked, stopReason, stopDetail, pressure }.
+function applyConvergencePressure({
+  next, parsed, activeSnapshot, pressure,
+  config, targetTaskId, eventsPath, runId, runDir, hasExecutedStep = false,
+}) {
+  const pass = { next, blocked: false, stopReason: null, stopDetail: null, pressure };
+  if (!config || config.mode === 'off') return pass;
+  if (
+    config.mode !== 'observe'
+    && next
+    && PLANNING_ACTION_KINDS.has(next.kind)
+    && next.task?.convergenceDecompositionAbandoned
+    && typeof next.task.convergenceDecompositionAbandoned === 'object'
+    && !Array.isArray(next.task.convergenceDecompositionAbandoned)
+    && taskHasVerifiableAcceptance(next.task)
+  ) {
+    // 재분해를 두 번 포기한 부모는 압력 level과 무관하게 실행으로 종결한다. 이 장치가 없으면 다음 런에서
+    // 같은 부모가 세 번째 분해로 되돌아가므로, frontmatter readiness를 상향하지 않고 dispatch kind만 바꾼다.
+    const fallbackLevel = pressure?.level ?? 'none';
+    const fallbackAxes = Array.isArray(pressure?.firedAxes) ? [...pressure.firedAxes] : [];
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_forced_execute',
+      runId,
+      taskId: next.task.id,
+      level: fallbackLevel,
+      firedAxes: fallbackAxes,
+      reason: 'decomposition_abandoned_parent_fallback',
+      displacedTaskId: next.task.id,
+      displacedKind: next.kind,
+    });
+    return {
+      next: {
+        ...next,
+        kind: 'execute',
+        convergence: { forced: true, level: fallbackLevel, firedAxes: fallbackAxes },
+      },
+      blocked: false,
+      stopReason: null,
+      stopDetail: null,
+      pressure,
+    };
+  }
+  // execute / stop 은 이미 수렴 방향이거나 종료다 — 무개입.
+  if (!next || !PLANNING_ACTION_KINDS.has(next.kind)) return pass;
+  if (!pressure || pressure.level === 'none') return pass;
+  const tasks = selectedTasksFor(parsed);
+
+  convergenceEvent(eventsPath, runDir, {
+    type: 'convergence_pressure', runId, taskId: next.task?.id || null, kind: next.kind,
+    level: pressure.level, firedAxes: pressure.firedAxes, snapshot: pressure.snapshot, mode: config.mode,
+  });
+  // observe = 측정만. next 를 절대 바꾸지 않는다.
+  if (config.mode === 'observe') return pass;
+
+  const forceExecute = (reason, { excludeTaskId = null } = {}) => {
+    const cand = selectForcedExecutionCandidate({
+      parsed,
+      activeSnapshot,
+      targetTaskId,
+      excludeTaskId,
+      level: pressure.level,
+      mode: config.mode,
+    });
+    if (!cand) return null;
+    if (cand.deferredAcceptanceReverify === true) {
+      convergenceEvent(eventsPath, runDir, {
+        type: 'convergence_deferred_acceptance_reverify',
+        runId,
+        taskId: cand.task.id,
+        level: pressure.level,
+        firedAxes: pressure.firedAxes,
+      });
+    }
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_forced_execute', runId, taskId: cand.task.id,
+      level: pressure.level, firedAxes: pressure.firedAxes, reason,
+      displacedTaskId: next.task?.id || null, displacedKind: next.kind,
+    });
+    return {
+      kind: 'execute',
+      task: cand.task,
+      classification: {
+        ...cand.classification,
+        runReadiness: 'runnable',
+        source: 'convergence_hard_forced',
+        reason,
+      },
+      convergence: { forced: true, level: pressure.level, firedAxes: pressure.firedAxes },
+    };
+  };
+  const forceAbandonedParentExecute = () => {
+    const candidate = selectAbandonedParentExecutionCandidate({ parsed, activeSnapshot, targetTaskId });
+    if (!candidate) return null;
+    const fallbackReason = 'decomposition_abandoned_parent_fallback';
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_forced_execute',
+      runId,
+      taskId: candidate.task.id,
+      level: pressure.level,
+      firedAxes: pressure.firedAxes,
+      reason: fallbackReason,
+      displacedTaskId: next.task?.id || null,
+      displacedKind: next.kind,
+    });
+    return {
+      kind: 'execute',
+      task: candidate.task,
+      classification: candidate.classification,
+      convergence: { forced: true, level: pressure.level, firedAxes: pressure.firedAxes },
+    };
+  };
+  const blockHonestly = (detail) => {
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_blocked_no_candidate', runId, taskId: next.task?.id || null,
+      level: pressure.level, firedAxes: pressure.firedAxes, detail,
+    });
+    return { next, blocked: true, stopReason: STOP_REASONS.CONVERGENCE_BLOCKED, stopDetail: detail, pressure };
+  };
+
+  if (pressure.level === 'hard') {
+    const reason = `Convergence hard pressure on ${pressure.firedAxes.join(', ')}: planning is blocked; executing the most prepared task instead.`;
+    // 이미 실행을 한 번 시도한 런에서는 hard라도 분해를 bounded 품질 게이트까지 도달시킨다.
+    // closeDecomposeSuccess가 수용 또는 재분해 1회 → 부모 통째 실행 → 정직한 blocked로 종결한다.
+    // 반대로 실행 없이 planning만 반복된 런은 기존 hard 사다리를 유지해 즉시 실행으로 수렴시킨다.
+    if (next.kind === 'decompose' && hasExecutedStep === true) {
+      const forcedBeforeDecompose = forceExecute(reason, { excludeTaskId: next.task?.id || null });
+      if (forcedBeforeDecompose) {
+        return { next: forcedBeforeDecompose, blocked: false, stopReason: null, stopDetail: null, pressure };
+      }
+      return pass;
+    }
+    const readinessGate = gateAwareActionForReadiness({
+      readiness: next.classification?.runReadiness,
+      baseAction: next.kind,
+      level: 'hard',
+      verifiable: taskHasVerifiableAcceptance(next.task),
+    });
+    if (readinessGate.demoted === true) {
+      convergenceEvent(eventsPath, runDir, {
+        type: 'convergence_planning_blocked', runId, taskId: next.task?.id || null, kind: next.kind,
+        level: 'hard', firedAxes: pressure.firedAxes, readinessDemoted: true,
+      });
+      convergenceEvent(eventsPath, runDir, {
+        type: 'convergence_readiness_demoted', runId, taskId: next.task?.id || null,
+        fromKind: next.kind, level: 'hard', firedAxes: pressure.firedAxes,
+      });
+      convergenceEvent(eventsPath, runDir, {
+        type: 'convergence_forced_execute', runId, taskId: next.task?.id || null,
+        level: 'hard', firedAxes: pressure.firedAxes, reason,
+        displacedTaskId: next.task?.id || null, displacedKind: next.kind,
+        readinessDemoted: true,
+      });
+      return {
+        next: {
+          kind: 'execute',
+          task: next.task,
+          classification: {
+            ...next.classification,
+            runReadiness: 'runnable',
+            source: 'convergence_readiness_demoted',
+            reason: readinessGate.reason,
+          },
+          convergence: {
+            forced: true,
+            demoted: true,
+            level: 'hard',
+            firedAxes: pressure.firedAxes,
+          },
+        },
+        blocked: false,
+        stopReason: null,
+        stopDetail: null,
+        pressure,
+      };
+    }
+
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_planning_blocked', runId, taskId: next.task?.id || null, kind: next.kind,
+      level: 'hard', firedAxes: pressure.firedAxes,
+      demotionRefused: readinessGate.demotionRefused || null,
+    });
+    const forced = forceExecute(reason);
+    if (forced) return { next: forced, blocked: false, stopReason: null, stopDetail: null, pressure };
+    const abandonedParent = forceAbandonedParentExecute();
+    if (abandonedParent) {
+      return { next: abandonedParent, blocked: false, stopReason: null, stopDetail: null, pressure };
+    }
+    // 부채축 **단독** hard 는 "예산이 끝났다"가 아니라 "지금 실행할 수 있는 게 하나도 없다"는 뜻이다.
+    // 여기서 런을 끝내면 3차 실측 그대로 execute=0 + 조기종료가 재현된다(부채는 첫 스텝부터 1.0 이었다).
+    // 그래서 계획은 통과시키되 level 은 hard 그대로 두어
+    //   (i) 프롬프트가 hard 지시(자식은 전부 즉시 실행 가능해야 한다)를 받고
+    //   (ii) 분해 완료 시 decompositionQualityVerdict 가 hard 로 걸린다(executable>=1 요구 →
+    //        재분해 1회 → 검증 가능한 부모 통째 실행 → 정직한 blocked).
+    // 무한 반복은 그 사다리(decomposition.maxRetries + convergenceDecompositionAbandoned 마커로 같은
+    // 부모가 다시 계획 대상이 되지 않음)와 예산축이 함께 막는다 — 부채축은 스스로 런을 멈추지 않는다.
+    // 감사 관점: 바로 위에서 이미 convergence_planning_blocked 를 남겼으므로 이벤트 쌍이 사실 그대로를 말한다
+    // — "hard 가 이 계획을 막으려 했으나 실행 후보가 없었고, 부채축 단독이므로 런을 죽이는 대신 계속했다".
+    const debtOnlyHard = Array.isArray(pressure.firedAxes)
+      && pressure.firedAxes.length > 0
+      && pressure.firedAxes.every((axis) => axis === 'debt');
+    if (debtOnlyHard) {
+      const debtAxis = pressure.snapshot?.debt || {};
+      convergenceEvent(eventsPath, runDir, {
+        type: 'convergence_debt_hard_planning_continued',
+        runId,
+        taskId: next.task?.id || null,
+        kind: next.kind,
+        level: 'hard',
+        firedAxes: pressure.firedAxes,
+        planDebt: debtAxis.planDebt ?? null,
+        blockedDebt: debtAxis.blockedDebt ?? null,
+        executable: debtAxis.executable ?? null,
+        debtRatio: debtAxis.debtRatio ?? null,
+        criticalStreak: debtAxis.criticalStreak ?? null,
+        reason: 'debt_only_hard_has_no_execution_candidate',
+      });
+      return pass;
+    }
+    // 실행할 게 정말 없으면 정직하게 blocked — 억지로 done 을 만들지 않는다.
+    return blockHonestly(`Convergence hard pressure (${pressure.firedAxes.join(', ')}) blocked further planning, and no task carries verifiable acceptance to execute. Remaining work stays open for review.`);
+  }
+
+  // soft — 발산이 실제로 새 possibility mass 를 열었다면(novelty 입증) 그대로 통과시킨다.
+  // 필요한 발산을 벌하지 않는 것이 taskops 철학상 필수다.
+  const novelty = divergenceNovelty(next.task, next.kind);
+  if (novelty.novel) return pass;
+
+  convergenceEvent(eventsPath, runDir, {
+    type: 'convergence_planning_blocked', runId, taskId: next.task?.id || null, kind: next.kind,
+    level: 'soft', firedAxes: pressure.firedAxes, noveltyReason: novelty.reason,
+  });
+  // (1) novelty 가 참이면서 자기 깊이 울타리를 안 넘은 다른 후보의 planning 으로 전환
+  for (const task of tasks) {
+    if (task.id === next.task?.id) continue;
+    if (['done', 'cancelled', 'blocked'].includes(String(task.status || '').trim())) continue;
+    let classification;
+    try {
+      classification = applyBlockerGate(parsed, task, classifyTaskReadiness(task));
+    } catch { continue; }
+    const kind = gateAwareActionForReadiness({
+      readiness: classification.runReadiness,
+      baseAction: ACTION_BY_READINESS[classification.runReadiness],
+      level: 'soft',
+      verifiable: taskHasVerifiableAcceptance(task),
+    }).action;
+    if (!PLANNING_ACTION_KINDS.has(kind)) continue;
+    if (!divergenceNovelty(task, kind).novel) continue;
+    const cand = computeExpectedPlanCoordinate({ parsed, task, activeSnapshot });
+    const dp = depthPressure({
+      coordinate: cand,
+      realizedDepth: (() => { try { return realizedDepthBelow(tasks, task); } catch { return 0; } })(),
+      thresholds: config.depth,
+    });
+    if (dp.level === 'hard') continue;
+    convergenceEvent(eventsPath, runDir, {
+      type: 'convergence_planning_redirected', runId, taskId: task.id, kind,
+      level: 'soft', firedAxes: pressure.firedAxes, displacedTaskId: next.task?.id || null,
+    });
+    return { next: { kind, task, classification }, blocked: false, stopReason: null, stopDetail: null, pressure };
+  }
+  // (2) 강제 실행
+  const forced = forceExecute(`Convergence soft pressure on ${pressure.firedAxes.join(', ')}: the last ${next.kind} opened no new possibility mass, so the most prepared task is executed instead.`);
+  if (forced) return { next: forced, blocked: false, stopReason: null, stopDetail: null, pressure };
+  // (3) 정직하게 blocked
+  return blockHonestly(`Convergence soft pressure (${pressure.firedAxes.join(', ')}) rejected a non-novel ${next.kind}, and no novel planning or verifiable execution candidate remains.`);
 }
 
 function fallbackExpectedPlanForChild(parentTask, reason) {
@@ -4446,6 +5761,201 @@ function normalizeBlockedByForChildVersion({ projectDir, childTaskGroupId, versi
   return summary;
 }
 
+export const CHILD_ACCEPTANCE_PROPAGATION_MODES = Object.freeze(['mode', 'full']);
+
+// 층3 — 자식 실행가능성 계약. 분해는 발산이므로 자식은 (a) 부모와 같은 깊이를 다시 선언하고 (b) unknown_unknown 을
+// 다시 선언하고 (c) acceptance 계약이 전혀 없는 상태로 태어나기 쉽다. 그러면 자식은 "또 탐색/또 분해"만 하게 되고
+// 실행으로 갈 이유 자체가 없다(ALE 실측: 자식 17개 전부 requiredChecks 0개, depth 가 expectedDepth=2 를 넘어 3+).
+// 이 pass 는 자식 생성 시점에 그 세 구멍을 닫는다. status 는 절대 바꾸지 않는다(blocked 승격은 committing guard 의 일).
+export function normalizeChildConvergenceContracts({
+  projectDir,
+  childTaskGroupId,
+  versionId,
+  parentTask,
+  childAcceptancePropagation = 'mode',
+  convergenceLevel = 'none',
+}) {
+  if (!CHILD_ACCEPTANCE_PROPAGATION_MODES.includes(childAcceptancePropagation)) {
+    throw new Error(`Invalid childAcceptancePropagation '${childAcceptancePropagation}'. Allowed: ${CHILD_ACCEPTANCE_PROPAGATION_MODES.join(', ')}`);
+  }
+  const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
+  const taskPaths = listChildTaskPaths(versionDir);
+  const summary = {
+    taskCount: taskPaths.length,
+    clampedDepthCount: 0,
+    clampedUncertaintyCount: 0,
+    acceptanceGapCount: 0,
+    hardLeafClampCount: 0,
+    hardUncertaintyClampCount: 0,
+    preservedCount: 0,
+    children: [],
+    acceptanceGapTaskIds: [],
+    hardUnverifiableChildIds: [],
+    childAcceptanceUnion: { checks: [], artifacts: [] },
+  };
+
+  const parentPlan = normalizeExpectedPlan(parentTask?.expectedPlan);
+  // 부모 plan 이 invalid 면 깊이 축 비활성 — 울타리 부재를 압력 0으로도 1로도 읽지 않는다(dark-room 가드).
+  const depthCap = parentPlan.ok ? Math.max(0, parentPlan.value.expectedDepth - 1) : null;
+  const parentAcceptance = normalizeAcceptance(parentTask || {});
+  const parentUncertainty = String(parentTask?.uncertaintyState || '').trim();
+  const childAcceptanceChecks = new Set();
+  const childAcceptanceArtifacts = new Set();
+
+  for (const taskPath of taskPaths) {
+    let childTask;
+    try {
+      childTask = parseMarkdownFile(taskPath);
+    } catch {
+      continue;
+    }
+    const entry = {
+      taskId: childTask.id || null,
+      depthClamp: null,
+      uncertaintyClamp: null,
+      hardLeafClamp: null,
+      hardUncertaintyClamp: null,
+      acceptanceGap: false,
+    };
+    let mutated = false;
+
+    updateMarkdownFrontmatter(taskPath, (fm) => {
+      // (1) expectedDepth 단조감소 강제. 기존 fallbackExpectedPlanForChild 는 자식 plan 이 INVALID 일 때만 발동해서,
+      //     자식이 유효한 expectedDepth=2 를 다시 선언하면 그대로 통과했다 — depth 폭발의 실제 기전.
+      if (depthCap != null) {
+        const childPlan = normalizeExpectedPlan(fm.expectedPlan);
+        if (childPlan.ok && childPlan.value.expectedDepth > depthCap) {
+          const from = childPlan.value.expectedDepth;
+          fm.expectedPlan = {
+            ...childPlan.value,
+            expectedDepth: depthCap,
+            rationale: sanitizeFmScalar(`${childPlan.value.rationale} | Runner convergence clamp: expectedDepth ${from} -> ${depthCap} (부모 ${parentTask?.id || 'parent'} expectedDepth=${parentPlan.value.expectedDepth} 대비 단조감소 강제).`),
+          };
+          entry.depthClamp = { from, to: depthCap };
+          summary.clampedDepthCount += 1;
+          mutated = true;
+        }
+      }
+
+      // (5) HARD에서는 자식 plan을 리프로 닫는다. readiness는 dispatch 게이트의 단독 권한이므로 건드리지 않는다.
+      if (convergenceLevel === 'hard') {
+        const childPlan = normalizeExpectedPlan(fm.expectedPlan);
+        if (childPlan.ok && childPlan.value.expectedDepth > 0) {
+          const from = childPlan.value.expectedDepth;
+          fm.expectedPlan = {
+            ...childPlan.value,
+            expectedDepth: 0,
+            rationale: sanitizeFmScalar(
+              childPlan.value.rationale
+              + ' | Runner convergence clamp: expectedDepth '
+              + from
+              + ' -> 0 (HARD 수렴 압력으로 즉시 실행 가능한 리프 강제).',
+            ),
+          };
+          entry.hardLeafClamp = { from, to: 0 };
+          summary.hardLeafClampCount += 1;
+          mutated = true;
+        }
+      }
+
+      // (2) uncertaintyState 한 단 아래 제한 — 명시적 술어로만. 배열 인덱스 순위 clamp 를 쓰면 unknown_known
+      //     (human pick quadrant)으로 샐 수 있어 금지한다. blocked 자식은 author 의 종단 표식이므로 보존한다.
+      const childUncertainty = String(fm.uncertaintyState || '').trim();
+      const childStatus = String(fm.status || '').trim();
+      if (
+        (parentUncertainty !== 'unknown_unknown' || convergenceLevel === 'hard')
+        && childUncertainty === 'unknown_unknown'
+        && childStatus !== 'blocked'
+      ) {
+        fm.uncertaintyState = 'known_unknown';
+        fm.uncertaintyClampReason = convergenceLevel === 'hard'
+          ? sanitizeFmScalar('Runner convergence clamp: HARD 수렴 압력에서는 부모 uncertainty와 무관하게 자식의 unknown_unknown 선언을 known_unknown 으로 한 단계 제한 (known 승격 금지).')
+          : sanitizeFmScalar(
+            'Runner convergence clamp: 부모 ' + (parentTask?.id || 'parent')
+            + ' 가 unknown_unknown 이 아니므로 자식의 unknown_unknown 선언을 known_unknown 으로 제한 (발산 사이클 재생산 차단).',
+          );
+        entry.uncertaintyClamp = { from: 'unknown_unknown', to: 'known_unknown' };
+        summary.clampedUncertaintyCount += 1;
+        if (convergenceLevel === 'hard') {
+          entry.hardUncertaintyClamp = { from: 'unknown_unknown', to: 'known_unknown' };
+          summary.hardUncertaintyClampCount += 1;
+        }
+        mutated = true;
+      }
+
+      // (3) acceptance 계약. 부모 requiredChecks 통째 복사는 기본값에서 금지 — 부모 체크는 부모 산출물/cwd 기준이라
+      //     리프에서 필연 실패하고, 그러면 거짓 완료 대신 '거짓 실패'를 만든다. mode 와 expectedOutcome 기본값만 전파.
+      const rawAcceptance = fm.acceptance && typeof fm.acceptance === 'object' && !Array.isArray(fm.acceptance)
+        ? { ...fm.acceptance }
+        : {};
+      let acceptanceTouched = false;
+      if (!ACCEPTANCE_MODES.has(String(rawAcceptance.mode || '').trim()) && parentAcceptance.mode !== 'informational') {
+        rawAcceptance.mode = parentAcceptance.mode;
+        acceptanceTouched = true;
+      }
+      const childOutcome = fm.expectedResult || fm.completionCriteria || '';
+      if (!rawAcceptance.expectedOutcome && childOutcome) {
+        rawAcceptance.expectedOutcome = childOutcome;
+        acceptanceTouched = true;
+      }
+      if (childAcceptancePropagation === 'full' && parentAcceptance.requiredChecks.length > 0) {
+        const existing = Array.isArray(rawAcceptance.requiredChecks) ? rawAcceptance.requiredChecks : [];
+        const merged = existing.slice();
+        for (const check of parentAcceptance.requiredChecks) if (!merged.includes(check)) merged.push(check);
+        if (merged.length !== existing.length) {
+          rawAcceptance.requiredChecks = merged;
+          acceptanceTouched = true;
+        }
+      }
+      if (acceptanceTouched) {
+        fm.acceptance = rawAcceptance;
+        mutated = true;
+      }
+
+      // (4) 검증 불가 리프 플래그. clamp 후 depth 0 인데 requiredChecks/requiredArtifacts 가 둘 다 없으면
+      //     "검증할 수 없는 자식"이다 → 강제 실행 후보에서 제외한다(억지 실행도 억지 완료도 만들지 않는다).
+      //     status 는 건드리지 않는다.
+      //     종단 status(blocked/done/cancelled) 자식은 애초에 강제 실행 후보가 아니므로 플래그하지 않는다 —
+      //     의도적으로 blocked 로 선언된 자식을 needsManualReview 로 덮어쓰면 author 의 표식을 훼손한다.
+      const clampedPlan = normalizeExpectedPlan(fm.expectedPlan);
+      const isLeaf = clampedPlan.ok && clampedPlan.value.expectedDepth === 0;
+      const isTerminal = ['blocked', 'done', 'cancelled'].includes(childStatus);
+      const childAcceptance = normalizeAcceptance({ ...fm, acceptance: fm.acceptance });
+      for (const check of childAcceptance.requiredChecks) {
+        const canonical = canonicalizeElement(commandText(check));
+        if (canonical) childAcceptanceChecks.add(canonical);
+      }
+      for (const artifact of childAcceptance.requiredArtifacts) {
+        const canonical = canonicalizeElement(refText(artifact));
+        if (canonical) childAcceptanceArtifacts.add(canonical);
+      }
+      if (isLeaf && !isTerminal && childAcceptance.requiredChecks.length === 0 && childAcceptance.requiredArtifacts.length === 0) {
+        fm.convergenceAcceptanceGap = true;
+        if (fm.needsManualReview !== true) {
+          fm.needsManualReview = true;
+          fm.manualReviewReason = sanitizeFmScalar('Runner convergence: 리프 자식이 requiredChecks/requiredArtifacts 를 모두 선언하지 않아 검증 불가 — 강제 실행 후보에서 제외된다.');
+        }
+        entry.acceptanceGap = true;
+        summary.acceptanceGapCount += 1;
+        summary.acceptanceGapTaskIds.push(childTask.id || null);
+        if (convergenceLevel === 'hard' && childTask.id) {
+          summary.hardUnverifiableChildIds.push(childTask.id);
+        }
+        mutated = true;
+      }
+      return fm;
+    });
+
+    if (mutated) summary.children.push(entry);
+    else summary.preservedCount += 1;
+  }
+  summary.childAcceptanceUnion = {
+    checks: [...childAcceptanceChecks].sort(),
+    artifacts: [...childAcceptanceArtifacts].sort(),
+  };
+  return summary;
+}
+
 export function stampChildrenSelfResolver({ projectDir, childTaskGroupId, versionId }) {
   const versionDir = join(projectDir, 'task-groups', childTaskGroupId, 'versions', versionId);
   const taskPaths = listChildTaskPaths(versionDir);
@@ -4680,7 +6190,12 @@ function closeDecomposeSuccess({
   runNodePath,
   result,
   finishedAt,
+  budgetExtensionRequest = null,
   delegationMode = false,
+  childAcceptancePropagation = 'mode',
+  convergenceLevel = 'none',
+  convergenceMode = 'none',
+  decompositionMaxRetries = CONVERGENCE_DEFAULTS.decomposition.maxRetries,
 }) {
   const backlinkResult = ensureDecompositionBacklink({
     projectDir,
@@ -4724,6 +6239,448 @@ function closeDecomposeSuccess({
       expectedPlanFallbacks: expectedPlanNormalization.fallbacks,
     });
     appendRunLog(runDir, `${finishedAt} expected_plan_fallback_applied taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId} count=${expectedPlanNormalization.fallbackCount}`);
+  }
+
+  // 층3 — 자식 실행가능성 계약. expectedPlan fallback 이 먼저 돌아 invalid plan 이 채워진 뒤에 실행해야
+  // 깊이 clamp 가 모든 자식에 적용된다. 부모가 스코프에 있는 유일한 지점이다.
+  const childConvergence = normalizeChildConvergenceContracts({
+    projectDir,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    parentTask: task,
+    childAcceptancePropagation,
+    convergenceLevel,
+  });
+  if (
+    childConvergence.clampedDepthCount > 0
+    || childConvergence.clampedUncertaintyCount > 0
+    || childConvergence.acceptanceGapCount > 0
+    || childConvergence.hardLeafClampCount > 0
+    || childConvergence.hardUncertaintyClampCount > 0
+  ) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'child_convergence_contract_normalized', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      summary: {
+        taskCount: childConvergence.taskCount,
+        clampedDepthCount: childConvergence.clampedDepthCount,
+        clampedUncertaintyCount: childConvergence.clampedUncertaintyCount,
+        acceptanceGapCount: childConvergence.acceptanceGapCount,
+        hardLeafClampCount: childConvergence.hardLeafClampCount,
+        hardUncertaintyClampCount: childConvergence.hardUncertaintyClampCount,
+        hardUnverifiableChildIds: childConvergence.hardUnverifiableChildIds,
+        childAcceptanceUnion: childConvergence.childAcceptanceUnion,
+      },
+      children: childConvergence.children,
+    });
+    appendRunLog(runDir, `${finishedAt} child_convergence_contract_normalized taskId=${task.id} depthClamp=${childConvergence.clampedDepthCount} uncertaintyClamp=${childConvergence.clampedUncertaintyCount} acceptanceGap=${childConvergence.acceptanceGapCount}`);
+  }
+  const convergenceContractViolation = childConvergence.hardUnverifiableChildIds.length > 0
+    ? 'hard_children_not_executable'
+    : null;
+  if (convergenceContractViolation) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt,
+      type: 'convergence_hard_children_unverifiable',
+      runId,
+      taskId: task.id,
+      taskGroupVersionId: task.taskGroupVersionId,
+      runNodeId,
+      executor,
+      childTaskGroupId: result.childTaskGroupId,
+      versionId: result.versionId,
+      childTaskIds: childConvergence.hardUnverifiableChildIds,
+      childAcceptanceUnion: childConvergence.childAcceptanceUnion,
+    });
+    appendRunLog(
+      runDir,
+      finishedAt
+      + ' convergence_hard_children_unverifiable taskId='
+      + task.id
+      + ' childTaskIds='
+      + childConvergence.hardUnverifiableChildIds.join(','),
+    );
+  }
+
+  const childVersionDir = join(
+    projectDir,
+    'task-groups',
+    result.childTaskGroupId,
+    'versions',
+    result.versionId,
+  );
+  const childTasksForQuality = listChildTaskPaths(childVersionDir).map((taskPath) => parseMarkdownFile(taskPath));
+  // classifyChildExecutability는 관측된 readiness와 검증 가능한 acceptance만 센다. 자식 readiness를
+  // runnable로, uncertaintyState를 known으로 상향 clamp해 품질 통과를 꾸미지 않는다.
+  const quality = classifyChildExecutability({
+    tasks: childTasksForQuality,
+    readinessOf: readinessOfFreshChild,
+    hasVerifiableAcceptance: taskHasVerifiableAcceptance,
+  });
+  const decompositionAttempt = deriveDecompositionIds(task).attempt;
+  const executableChildIds = quality.executableIds.filter((id) => typeof id === 'string');
+  const decompositionQuality = {
+    evaluatedAt: sanitizeFmScalar(finishedAt),
+    level: sanitizeFmScalar(convergenceLevel),
+    childCount: quality.childCount,
+    executableChildrenCount: quality.executable,
+    runnableCount: quality.runnableCount,
+    verifiableCount: quality.verifiableCount,
+    blockedCount: quality.blockedCount,
+    planningCount: quality.planningCount,
+    unresolvedBlockerCount: quality.unresolvedBlockerCount,
+    attempt: decompositionAttempt,
+  };
+  updateMarkdownFrontmatter(task.path, (fm) => {
+    fm.decompositionQuality = decompositionQuality;
+    return fm;
+  });
+  logEvent(eventsPath, {
+    timestamp: finishedAt,
+    type: 'decomposition_quality_evaluated',
+    runId,
+    taskId: task.id,
+    childTaskGroupId: result.childTaskGroupId,
+    versionId: result.versionId,
+    attempt: decompositionAttempt,
+    level: convergenceLevel,
+    mode: convergenceMode,
+    childCount: quality.childCount,
+    executableChildrenCount: quality.executable,
+    runnableCount: quality.runnableCount,
+    verifiableCount: quality.verifiableCount,
+    planningCount: quality.planningCount,
+    blockedCount: quality.blockedCount,
+    unresolvedBlockerCount: quality.unresolvedBlockerCount,
+    executableChildIds,
+  });
+  appendRunLog(
+    runDir,
+    finishedAt
+      + ' decomposition_quality_evaluated taskId='
+      + task.id
+      + ' executable='
+      + quality.executable
+      + '/'
+      + quality.childCount
+      + ' unresolvedBlockers='
+      + quality.unresolvedBlockerCount
+      + ' level='
+      + convergenceLevel,
+  );
+
+  const qualityVerdict = decompositionQualityVerdict({
+    quality,
+    level: convergenceLevel,
+    mode: convergenceMode,
+    attempt: decompositionAttempt,
+    maxRetries: decompositionMaxRetries,
+    parentVerifiable: taskHasVerifiableAcceptance(task),
+  });
+  const resultQuality = {
+    childCount: quality.childCount,
+    executableChildrenCount: quality.executable,
+    runnableCount: quality.runnableCount,
+    verifiableCount: quality.verifiableCount,
+    planningCount: quality.planningCount,
+    blockedCount: quality.blockedCount,
+    unresolvedBlockerCount: quality.unresolvedBlockerCount,
+    executableChildIds,
+    attempt: decompositionAttempt,
+  };
+  if (qualityVerdict.verdict !== 'accept') {
+    // 거짓 완료 금지: 거부·폴백 어느 분기에서도 자식/부모 readiness를 runnable로, uncertaintyState를 known으로
+    // 상향하지 않는다. 미달의 출구는 재분해 1회 → 검증 가능한 부모 통째 실행 → 정직한 blocked뿐이다.
+    const closeRejectedRunNode = () => {
+      updateMarkdownFrontmatter(runNodePath, (fm) => {
+        fm.status = 'done';
+        return fm;
+      });
+      closeRunNodeWithEow({
+        runDir,
+        runId,
+        runNodeId,
+        reason: 'decomposition_rejected_low_quality',
+        closureRole: 'supporting',
+        finishedAt,
+      });
+    };
+    const emitQualityRejection = (nextAction) => {
+      logEvent(eventsPath, {
+        timestamp: finishedAt,
+        type: 'decomposition_quality_rejected',
+        runId,
+        taskId: task.id,
+        level: convergenceLevel,
+        attempt: decompositionAttempt,
+        executableChildrenCount: quality.executable,
+        unresolvedBlockerCount: quality.unresolvedBlockerCount,
+        childCount: quality.childCount,
+        rejectedChildTaskGroupId: result.childTaskGroupId,
+        rejectedVersionId: result.versionId,
+        nextAction,
+      });
+      appendRunLog(
+        runDir,
+        finishedAt
+          + ' decomposition_quality_rejected taskId='
+          + task.id
+          + ' attempt='
+          + decompositionAttempt
+          + ' executable='
+          + quality.executable
+          + '/'
+          + quality.childCount
+          + ' unresolvedBlockers='
+          + quality.unresolvedBlockerCount
+          + ' nextAction='
+          + nextAction,
+      );
+    };
+
+    if (qualityVerdict.verdict === 'redecompose') {
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        fm.status = task.status;
+        fm.childTaskGroupId = result.childTaskGroupId;
+        fm.decompositionAttempt = decompositionAttempt + 1;
+        fm.decompositionQuality = decompositionQuality;
+        fm.lastDecompositionRejection = sanitizeFmScalar(qualityVerdict.reason);
+        return fm;
+      });
+      emitQualityRejection('redecompose');
+      closeRejectedRunNode();
+      return {
+        taskId: task.id,
+        runNodeId,
+        kind: 'decompose',
+        status: 'rejected_low_quality',
+        executor,
+        childTaskGroupId: result.childTaskGroupId,
+        versionId: result.versionId,
+        decompositionQuality: resultQuality,
+        ...resultQuality,
+        budget,
+      };
+    }
+
+    if (qualityVerdict.verdict === 'parent_fallback') {
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        fm.status = task.status;
+        fm.childTaskGroupId = result.childTaskGroupId;
+        fm.decompositionQuality = decompositionQuality;
+        fm.convergenceDecompositionAbandoned = {
+          at: sanitizeFmScalar(finishedAt),
+          attempts: decompositionAttempt,
+          executableChildrenCount: quality.executable,
+          reason: sanitizeFmScalar(qualityVerdict.reason),
+        };
+        return fm;
+      });
+      logEvent(eventsPath, {
+        timestamp: finishedAt,
+        type: 'decomposition_fallback_parent_execute',
+        runId,
+        taskId: task.id,
+        attempts: decompositionAttempt,
+        executableChildrenCount: quality.executable,
+        childTaskGroupId: result.childTaskGroupId,
+      });
+      emitQualityRejection('parent_fallback');
+      closeRejectedRunNode();
+      return {
+        taskId: task.id,
+        runNodeId,
+        kind: 'decompose',
+        status: 'rejected_low_quality',
+        executor,
+        childTaskGroupId: result.childTaskGroupId,
+        versionId: result.versionId,
+        fallback: true,
+        decompositionQuality: resultQuality,
+        ...resultQuality,
+        budget,
+      };
+    }
+
+    updateMarkdownFrontmatter(task.path, (fm) => {
+      fm.status = 'blocked';
+      fm.childTaskGroupId = result.childTaskGroupId;
+      fm.decompositionQuality = decompositionQuality;
+      fm.runReadinessReason = sanitizeFmScalar(
+        '수렴 hard 분해 품질 미달: 자식 '
+          + quality.childCount
+          + '개 중 즉시 실행 가능한 자식 '
+          + quality.executable
+          + '개, 해소불가 blockedBy 마커 '
+          + quality.unresolvedBlockerCount
+          + '개.',
+      );
+      fm.needsManualReview = true;
+      fm.manualReviewReason = sanitizeFmScalar(
+        '수렴 hard 에서 재분해 1회 후에도 실행 가능한 자식을 만들지 못했고, 이 task 에는 재검증할 acceptance 가 없다.',
+      );
+      return fm;
+    });
+    logEvent(eventsPath, {
+      timestamp: finishedAt,
+      type: 'decomposition_quality_blocked_honest',
+      runId,
+      taskId: task.id,
+      attempts: decompositionAttempt,
+      executableChildrenCount: quality.executable,
+      childCount: quality.childCount,
+      unresolvedBlockerCount: quality.unresolvedBlockerCount,
+    });
+    emitQualityRejection('honest_block');
+    closeRejectedRunNode();
+    return {
+      taskId: task.id,
+      runNodeId,
+      kind: 'decompose',
+      status: 'blocked_honest',
+      executor,
+      childTaskGroupId: result.childTaskGroupId,
+      versionId: result.versionId,
+      decompositionQuality: resultQuality,
+      ...resultQuality,
+      budget,
+    };
+  }
+
+  // R2 — 분해가 부모의 검증 가능한 acceptance 를 자식에게 내리지 못했는지 기록한다.
+  // 부모를 다시 열면 재분해 no-op 루프가 생기므로 여기서는 관찰 가능한 스탬프만 남기고, done 전이는 아래에서 유지한다.
+  const parentAcceptanceForDescent = normalizeAcceptance(task);
+  const parentChecksForDescent = new Set(
+    parentAcceptanceForDescent.requiredChecks
+      .map((check) => commandText(check))
+      .filter((check) => String(check || '').trim().length > 0)
+      .map((check) => canonicalizeElement(check))
+      .filter(Boolean),
+  );
+  const parentArtifactsForDescent = new Set(
+    parentAcceptanceForDescent.requiredArtifacts
+      .map((artifact) => refText(artifact))
+      .filter((artifact) => String(artifact || '').trim().length > 0)
+      .map((artifact) => canonicalizeElement(artifact))
+      .filter(Boolean),
+  );
+  const childChecksForDescent = new Set(childConvergence.childAcceptanceUnion.checks || []);
+  const childArtifactsForDescent = new Set(childConvergence.childAcceptanceUnion.artifacts || []);
+  const uncoveredChecks = [...parentChecksForDescent]
+    .filter((check) => !childChecksForDescent.has(check))
+    .sort()
+    .map((check) => sanitizeFmScalar(check));
+  const uncoveredArtifacts = [...parentArtifactsForDescent]
+    .filter((artifact) => !childArtifactsForDescent.has(artifact))
+    .sort()
+    .map((artifact) => sanitizeFmScalar(artifact));
+  const fullChecks = [...parentChecksForDescent]
+    .sort()
+    .map((check) => sanitizeFmScalar(check));
+  const fullArtifacts = [...parentArtifactsForDescent]
+    .sort()
+    .map((artifact) => sanitizeFmScalar(artifact));
+  if (
+    convergenceMode !== 'off'
+    && taskHasVerifiableAcceptance(task)
+  ) {
+    const closedByDecompositionAt = sanitizeFmScalar(isoNow());
+    const deferredChildTaskGroupId = sanitizeFmScalar(result.childTaskGroupId);
+    updateMarkdownFrontmatter(task.path, (fm) => {
+      fm.convergenceDeferredAcceptance = {
+        // 최상위 두 키는 2차 소비자와의 하위호환을 위해 uncovered 값으로 유지한다.
+        requiredChecks: uncoveredChecks,
+        requiredArtifacts: uncoveredArtifacts,
+        uncovered: {
+          checks: uncoveredChecks,
+          artifacts: uncoveredArtifacts,
+        },
+        full: {
+          checks: fullChecks,
+          artifacts: fullArtifacts,
+        },
+        closedByDecompositionAt,
+        childTaskGroupId: deferredChildTaskGroupId,
+      };
+      return fm;
+    });
+    if (uncoveredChecks.length > 0 || uncoveredArtifacts.length > 0) {
+      logEvent(eventsPath, {
+        timestamp: closedByDecompositionAt,
+        type: 'convergence_acceptance_descent_gap',
+        runId,
+        taskId: task.id,
+        uncoveredChecks,
+        uncoveredArtifacts,
+        childTaskGroupId: deferredChildTaskGroupId,
+        level: convergenceLevel,
+      });
+      appendRunLog(
+        runDir,
+        closedByDecompositionAt
+        + ' convergence_acceptance_descent_gap taskId='
+        + task.id
+        + ' checks='
+        + uncoveredChecks.length
+        + ' artifacts='
+        + uncoveredArtifacts.length,
+      );
+    }
+  }
+
+  // divergence novelty(decompose) — "새 unknown/requiredChecks 를 하나도 안 만든 분해는 발산이 아니다".
+  // 자식 union 원소집합에서 부모 대응 집합을 뺀 차집합이 비어 있으면 novel=false → 다음 soft 압력에서 차단된다.
+  try {
+    const childDirForNovelty = join(projectDir, 'task-groups', result.childTaskGroupId, 'versions', result.versionId);
+    const childElements = new Set();
+    for (const p of listChildTaskPaths(childDirForNovelty)) {
+      let child;
+      try { child = parseMarkdownFile(p); } catch { continue; }
+      const unknowns = Array.isArray(child.unknowns) ? child.unknowns : (child.unknowns ? [child.unknowns] : []);
+      for (const u of unknowns) childElements.add(canonicalizeElement(u));
+      childElements.add(canonicalizeElement(`uncertaintystate:${child.uncertaintyState || ''}`));
+      for (const c of normalizeAcceptance(child).requiredChecks) childElements.add(canonicalizeElement(c));
+    }
+    const parentUnknowns = Array.isArray(task.unknowns) ? task.unknowns : (task.unknowns ? [task.unknowns] : []);
+    const parentElements = new Set([
+      ...parentUnknowns.map(canonicalizeElement),
+      canonicalizeElement(`uncertaintystate:${task.uncertaintyState || ''}`),
+      ...normalizeAcceptance(task).requiredChecks.map(canonicalizeElement),
+    ]);
+    const added = [...childElements].filter((e) => e && !parentElements.has(e));
+    const childSig = canonicalStringSetSignature([...childElements]);
+    const priorDecomposeSigs = new Set(
+      (Array.isArray(task.divergenceLedger) ? task.divergenceLedger : [])
+        .filter((e) => e && e.kind === 'decompose')
+        .map((e) => e.sigAfter)
+        .filter(Boolean),
+    );
+    const decomposeNovel = added.length >= 1 && !priorDecomposeSigs.has(childSig);
+    updateMarkdownFrontmatter(task.path, (fm) => {
+      appendDivergenceLedgerEntry(fm, {
+        kind: 'decompose', runNodeId, at: finishedAt,
+        sigBefore: canonicalStringSetSignature([...parentElements]), sigAfter: childSig, novel: decomposeNovel,
+      });
+      return fm;
+    });
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'divergence_novelty', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      kind: 'decompose', novel: decomposeNovel, addedElementCount: added.length, sigAfter: childSig,
+    });
+    appendRunLog(runDir, `${finishedAt} divergence_novelty taskId=${task.id} kind=decompose novel=${decomposeNovel} added=${added.length}`);
+  } catch {}
+
+  if (childConvergence.acceptanceGapCount > 0) {
+    logEvent(eventsPath, {
+      timestamp: finishedAt, type: 'child_acceptance_gap', runId,
+      taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+      childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+      taskIds: childConvergence.acceptanceGapTaskIds,
+      summary: { count: childConvergence.acceptanceGapCount, reason: 'leaf_child_without_verifiable_acceptance' },
+    });
+    appendRunLog(runDir, `${finishedAt} child_acceptance_gap taskId=${task.id} count=${childConvergence.acceptanceGapCount}`);
   }
 
   const blockedByNormalization = normalizeBlockedByForChildVersion({
@@ -4830,6 +6787,12 @@ function closeDecomposeSuccess({
     blockedByNormalization,
     ...(selfResolverStamp ? { selfResolverStamp } : {}),
     committingScopeDeferral,
+    decompositionQuality: {
+      childCount: quality.childCount,
+      executableChildrenCount: quality.executable,
+      unresolvedBlockerCount: quality.unresolvedBlockerCount,
+      attempt: decompositionAttempt,
+    },
   });
   appendRunLog(runDir, `${finishedAt} decomposition_completed taskId=${task.id} childTaskGroupId=${result.childTaskGroupId} versionId=${result.versionId}`);
 
@@ -4860,11 +6823,15 @@ function closeDecomposeSuccess({
     blockedByNormalization,
     ...(selfResolverStamp ? { selfResolverStamp } : {}),
     committingScopeDeferral,
+    ...(convergenceContractViolation ? { convergenceContractViolation } : {}),
+    decompositionQuality: resultQuality,
+    ...resultQuality,
     budget,
+    ...(budgetExtensionRequest ? { budgetExtensionRequest } : {}),
   };
 }
 
-function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false }) {
+function executeDecompositionTask({ projectDir, parsed, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null, delegationMode = false, childAcceptancePropagation = 'mode', convergence = null, decompositionMaxRetries = CONVERGENCE_DEFAULTS.decomposition.maxRetries }) {
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const {
@@ -4903,16 +6870,45 @@ function executeDecompositionTask({ projectDir, parsed, project, task, runDir, r
     });
     appendRunLog(runDir, `${startedAt} decomposition_started taskId=${task.id} runNodeId=${runNodeId} executor=${executor}`);
 
+    // adapter 성공 뒤 postprocess 도 같은 원자성 경계 안에 있어야 한다. 내부 attempt 스냅샷은
+    // performAgentDecomposition 반환과 함께 끝나므로, 호출 전에 바깥 경계의 baseline/스냅샷을 따로 잡는다.
+    const postprocessBaselineErrors = projectValidationErrorSet(projectDir);
+    const { childTaskGroupId: expectedChildTaskGroupId } = deriveDecompositionIds(task);
+    const postprocessChildSnapshot = snapshotChildTaskGroup(projectDir, expectedChildTaskGroupId);
+    const originalParentChildTaskGroupId = task.childTaskGroupId;
     let result;
     try {
       result = executor === 'dry-run'
         ? performDryRunDecomposition({ projectDir, task })
-        : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext });
+        : performAgentDecomposition({ projectDir, project, task, executor, agentId, stepTimeoutMs, budget, inheritedContext, convergence });
     } catch (err) {
       result = { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
 
     const finishedAt = isoNow();
+    // 원자성 계측: 롤백 후 재시도가 있었으면 그 사실과 진단을 남긴다(관측 가능해야 고칠 수 있다).
+    for (const rollbackAttempt of (result.rollbackAttempts || [])) {
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_retry_after_rollback', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        attempt: rollbackAttempt.attempt,
+        failureKind: rollbackAttempt.failureKind,
+        diagnosis: rollbackAttempt.diagnosis,
+        violations: rollbackAttempt.violations || [],
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_retry_after_rollback taskId=${task.id} attempt=${rollbackAttempt.attempt} failureKind=${rollbackAttempt.failureKind}`);
+    }
+    if (result.ok && result.schemaDebt) {
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_schema_debt_accepted', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        childTaskGroupId: result.childTaskGroupId, versionId: result.versionId,
+        attempt: result.schemaDebt.attempt,
+        violationCount: result.schemaDebt.count,
+        violations: result.schemaDebt.violations,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_schema_debt_accepted taskId=${task.id} count=${result.schemaDebt.count}`);
+    }
     if (!result.ok) {
       result = maybeRecoverCompletedDecomposition({ projectDir, project, task, runId, runNodeId, result });
       if (result.recoveredAfterAdapterFailure === true) {
@@ -4949,21 +6945,86 @@ function executeDecompositionTask({ projectDir, parsed, project, task, runDir, r
       };
     }
 
-    return closeDecomposeSuccess({
-      projectDir,
-      parsed,
-      task,
-      runDir,
-      runId,
-      eventsPath,
-      executor,
-      budget,
-      runNodeId,
-      runNodePath,
-      result,
-      finishedAt,
-      delegationMode,
-    });
+    const budgetExtensionRequest = parseBudgetExtensionRequestFromExecutorResult(result);
+    // executor 성공 뒤의 자식 파싱과 정규화도 런 경계 안에서 정직한 실패로 닫는다.
+    try {
+      return closeDecomposeSuccess({
+        projectDir,
+        parsed,
+        task,
+        runDir,
+        runId,
+        eventsPath,
+        executor,
+        budget,
+        runNodeId,
+        runNodePath,
+        result,
+        finishedAt,
+        childAcceptancePropagation,
+        convergenceLevel: convergence?.level || 'none',
+        convergenceMode: convergence?.mode || 'none',
+        decompositionMaxRetries,
+        budgetExtensionRequest,
+        delegationMode,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // commit 이 실패했으므로 pending backlink 는 앞으로 채워질 값이 아니다. 여기서 예외 처리하면
+      // 반쪽 자식이 영구히 남으므로 baseline 대비 새 오류를 하나도 면제하지 않는다.
+      const introducedErrors = newProjectValidationErrors(projectDir, postprocessBaselineErrors);
+      const graphInvalidated = introducedErrors.length > 0;
+      // 롤백은 graphInvalidated 로 게이트하지 **않는다**. 원자성 계약은 "전부 성공 or 전부 롤백"이고,
+      // closeDecomposeSuccess 가 던진 시점의 분해는 EoW/closure 기록이 빠진 반쪽 커밋이다.
+      // parseProject 가 그 결손을 못 본다고 해서(= graphInvalidated=false) 남겨두면, 부모는 blocked 인데
+      // 자식만 살아 있는 반쪽 자식 상태가 그대로 굳는다 — 우리가 없애려던 바로 그 병리다.
+      // graphInvalidated 는 그래서 판단 기준이 아니라 **계측 필드**로만 남긴다.
+      let rollback = { rolledBack: false, mode: null };
+      try {
+        rollback = rollbackChildTaskGroup(postprocessChildSnapshot);
+      } catch {
+        // 롤백 자체가 실패해도 blocked 전이와 residualErrors 계측은 끝까지 남겨 다음 복구가 가능해야 한다.
+        rollback = { rolledBack: false, mode: 'failed' };
+      }
+      const failedChildTaskGroupId = result.childTaskGroupId || expectedChildTaskGroupId;
+      updateMarkdownFrontmatter(task.path, (fm) => {
+        if (
+          failedChildTaskGroupId
+          && String(fm.childTaskGroupId || '') === String(failedChildTaskGroupId)
+        ) {
+          // closeDecomposeSuccess 가 부모 backlink 까지 일부 썼다면 분해 전 값으로 되돌린다.
+          if (originalParentChildTaskGroupId != null && String(originalParentChildTaskGroupId).trim() !== '') {
+            fm.childTaskGroupId = originalParentChildTaskGroupId;
+          } else {
+            delete fm.childTaskGroupId;
+          }
+        }
+        fm.status = 'blocked';
+        fm.lastRunFailureReason = sanitizeFmScalar(message);
+        return fm;
+      });
+      updateMarkdownFrontmatter(runNodePath, (fm) => { fm.status = 'blocked'; return fm; });
+      // 부모 backlink 복원까지 끝난 뒤 다시 검사한 값만 이벤트에 싣는다. 기존 baseline 오류는 잔여로 세지 않는다.
+      const residualErrors = newProjectValidationErrors(projectDir, postprocessBaselineErrors).slice(0, 5);
+      logEvent(eventsPath, {
+        timestamp: finishedAt, type: 'decomposition_failed', runId,
+        taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+        phase: 'postprocess',
+        message,
+        graphInvalidated,
+        rolledBack: rollback.rolledBack === true,
+        rollbackMode: rollback.mode || null,
+        residualErrors,
+      });
+      appendRunLog(runDir, `${finishedAt} decomposition_failed taskId=${task.id} phase=postprocess graphInvalidated=${graphInvalidated} rolledBack=${rollback.rolledBack === true} rollbackMode=${rollback.mode || ''} residualErrors=${residualErrors.length} reason=${message}`);
+      return {
+        taskId: task.id, runNodeId, kind: 'decompose', status: 'failed', executor,
+        failurePhase: 'postprocess',
+        message, adapterStatus: result.status || null,
+        stdout: result.stdout || '', stderr: result.stderr || '',
+        budget,
+      };
+    }
   } finally {
     releaseMutationLock();
   }
@@ -5001,11 +7062,11 @@ function performDryRunExploration({ runDir, runNodeId, task }) {
   return { ok: true, artifactPath, message: `Wrote dry-run exploration artifact at ${artifactPath}` };
 }
 
-function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null, inheritedContext = null }) {
+function performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget = null, convergence = null, inheritedContext = null }) {
   const artifactsDir = join(runDir, 'artifacts');
   ensureDir(artifactsDir);
   const artifactPath = join(artifactsDir, `${runNodeId}.md`);
-  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget, inheritedContext });
+  const prompt = buildAgentExplorationPrompt({ project, task, runId, runNodeId, artifactPath, budget, inheritedContext, convergence });
   const result = invokeRuntimeAdapter(executor, {
     prompt,
     agentId,
@@ -5020,7 +7081,37 @@ function performAgentExploration({ project, projectDir, task, executor, agentId,
   return { ok: true, artifactPath, message: result.stdout || `Agent recorded exploration at ${artifactPath}` };
 }
 
-function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, budget = null }) {
+// divergence novelty — 발산의 원소집합 시그니처. exploration 은 자유형 Markdown 이라 "남은 unknown 집합"을
+// 산출물에서 직접 읽을 수 없으므로, task frontmatter 의 **구조화 필드만** 으로 계산한다.
+function explorationDivergenceSignature(source) {
+  const unknowns = Array.isArray(source?.unknowns) ? source.unknowns : (source?.unknowns ? [source.unknowns] : []);
+  const knownIds = (Array.isArray(source?.knownList) ? source.knownList : []).map((k) => k?.id).filter(Boolean);
+  const history = Array.isArray(source?.surpriseHistory) ? source.surpriseHistory : [];
+  const surfaced = [];
+  for (const entry of history) {
+    for (const id of (Array.isArray(entry?.newUnknownIds) ? entry.newUnknownIds : [])) surfaced.push(id);
+    for (const id of (Array.isArray(entry?.newKnownIds) ? entry.newKnownIds : [])) surfaced.push(id);
+  }
+  return canonicalStringSetSignature([
+    ...unknowns,
+    ...knownIds,
+    ...surfaced,
+    `uncertaintystate:${String(source?.uncertaintyState || '').trim()}`,
+  ]);
+}
+
+function appendDivergenceLedgerEntry(fm, entry) {
+  const existing = Array.isArray(fm.divergenceLedger) ? fm.divergenceLedger : [];
+  fm.divergenceLedger = existing.concat([entry]).slice(-20);
+  return fm.divergenceLedger;
+}
+
+function executeExplorationTask({ projectDir, project, task, runDir, runId, eventsPath, executor, agentId, stepTimeoutMs, convergence = null, budget = null }) {
+  // 스텝 시작 시점의 시그니처. 성공 close 시점의 시그니처와 비교해 "이 exploration 이 실제로 새 possibility
+  // mass 를 열었는가"를 판정한다(직전과 같은 unknown 을 또 파면 novel=false → 다음 soft 에서 차단).
+  const explorationSigBefore = explorationDivergenceSignature(task);
+  let explorationNovelty = true;
+  let explorationSigAfter = null;
   const inheritedContext = inheritedContextForTask(projectDir, task);
   const startedAt = isoNow();
   const {
@@ -5053,7 +7144,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   try {
     result = executor === 'dry-run'
       ? performDryRunExploration({ runDir, runNodeId, task })
-      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget, inheritedContext });
+      : performAgentExploration({ project, projectDir, task, executor, agentId, stepTimeoutMs, runDir, runId, runNodeId, budget, convergence, inheritedContext });
   } catch (err) {
     result = { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
@@ -5083,6 +7174,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
   const artifactText = result.artifactPath && existsSync(result.artifactPath)
     ? readFileSync(result.artifactPath, 'utf8')
     : '';
+  const budgetExtensionRequest = parseBudgetExtensionRequestFromExecutorResult(result, artifactText ? [artifactText] : []);
   const surpriseReport = parseSurpriseReportFromExecutorResult(result, artifactText ? [artifactText] : []);
   if (surpriseReport.markerFound && surpriseReport.parseError) {
     const reason = malformedSurpriseReason(surpriseReport);
@@ -5159,8 +7251,30 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     //     이미 known_unknown이면 재승격 없음(anti-loop): 두 번째 exploration에서 1428 branch 미진입.
     if (String(fm.uncertaintyState || '').trim() === 'unknown_unknown') fm.uncertaintyState = 'known_unknown';
     delete fm.lastRunFailureReason;
+    // divergence novelty 스탬프 — 이 update 안에서 계산해 추가 쓰기를 만들지 않는다.
+    // novel = (시그니처가 실제로 바뀌었다) ∧ (과거 explore 엔트리에 없던 시그니처다).
+    const sigAfter = explorationDivergenceSignature(fm);
+    const priorExploreSigs = new Set(
+      (Array.isArray(fm.divergenceLedger) ? fm.divergenceLedger : [])
+        .filter((e) => e && e.kind === 'explore')
+        .map((e) => e.sigAfter)
+        .filter(Boolean),
+    );
+    explorationNovelty = sigAfter !== explorationSigBefore && !priorExploreSigs.has(sigAfter);
+    explorationSigAfter = sigAfter;
+    appendDivergenceLedgerEntry(fm, {
+      kind: 'explore', runNodeId, at: finishedAt,
+      sigBefore: explorationSigBefore, sigAfter, novel: explorationNovelty,
+    });
     return fm;
   });
+  logEvent(eventsPath, {
+    timestamp: finishedAt, type: 'divergence_novelty', runId,
+    taskId: task.id, taskGroupVersionId: task.taskGroupVersionId, runNodeId, executor,
+    kind: 'explore', novel: explorationNovelty,
+    sigBefore: explorationSigBefore, sigAfter: explorationSigAfter,
+  });
+  appendRunLog(runDir, `${finishedAt} divergence_novelty taskId=${task.id} kind=explore novel=${explorationNovelty}`);
   // P0#2 defense-in-depth: acceptance-bearing task(enforced/guarded/runner-managed)는 acceptance 검증 /
   // policy-approved review로만 닫혀야 하며 exploration 통과로 종결되면 acceptance를 우회한다. #1이 exploration의
   // close 자체를 제거해 불변식을 만족하지만, 향후 회귀가 이 path에 close를 재도입하지 못하도록 acceptance task에
@@ -5203,6 +7317,7 @@ function executeExplorationTask({ projectDir, project, task, runDir, runId, even
     taskId: task.id, runNodeId, kind: 'explore', status: 'completed', executor,
     artifactPath: result.artifactPath || null, message: result.message || null,
     budget,
+    ...(budgetExtensionRequest ? { budgetExtensionRequest } : {}),
   };
 }
 
@@ -5968,7 +8083,24 @@ export function runTaskOps(workDir, options = {}) {
     maxWallClockMs = Math.floor(n);
   }
 
+  // 층3 자식 계약 전파 정책. 'mode' = acceptance.mode + expectedOutcome 기본값만 물려준다(기본).
+  // 'full' = 부모 requiredChecks 까지 복사(부모 체크는 부모 산출물 기준이라 리프에서 거짓 실패를 만들 수 있어 기본 아님).
+  // maxWallClockMs 와 동일하게 lock 획득 전에 검증한다(잘못된 값이 lock 을 남기지 않는 no-leak 계약).
+  const childAcceptancePropagation = options.childAcceptancePropagation == null || options.childAcceptancePropagation === ''
+    ? 'mode'
+    : String(options.childAcceptancePropagation).trim().toLowerCase();
+  if (!CHILD_ACCEPTANCE_PROPAGATION_MODES.includes(childAcceptancePropagation)) {
+    throw new Error(`Invalid childAcceptancePropagation '${options.childAcceptancePropagation}'. Allowed: ${CHILD_ACCEPTANCE_PROPAGATION_MODES.join(', ')}`);
+  }
+
+  // 수렴 압력 게이트 설정. maxWallClockMs 와 동일하게 lock 획득 전에 검증한다.
+  const convergenceConfig = normalizeConvergenceConfig(options, process.env);
+
   if (maxSteps == null && until == null) maxSteps = 1;
+
+  // 연장량은 항상 최초 운영자 예산을 기준으로 계산한다. grant가 여러 번이어도 복리 증가는 없다.
+  const initialMaxSteps = maxSteps;
+  const initialMaxWallClockMs = maxWallClockMs;
 
   let taskTimeoutMs = null;
   if (options.timeout != null) {
@@ -6059,7 +8191,50 @@ export function runTaskOps(workDir, options = {}) {
     let stopSource = null;
     let finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
     const actions = [];
+    let lastDecompositionQuality = null;
+    try {
+      const persistedFeedback = parseMarkdownFile(join(runDir, 'index.md')).convergenceDecompositionFeedback;
+      if (persistedFeedback && typeof persistedFeedback === 'object' && !Array.isArray(persistedFeedback)) {
+        lastDecompositionQuality = { ...persistedFeedback };
+      }
+    } catch {}
     const reportedBlockedEvidenceIssues = new Set();
+    const convergenceStats = {
+      mode: convergenceConfig.mode,
+      config: convergenceConfig,
+      softFires: 0,
+      hardFires: 0,
+      forcedExecutes: 0,
+      readinessDemotions: 0,
+      blockedNoCandidate: 0,
+      axesSnapshotLast: null,
+      levelTrail: [],
+      decomposition: {
+        evaluated: 0,
+        executableZero: 0,
+        rejected: 0,
+        retried: 0,
+        fallbackParentExecute: 0,
+        honestBlocked: 0,
+        lastExecutableChildrenCount: null,
+      },
+      extensions: {
+        requested: 0,
+        granted: 0,
+        rejected: 0,
+        initialMaxSteps,
+        finalMaxSteps: maxSteps,
+        initialMaxWallClockMs,
+        finalMaxWallClockMs: maxWallClockMs,
+        grants: [],
+        rejections: [],
+      },
+    };
+    // 부채축의 연속 임계 초과 횟수. 런 스코프 메모리에만 산다(파일 쓰기 없음).
+    let debtCriticalStreak = 0;
+    // blocked_only 사다리의 런 스코프 상태. rescuedTaskIds 는 같은 런에서 같은 task 를 두 번 태우지
+    // 않기 위한 것이고, attempts 상한과 함께 무한 루프를 막는다.
+    const blockedOnlyLadder = { attempts: 0, forcedExecutes: 0, exhausted: 0, errors: 0, rescuedTaskIds: new Set() };
 
     while (true) {
       finalBudget = computeStepBudget({ stepsRun, maxSteps, budgetEnabled });
@@ -6116,7 +8291,8 @@ export function runTaskOps(workDir, options = {}) {
         appendRunLog(runDir, `${isoNow()} blockedby_missing_for_blocked_task count=${missingBlockerIssues.length}`);
       }
 
-      const next = pickNextAction({
+      // 게이트가 이 선택을 후처리로 재작성할 수 있으므로 let 이다(pickNextAction 자체는 무변경 순수 선택기).
+      let next = pickNextAction({
         ...parsed,
         errors: validationErrors,
       }, {
@@ -6166,21 +8342,134 @@ export function runTaskOps(workDir, options = {}) {
             continue;
           }
         }
-        stopReason = next.reason;
-        stopDetail = next.detail || null;
-        stopSource = next.source || null;
+        // 라운드 E — blocked_only 로 끝내기 **전에** hard 사다리를 한 번 태운다.
+        // 게이트(applyConvergencePressure)는 next 가 있을 때만 적용되므로, 이 선개입이 없으면
+        // "실행할 게 없다" 가 항상 hard 사다리보다 먼저 이겨 tier-2 폴백B 가 dead code 로 남는다.
         if (
-          stopReason === STOP_REASONS.WAITING
-          || stopReason === STOP_REASONS.DELEGATION_PENDING
-          || stopReason === STOP_REASONS.BLOCKED_ONLY
-          || stopReason === STOP_REASONS.ALL_CLOSED
-          || stopReason === STOP_REASONS.GRAPH_CLOSED_UNAPPROVED
+          next.reason === STOP_REASONS.BLOCKED_ONLY
+          && convergenceConfig.mode === 'enforce'
+          && blockedOnlyLadder.attempts < BLOCKED_ONLY_LADDER_MAX_ATTEMPTS
         ) {
-          logEvent(eventsPath, { timestamp: isoNow(), type: stopReason, runId, detail: stopDetail, source: stopSource });
-          appendRunLog(runDir, `${isoNow()} ${stopReason}${stopDetail ? ` ${stopDetail}` : ''}`);
+          blockedOnlyLadder.attempts += 1;
+          let ladderNext = null;
+          try {
+            ladderNext = attemptBlockedOnlyLadder({
+              parsed,
+              activeSnapshot: parsed.snapshots.get(parsed.project.activeSnapshotId) || null,
+              targetTaskId,
+              config: convergenceConfig,
+              eventsPath,
+              runDir,
+              runId,
+              attempt: blockedOnlyLadder.attempts,
+              maxAttempts: BLOCKED_ONLY_LADDER_MAX_ATTEMPTS,
+              excludeTaskIds: [...blockedOnlyLadder.rescuedTaskIds],
+            });
+          } catch (err) {
+            // 사다리는 **구조 기능**이다 — 실패해도 런을 죽이면 안 된다. 원래 예정된 정직한 종료로 되돌아간다.
+            // (4차 교훈: 인프라 결함이 런 자체를 즉사시키면 아무 것도 관측할 수 없다.)
+            ladderNext = null;
+            blockedOnlyLadder.errors += 1;
+            const message = err instanceof Error ? err.message : String(err);
+            logEvent(eventsPath, {
+              timestamp: isoNow(),
+              type: 'convergence_blocked_only_ladder_error',
+              runId,
+              attempt: blockedOnlyLadder.attempts,
+              message,
+            });
+            appendRunLog(runDir, `${isoNow()} convergence_blocked_only_ladder_error attempt=${blockedOnlyLadder.attempts} message=${message}`);
+          }
+          if (ladderNext) {
+            blockedOnlyLadder.forcedExecutes += 1;
+            if (ladderNext.task?.id != null) blockedOnlyLadder.rescuedTaskIds.add(String(ladderNext.task.id));
+            // convergenceStats.forcedExecutes 는 아래 dispatch 경로가 집계한다(중복 계상 금지).
+            // next 를 실행 dispatch 로 갈아끼운다 — 아래 stop 처리를 건너뛰고 정상 스텝 경로로 내려간다.
+            next = ladderNext;
+          } else {
+            blockedOnlyLadder.exhausted += 1;
+          }
         }
+        // 사다리가 후보를 만들지 못했으면(또는 애초에 태우지 않았으면) 원래대로 정직하게 종료한다.
+        if (next.kind === 'stop') {
+          stopReason = next.reason;
+          stopDetail = next.detail || null;
+          stopSource = next.source || null;
+          if (
+            stopReason === STOP_REASONS.WAITING
+            || stopReason === STOP_REASONS.DELEGATION_PENDING
+            || stopReason === STOP_REASONS.BLOCKED_ONLY
+            || stopReason === STOP_REASONS.ALL_CLOSED
+            || stopReason === STOP_REASONS.GRAPH_CLOSED_UNAPPROVED
+          ) {
+            logEvent(eventsPath, { timestamp: isoNow(), type: stopReason, runId, detail: stopDetail, source: stopSource });
+            appendRunLog(runDir, `${isoNow()} ${stopReason}${stopDetail ? ` ${stopDetail}` : ''}`);
+          }
+          break;
+        }
+      }
+
+      const activeSnapshot = parsed.snapshots.get(parsed.project.activeSnapshotId) || null;
+      // 수렴 압력 게이트 — pickNextAction 결과의 **후처리**. 순수 선택기(pickNextAction/computeNextAction/
+      // explainWork)는 무변경이라 navigation 경로 테스트가 그대로 보존된다.
+      const pressure = computeConvergencePressure({
+        parsed,
+        activeSnapshot,
+        task: next.task,
+        stepsRun,
+        maxSteps,
+        wallStartMs,
+        maxWallClockMs,
+        config: convergenceConfig,
+        debtCriticalStreak,
+      });
+      debtCriticalStreak = Number(pressure.snapshot?.debt?.criticalStreak) || 0;
+      const gateLevelAtDispatch = pressure.level;
+      const grantsUsedAtDispatch = convergenceStats.extensions.granted;
+      const maxExtensionGrants = convergenceConfig.extension.maxGrants;
+      const extensionWindowOpen = (
+        gateLevelAtDispatch === 'soft'
+        && convergenceConfig.mode === 'enforce'
+        && maxExtensionGrants > 0
+        && grantsUsedAtDispatch < maxExtensionGrants
+      );
+      const convergenceAtDispatch = {
+        level: gateLevelAtDispatch,
+        mode: convergenceConfig.mode,
+        firedAxes: [...pressure.firedAxes],
+        decompositionFeedback: next.task?.decompositionQuality ?? lastDecompositionQuality,
+        debt: debtPromptSummary(pressure.snapshot?.debt),
+        extensionWindowOpen,
+        grantsRemaining: Math.max(0, maxExtensionGrants - grantsUsedAtDispatch),
+      };
+      convergenceStats.levelTrail.push({
+        step: stepsRun + 1,
+        level: gateLevelAtDispatch,
+        firedAxes: [...pressure.firedAxes],
+      });
+      const gate = applyConvergencePressure({
+        next, parsed, activeSnapshot, pressure,
+        config: convergenceConfig, targetTaskId, eventsPath, runId, runDir,
+        hasExecutedStep: actions.some((action) => action?.kind === 'execute'),
+      });
+      if (pressure.level !== 'none') {
+        convergenceStats.axesSnapshotLast = pressure.snapshot;
+        if (pressure.level === 'hard') convergenceStats.hardFires += 1;
+        else convergenceStats.softFires += 1;
+      }
+      if (gate.blocked) {
+        convergenceStats.blockedNoCandidate += 1;
+        stopReason = gate.stopReason;
+        stopDetail = gate.stopDetail;
+        stopSource = next.task ? { type: 'task', id: next.task.id } : null;
+        logEvent(eventsPath, { timestamp: isoNow(), type: stopReason, runId, detail: stopDetail, source: stopSource });
+        appendRunLog(runDir, `${isoNow()} ${stopReason} ${stopDetail}`);
         break;
       }
+      next = gate.next;
+      const convergenceForced = next.convergence?.forced === true;
+      if (next.convergence?.demoted === true) convergenceStats.readinessDemotions += 1;
+      if (convergenceForced) convergenceStats.forcedExecutes += 1;
 
       let stepTimeoutMs = taskTimeoutMs;
       if (until != null) {
@@ -6188,12 +8477,14 @@ export function runTaskOps(workDir, options = {}) {
         if (remaining <= 0) { stopReason = STOP_REASONS.DEADLINE_REACHED; break; }
         if (stepTimeoutMs == null || remaining < stepTimeoutMs) stepTimeoutMs = remaining;
       }
-      const activeSnapshot = parsed.snapshots.get(parsed.project.activeSnapshotId) || null;
-      const stepBudget = budgetWithExpectedPlanCoordinate(finalBudget, {
+      const baseStepBudget = budgetWithExpectedPlanCoordinate(finalBudget, {
         parsed,
         task: next.task,
         activeSnapshot,
       });
+      const stepBudget = convergenceForced
+        ? { ...baseStepBudget, convergence: { mode: convergenceConfig.mode, forced: true, firedAxes: next.convergence.firedAxes } }
+        : baseStepBudget;
 
       let stepResult;
       if (next.kind === 'execute') {
@@ -6203,7 +8494,10 @@ export function runTaskOps(workDir, options = {}) {
           budget: stepBudget,
           delegationMode,
           selfResolutionGuide,
-          verifyRequiredChecks,
+          convergence: convergenceAtDispatch,
+          // 강제 실행 스텝은 반드시 runner-검증된다: 'policy-approving 인데 실행가능 체크 0개' 거부(L3)가
+          // 살아 있어야 강제 실행이 자기보고로 닫히지 않는다.
+          verifyRequiredChecks: convergenceForced ? true : verifyRequiredChecks,
           verifyRetries,
           escalateOnSaturation,
           escalationResolvers,
@@ -6212,6 +8506,9 @@ export function runTaskOps(workDir, options = {}) {
         stepResult = executeDecompositionTask({
           projectDir, parsed, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
+          childAcceptancePropagation,
+          convergence: convergenceAtDispatch,
+          decompositionMaxRetries: convergenceConfig.decomposition.maxRetries,
           budget: stepBudget,
           delegationMode,
         });
@@ -6219,6 +8516,7 @@ export function runTaskOps(workDir, options = {}) {
         stepResult = executeExplorationTask({
           projectDir, project: parsed.project, task: next.task,
           runDir, runId, eventsPath, executor, agentId, stepTimeoutMs,
+          convergence: convergenceAtDispatch,
           budget: stepBudget,
         });
       } else if (next.kind === 'prototype') {
@@ -6231,14 +8529,183 @@ export function runTaskOps(workDir, options = {}) {
         throw new Error(`Unhandled action kind: ${next.kind}`);
       }
 
+      if (
+        stepResult?.kind === 'decompose'
+        && stepResult.decompositionQuality
+        && typeof stepResult.decompositionQuality === 'object'
+        && !Array.isArray(stepResult.decompositionQuality)
+      ) {
+        const measured = stepResult.decompositionQuality;
+        lastDecompositionQuality = {
+          childCount: normalizeNonNegativeInteger(measured.childCount) ?? 0,
+          executableChildrenCount: normalizeNonNegativeInteger(measured.executableChildrenCount) ?? 0,
+          runnableCount: normalizeNonNegativeInteger(measured.runnableCount) ?? 0,
+          verifiableCount: normalizeNonNegativeInteger(measured.verifiableCount) ?? 0,
+          planningCount: normalizeNonNegativeInteger(measured.planningCount) ?? 0,
+          blockedCount: normalizeNonNegativeInteger(measured.blockedCount) ?? 0,
+          unresolvedBlockerCount: normalizeNonNegativeInteger(measured.unresolvedBlockerCount) ?? 0,
+          attempt: normalizeNonNegativeInteger(measured.attempt) ?? 1,
+        };
+        const decompositionStats = convergenceStats.decomposition;
+        decompositionStats.evaluated += 1;
+        decompositionStats.lastExecutableChildrenCount = lastDecompositionQuality.executableChildrenCount;
+        if (lastDecompositionQuality.executableChildrenCount === 0) decompositionStats.executableZero += 1;
+        if (stepResult.status === 'rejected_low_quality' || stepResult.status === 'blocked_honest') {
+          decompositionStats.rejected += 1;
+        }
+        if (stepResult.status === 'rejected_low_quality' && stepResult.fallback !== true) {
+          decompositionStats.retried += 1;
+        }
+        if (stepResult.fallback === true) decompositionStats.fallbackParentExecute += 1;
+        if (stepResult.status === 'blocked_honest') decompositionStats.honestBlocked += 1;
+        updateMarkdownFrontmatter(join(runDir, 'index.md'), (fm) => {
+          fm.convergenceDecompositionFeedback = { ...lastDecompositionQuality };
+          return fm;
+        });
+      }
+
+      // 세 실행 경로는 파싱 결과만 올리고, 승인/거부와 예산 변경은 이 런루프 한 곳에서만 판정한다.
+      const extensionRequest = stepResult?.budgetExtensionRequest;
+      if (extensionRequest) {
+        const requestedAt = isoNow();
+        const extensionStats = convergenceStats.extensions;
+        const taskId = stepResult.taskId || next.task?.id || null;
+        const kind = stepResult.kind || next.kind;
+        const audit = budgetExtensionAuditFields(extensionRequest);
+        extensionStats.requested += 1;
+        logEvent(eventsPath, {
+          timestamp: requestedAt,
+          type: 'convergence_extension_requested',
+          runId,
+          taskId,
+          kind,
+          level: gateLevelAtDispatch,
+          reason: audit.reason,
+          evidenceCount: audit.evidenceCount,
+          evidence: audit.evidence,
+          requestedSteps: audit.requestedSteps,
+          rawLine: audit.rawLine,
+        });
+        appendRunLog(runDir, `${requestedAt} convergence_extension_requested taskId=${taskId || ''} kind=${kind} level=${gateLevelAtDispatch} reason=${audit.reason}`);
+
+        const evaluation = evaluateExtensionRequest({
+          request: extensionRequest,
+          level: gateLevelAtDispatch,
+          mode: convergenceConfig.mode,
+          grantsUsed: extensionStats.granted,
+          maxGrants: convergenceConfig.extension.maxGrants,
+        });
+        if (extensionRequest.malformed === true) {
+          logEvent(eventsPath, {
+            timestamp: isoNow(),
+            type: 'convergence_extension_malformed',
+            runId,
+            taskId,
+            kind,
+            level: gateLevelAtDispatch,
+            rawLine: audit.rawLine,
+          });
+          appendRunLog(runDir, `${isoNow()} convergence_extension_malformed taskId=${taskId || ''} level=${gateLevelAtDispatch}`);
+        }
+
+        if (evaluation?.decision === 'granted') {
+          const stepsBefore = maxSteps;
+          const wallBefore = maxWallClockMs;
+          if (maxSteps != null) maxSteps += Math.ceil(initialMaxSteps * convergenceConfig.extension.fraction);
+          // budgetPressure는 step 축과 wall 축 중 더 많이 소진된 쪽을 OR로 쓴다. 1차 실측 hard 발화는
+          // wall 0.821이었으므로 step만 늘리면 wall 축이 hard에 고정되어 승인이 즉시 무효가 된다.
+          // 두 축을 한 grant로 함께 세어 상한 의미를 보존하며, wall cap이 없는 런은 그 축만 조용히 건너뛴다.
+          if (maxWallClockMs != null) {
+            maxWallClockMs += Math.ceil(initialMaxWallClockMs * convergenceConfig.extension.fraction);
+          }
+          const grantIndex = extensionStats.granted + 1;
+          const grantedAt = isoNow();
+          const grantRecord = {
+            at: grantedAt,
+            taskId,
+            kind,
+            level: gateLevelAtDispatch,
+            grantIndex,
+            stepsBefore,
+            stepsAfter: maxSteps,
+            wallBefore,
+            wallAfter: maxWallClockMs,
+            reason: audit.reason,
+          };
+          extensionStats.granted += 1;
+          extensionStats.grants.push(grantRecord);
+          extensionStats.finalMaxSteps = maxSteps;
+          extensionStats.finalMaxWallClockMs = maxWallClockMs;
+          logEvent(eventsPath, {
+            timestamp: grantedAt,
+            type: 'convergence_extension_granted',
+            runId,
+            taskId,
+            kind,
+            level: gateLevelAtDispatch,
+            grantIndex,
+            stepsBefore,
+            stepsAfter: maxSteps,
+            wallBefore,
+            wallAfter: maxWallClockMs,
+            reason: audit.reason,
+          });
+          appendRunLog(runDir, `${grantedAt} convergence_extension_granted taskId=${taskId || ''} grantIndex=${grantIndex} steps=${stepsBefore}->${maxSteps} wall=${wallBefore}->${maxWallClockMs} reason=${audit.reason}`);
+        } else {
+          const rejectedAt = isoNow();
+          const rejectionReason = evaluation?.rejectionReason || 'insufficient_evidence';
+          extensionStats.rejected += 1;
+          extensionStats.rejections.push({
+            at: rejectedAt,
+            taskId,
+            kind,
+            level: gateLevelAtDispatch,
+            rejectionReason,
+            reason: audit.reason,
+          });
+          logEvent(eventsPath, {
+            timestamp: rejectedAt,
+            type: 'convergence_extension_rejected',
+            runId,
+            taskId,
+            kind,
+            rejectionReason,
+            level: gateLevelAtDispatch,
+          });
+          appendRunLog(runDir, `${rejectedAt} convergence_extension_rejected taskId=${taskId || ''} level=${gateLevelAtDispatch} rejectionReason=${rejectionReason}`);
+        }
+
+        updateMarkdownFrontmatter(next.task.path, (fm) => {
+          appendBudgetExtensionRequestEntry(fm, {
+            at: requestedAt,
+            level: gateLevelAtDispatch,
+            decision: evaluation?.decision || 'rejected',
+            reason: sanitizeFmScalar(audit.reason, { fallback: '' }),
+            evidenceCount: audit.evidenceCount,
+            ...(evaluation?.decision === 'rejected'
+              ? { rejectionReason: evaluation.rejectionReason || 'insufficient_evidence' }
+              : {}),
+          });
+          return fm;
+        });
+      }
+
       actions.push(stepResult);
       stepsRun += 1;
 
+      // rejected_low_quality / blocked_honest 는 품질 게이트가 정직하게 닫은 정상 스텝이다.
+      // 완료 task 집계로 승격하지 않고, 오직 실제 실행 실패만 아래 task_failed 분기에 들어간다.
       if (stepResult.status === 'failed') {
         // continue-on-failure: a caught fake / un-completable step is already surfaced as a blocked stall
         // (pickNextAction skips it), so ISOLATE it and keep making honest progress on independent runnable
         // work instead of halting the whole run. The run still ends honestly (blocked_only surfaces the stall;
         // never all_closed while a blocker remains). Composes with --verify-checks for honest-monotone runs.
+        if (continueOnFailure && stepResult.failurePhase === 'postprocess') {
+          // 파싱 불가 산출물이 남은 그래프를 다시 읽지 않고, 실패를 반환한 채 런을 정직하게 멈춘다.
+          stopReason = STOP_REASONS.TASK_FAILED;
+          stopDetail = '분해 후처리에 실패했습니다. 파싱 불가 자식 산출물을 복구하기 전에는 안전하게 계속할 수 없습니다.';
+          break;
+        }
         if (continueOnFailure) continue;
         stopReason = STOP_REASONS.TASK_FAILED;
         break;
@@ -6251,12 +8718,48 @@ export function runTaskOps(workDir, options = {}) {
       .map((action) => action?.partialCompletion)
       .filter(Boolean);
 
+    // blocked_only 사다리 집계는 Set 을 노출하지 않고 감사 가능한 스칼라/배열로만 싣는다.
+    convergenceStats.blockedOnlyLadder = {
+      attempts: blockedOnlyLadder.attempts,
+      forcedExecutes: blockedOnlyLadder.forcedExecutes,
+      exhausted: blockedOnlyLadder.exhausted,
+      errors: blockedOnlyLadder.errors,
+      maxAttempts: BLOCKED_ONLY_LADDER_MAX_ATTEMPTS,
+      rescuedTaskIds: [...blockedOnlyLadder.rescuedTaskIds],
+    };
+    convergenceStats.extensions.finalMaxSteps = maxSteps;
+    convergenceStats.extensions.finalMaxWallClockMs = maxWallClockMs;
     const stoppedAt = isoNow();
-    const workStatusClosure = finalizeWorkStatusForClosure(projectDir, {
-      runId,
-      closedAt: stoppedAt,
-      allowConcurrentTarget,
+    updateMarkdownFrontmatter(join(runDir, 'index.md'), (fm) => {
+      fm.convergenceExtensions = {
+        ...convergenceStats.extensions,
+        grants: convergenceStats.extensions.grants.map((entry) => ({ ...entry })),
+        rejections: convergenceStats.extensions.rejections.map((entry) => ({ ...entry })),
+      };
+      fm.convergenceDecomposition = { ...convergenceStats.decomposition };
+      return fm;
     });
+    appendRunLog(
+      runDir,
+      `${stoppedAt} convergence_extensions requested=${convergenceStats.extensions.requested} granted=${convergenceStats.extensions.granted} rejected=${convergenceStats.extensions.rejected} initialMaxSteps=${initialMaxSteps} finalMaxSteps=${maxSteps} initialMaxWallClockMs=${initialMaxWallClockMs} finalMaxWallClockMs=${maxWallClockMs}`,
+    );
+    const decompositionPostprocessFailure = actions.find((action) => action?.failurePhase === 'postprocess');
+    // malformed 자식 때문에 closure 재평가가 다시 throw하지 않도록 상태를 닫지 않고 open으로 남긴다.
+    const workStatusClosure = decompositionPostprocessFailure
+      ? {
+          complete: false,
+          updated: false,
+          previousStatus: parsed.project.status || null,
+          status: parsed.project.status || null,
+          closureState: 'open',
+          validationErrors: [decompositionPostprocessFailure.message],
+          reason: 'decomposition_postprocess_failed',
+        }
+      : finalizeWorkStatusForClosure(projectDir, {
+          runId,
+          closedAt: stoppedAt,
+          allowConcurrentTarget,
+        });
     if (workStatusClosure.updated) {
       logEvent(eventsPath, {
         timestamp: stoppedAt, type: 'work_status_closed', runId,
@@ -6285,6 +8788,8 @@ export function runTaskOps(workDir, options = {}) {
       partialCompletions,
       workStatusClosure,
       eventsPath,
+      // additive — 기존 필드/assert 에 영향 없음.
+      convergence: convergenceStats,
       tasks: actions,
       actions,
     };

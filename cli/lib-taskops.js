@@ -638,13 +638,101 @@ export function parseFrontmatterText(content, filePath = '<inline>') {
     else container[key] = value;
   };
 
+  const parseBlockScalarMarker = (value) => {
+    const match = /^([|>])([+-])?$/.exec(value);
+    if (!match) return null;
+    return { style: match[1], chomping: match[2] || '' };
+  };
+
+  const readBlockScalar = (startIndex, keyIndent, marker) => {
+    const rawBlockLines = [];
+    let lastIndex = startIndex - 1;
+    for (let cursor = startIndex; cursor < end; cursor++) {
+      const line = lines[cursor];
+      if (line.trim()) {
+        const lineIndent = line.match(/^\s*/)[0].length;
+        if (lineIndent <= keyIndent) break;
+      }
+      rawBlockLines.push(line);
+      lastIndex = cursor;
+    }
+
+    const contentIndents = rawBlockLines
+      .filter((line) => line.trim())
+      .map((line) => line.match(/^\s*/)[0].length);
+    const contentIndent = contentIndents.length > 0 ? Math.min(...contentIndents) : keyIndent + 1;
+    const blockLines = rawBlockLines.map((line) => line.trim() ? line.slice(contentIndent) : '');
+
+    let value;
+    if (marker.style === '|') {
+      value = blockLines.join('\n');
+    } else {
+      value = '';
+      for (let cursor = 0; cursor < blockLines.length;) {
+        if (blockLines[cursor] === '') {
+          let blankCount = 0;
+          while (cursor < blockLines.length && blockLines[cursor] === '') {
+            blankCount += 1;
+            cursor += 1;
+          }
+          value += '\n'.repeat(blankCount);
+          continue;
+        }
+        const foldedLines = [];
+        while (cursor < blockLines.length && blockLines[cursor] !== '') {
+          foldedLines.push(blockLines[cursor]);
+          cursor += 1;
+        }
+        value += foldedLines.join(' ');
+      }
+    }
+
+    value = value.replace(/\n+$/, '');
+    // 경량 파서의 keep(+)은 명세가 허용한 범위에서 clip과 동일하게 처리한다.
+    if (marker.chomping !== '-' && value !== '') value += '\n';
+    return { value, lastIndex };
+  };
+
+  const readPlainScalar = (startIndex, keyIndent, firstValue) => {
+    const scalarLines = [firstValue];
+    let lastIndex = startIndex - 1;
+    for (let cursor = startIndex; cursor < end; cursor++) {
+      const line = lines[cursor];
+      const trimmedLine = line.trim();
+      if (!trimmedLine || trimmedLine.startsWith('#')) break;
+      const lineIndent = line.match(/^\s*/)[0].length;
+      if (lineIndent <= keyIndent) break;
+      if (trimmedLine.startsWith('- ')) break;
+      if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(trimmedLine)) break;
+      scalarLines.push(trimmedLine);
+      lastIndex = cursor;
+    }
+
+    const folded = scalarLines.join(' ');
+    const parsed = parseScalar(folded);
+    return {
+      value: scalarLines.length > 1 ? folded : parsed,
+      lastIndex,
+    };
+  };
+
   for (let i = 1; i < end; i++) {
     const raw = lines[i];
     if (!raw.trim() || raw.trim().startsWith('#')) continue;
     const indent = raw.match(/^\s*/)[0].length;
     const trimmed = raw.trim();
 
-    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+    while (stack.length > 1) {
+      const top = stack[stack.length - 1];
+      if (indent > top.indent) break;
+      if (
+        indent === top.indent
+        && top.kind === 'array'
+        && top.sameIndentSequence === true
+        && trimmed.startsWith('- ')
+      ) break;
+      stack.pop();
+    }
     const parent = stack[stack.length - 1];
 
     if (trimmed.startsWith('- ')) {
@@ -659,11 +747,18 @@ export function parseFrontmatterText(content, filePath = '<inline>') {
         const idx = itemText.indexOf(':');
         const key = itemText.slice(0, idx).trim();
         const rest = itemText.slice(idx + 1).trim();
+        const blockScalar = parseBlockScalarMarker(rest);
         if (rest === '') {
           obj[key] = [];
           stack.push({ indent: indent + 2, container: obj[key], kind: 'array' });
+        } else if (blockScalar) {
+          const block = readBlockScalar(i + 1, indent + 2, blockScalar);
+          obj[key] = block.value;
+          i = block.lastIndex;
         } else {
-          obj[key] = parseScalar(rest);
+          const scalar = readPlainScalar(i + 1, indent + 2, rest);
+          obj[key] = scalar.value;
+          i = scalar.lastIndex;
         }
       }
       continue;
@@ -673,15 +768,24 @@ export function parseFrontmatterText(content, filePath = '<inline>') {
     if (idx === -1) throw new Error(`Invalid frontmatter line in ${filePath}: ${raw}`);
     const key = trimmed.slice(0, idx).trim();
     const rest = trimmed.slice(idx + 1).trim();
+    const blockScalar = parseBlockScalarMarker(rest);
     if (rest === '') {
       const next = lines.slice(i + 1, end).find((line) => line.trim());
       const nextTrimmed = next ? next.trim() : '';
       const nextIndent = next ? next.match(/^\s*/)[0].length : indent + 2;
-      const container = nextTrimmed.startsWith('- ') && nextIndent > indent ? [] : {};
+      const container = nextTrimmed.startsWith('- ') && nextIndent >= indent ? [] : {};
       setValue(parent.container, key, container);
-      stack.push({ indent, container, kind: Array.isArray(container) ? 'array' : 'object' });
+      const frame = { indent, container, kind: Array.isArray(container) ? 'array' : 'object' };
+      if (Array.isArray(container) && nextIndent === indent) frame.sameIndentSequence = true;
+      stack.push(frame);
+    } else if (blockScalar) {
+      const block = readBlockScalar(i + 1, indent, blockScalar);
+      setValue(parent.container, key, block.value);
+      i = block.lastIndex;
     } else {
-      setValue(parent.container, key, parseScalar(rest));
+      const scalar = readPlainScalar(i + 1, indent, rest);
+      setValue(parent.container, key, scalar.value);
+      i = scalar.lastIndex;
     }
   }
 
