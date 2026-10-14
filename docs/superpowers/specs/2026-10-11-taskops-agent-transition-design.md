@@ -1,6 +1,7 @@
 # TaskOps 독립 CLI agent 전환 설계 — 2026-10-11
 
 상태: **사용자 검토용 제안. 구현 전 설계 확인 대기.**
+이 문서는 2026-10-13 설계로 대체됨: [2026-10-13-belay-harness-cli-design.md](/home/jimmy/workspace/taskops/docs/superpowers/specs/2026-10-13-belay-harness-cli-design.md)
 사용자는 자체 모델 호출·세션·실행 루프를 관리하는 독립 CLI agent 방향을 선택했다.
 현재 코드 검토와 실행 증거는
 [2026-10-11-taskops-agent-review.md](/home/jimmy/workspace/taskops/docs/reviews/2026-10-11-taskops-agent-review.md)에 있다.
